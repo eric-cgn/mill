@@ -1,0 +1,236 @@
+#include <stdio.h>
+#include <string.h>
+
+#include "url.h"
+
+static int prefix_ci(const char *s, const char *p)
+{
+    while (*p) { if ((*s | 32) != *p) return 0; s++; p++; }
+    return 1;
+}
+
+static const char *SCHEMES[] = { "http://", "file://", "mill://" };
+
+static int hex(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1;
+}
+
+/* n bytes of s, with %XX decoded, into out */
+static void decode(const char *s, long n, char *out, int size)
+{
+    int o = 0;
+    long i;
+    for (i = 0; i < n && o < size - 1; i++) {
+        if (s[i] == '%' && i + 2 < n && hex(s[i + 1]) >= 0 && hex(s[i + 2]) >= 0) {
+            out[o++] = (char)(hex(s[i + 1]) * 16 + hex(s[i + 2]));
+            i += 2;
+        } else out[o++] = s[i];
+    }
+    out[o] = 0;
+}
+
+/* Where an address's host part starts and ends (after "scheme://", before the path) */
+static const char *authority(const char *url, const char **end)
+{
+    const char *s = strstr(url, "://");
+    s = s ? s + 3 : url;
+    for (*end = s; **end && **end != '/' && **end != '?' && **end != '#'; (*end)++) {}
+    return s;
+}
+
+int url_parse(const char *s, Url *u)
+{
+    const char *p, *end;
+    long n;
+    int k;
+    memset(u, 0, sizeof *u);
+    u->port = 80;
+    while (*s == ' ') s++;
+    for (k = 0; k < 3 && !prefix_ci(s, SCHEMES[k]); k++) {}
+    if (k < 3) { u->scheme = (char)k; s += 7; }
+    else if (strstr(s, "://")) return -1;
+    for (end = s; *end && *end != '/' && *end != '?' && *end != '#'; end++) {}
+    /* user:password@ before the host (the last @, as a password may hold one) */
+    for (p = end; p > s && p[-1] != '@'; p--) {}
+    if (p > s) {
+        const char *colon = memchr(s, ':', p - 1 - s);
+        if (colon) {
+            decode(s, colon - s, u->user, sizeof u->user);
+            decode(colon + 1, p - 1 - colon - 1, u->pass, sizeof u->pass);
+        } else decode(s, p - 1 - s, u->user, sizeof u->user);
+        s = p;
+    }
+    n = end - s;
+    if (n >= (long)sizeof u->host || (n == 0 && u->scheme != SCHEME_FILE)) return -1;
+    memcpy(u->host, s, n);
+    if (u->scheme == SCHEME_MILL) for (k = 0; u->host[k]; k++) u->host[k] |= 32;  /* mill://About is mill://about */
+    if (u->scheme == SCHEME_HTTP && (p = strchr(u->host, ':'))) {
+        u->port = 0;
+        for (p++; *p >= '0' && *p <= '9'; p++) u->port = (unsigned short)(u->port * 10 + (*p - '0'));
+        *strchr(u->host, ':') = 0;
+    }
+    p = end;
+    if (*p != '/') { strcpy(u->path, "/"); }
+    {
+        const char *hash = strchr(p, '#');
+        long plen = hash ? hash - p : (long)strlen(p);
+        long at = (*p != '/') ? 1 : 0;
+        if (plen + at >= (long)sizeof u->path) plen = sizeof u->path - 1 - at;
+        memcpy(u->path + at, p, plen);
+        u->path[at + plen] = 0;
+        if (hash) { strncpy(u->fragment, hash + 1, sizeof u->fragment - 1); }
+    }
+    return 0;
+}
+
+void url_format(const Url *u, char *out, int out_size)
+{
+    if (u->scheme == SCHEME_FILE) snprintf(out, out_size, "file://%s", u->path);
+    else if (u->scheme == SCHEME_MILL) snprintf(out, out_size, "mill://%s%s", u->host, strcmp(u->path, "/") ? u->path : "");
+    else if (u->port == 80) snprintf(out, out_size, "http://%s%s", u->host, u->path);
+    else snprintf(out, out_size, "http://%s:%u%s", u->host, u->port, u->path);
+    if (u->user[0]) {
+        char with[300];
+        if (!url_with_login(out, u->user, u->pass, with, sizeof with)) snprintf(out, out_size, "%s", with);
+    }
+}
+
+void url_strip_login(char *url)
+{
+    const char *end, *s = authority(url, &end), *at;
+    for (at = end; at > s && at[-1] != '@'; at--) {}
+    if (at > s) memmove((char *)s, at, strlen(at) + 1);
+}
+
+/* s %-encoded so it can't end the user or password early */
+static int encode(const char *s, char *out, int size)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    int o = 0;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c <= ' ' || c >= 127 || strchr(":@/?#%[]\\", c)) {
+            if (o + 3 >= size) return -1;
+            out[o++] = '%';
+            out[o++] = digits[c >> 4];
+            out[o++] = digits[c & 15];
+        } else {
+            if (o + 1 >= size) return -1;
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = 0;
+    return o;
+}
+
+int url_with_login(const char *url, const char *user, const char *pass, char *out, int out_size)
+{
+    char bare[300], u[200], p[200];
+    const char *end, *s;
+    snprintf(bare, sizeof bare, "%s", url);
+    url_strip_login(bare);
+    if (!user[0]) { snprintf(out, out_size, "%s", bare); return 0; }
+    if (encode(user, u, sizeof u) < 0 || encode(pass, p, sizeof p) < 0) return -1;
+    s = authority(bare, &end);
+    if ((int)(strlen(bare) + strlen(u) + strlen(p) + 3) > out_size) return -1;
+    snprintf(out, out_size, "%.*s%s%s%s@%s", (int)(s - bare), bare, u, pass[0] ? ":" : "", p, s);
+    return 0;
+}
+
+/* Remove "." and ".." segments from an absolute path, in place */
+static void normalize(char *path)
+{
+    char out[256];
+    long o = 0;
+    const char *p = path;
+    char *q = strchr(path, '?');
+    char query[256] = "";
+    if (q) { strncpy(query, q, sizeof query - 1); *q = 0; }
+    while (*p) {
+        const char *seg = p + 1, *next = strchr(seg, '/');
+        long len = next ? next - seg : (long)strlen(seg);
+        if (len == 1 && seg[0] == '.') { if (!next) out[o++] = '/'; }
+        else if (len == 2 && seg[0] == '.' && seg[1] == '.') {
+            /* drop the last segment written */
+            while (o > 0 && out[o - 1] != '/') o--;
+            if (o > 0) o--;
+            if (!next) out[o++] = '/';
+        } else {
+            if (o + len + 1 >= (long)sizeof out) break;
+            out[o++] = '/';
+            memcpy(out + o, seg, len);
+            o += len;
+        }
+        if (!next) break;
+        p = next;
+    }
+    if (o == 0) out[o++] = '/';
+    out[o] = 0;
+    {
+        long ql = strlen(query);
+        if (o + ql > 255) ql = 255 - o;
+        memcpy(path, out, o);
+        memcpy(path + o, query, ql);
+        path[o + ql] = 0;
+    }
+}
+
+/* A colon before any '/', '?' or '#' means a scheme Mill doesn't know */
+static int other_scheme(const char *href)
+{
+    const char *colon = strchr(href, ':'), *first = strpbrk(href, "/?#");
+    return colon && (!first || colon < first);
+}
+
+int url_resolve(const char *base, const char *href, char *out, int out_size)
+{
+    Url b, r;
+    while (*href == ' ') href++;
+    if (prefix_ci(href, "http://") || prefix_ci(href, "file://") || prefix_ci(href, "mill://")) {
+        if (url_parse(href, &r)) return -1;
+        normalize(r.path);
+    } else if (other_scheme(href)) {
+        return -1;  /* mailto:, ftp:, javascript: ... */
+    } else {
+        if (url_parse(base, &b)) return -1;
+        r = b;
+        r.fragment[0] = 0;
+        if (href[0] == '#') {
+            strncpy(r.fragment, href + 1, sizeof r.fragment - 1);
+        } else if (href[0] == '/' && href[1] == '/') {
+            char tmp[300];
+            snprintf(tmp, sizeof tmp, "%.4s:%s", SCHEMES[(int)b.scheme], href);
+            if (url_parse(tmp, &r)) return -1;
+        } else {
+            char path[300];
+            const char *hash = strchr(href, '#');
+            long hlen = hash ? hash - href : (long)strlen(href);
+            if (href[0] == '/') {
+                snprintf(path, sizeof path, "%.*s", (int)hlen, href);
+            } else if (href[0] == '?') {
+                char *q = strchr(b.path, '?');
+                if (q) *q = 0;
+                snprintf(path, sizeof path, "%s%.*s", b.path, (int)hlen, href);
+            } else {
+                char dir[256];
+                char *q = strchr(b.path, '?'), *slash;
+                if (q) *q = 0;
+                strcpy(dir, b.path);
+                slash = strrchr(dir, '/');
+                if (slash) slash[1] = 0;
+                snprintf(path, sizeof path, "%s%.*s", dir, (int)hlen, href);
+            }
+            strncpy(r.path, path, sizeof r.path - 1);
+            r.path[sizeof r.path - 1] = 0;
+            normalize(r.path);
+            if (hash) strncpy(r.fragment, hash + 1, sizeof r.fragment - 1);
+        }
+    }
+    url_format(&r, out, out_size);
+    if (r.fragment[0] && (int)(strlen(out) + strlen(r.fragment) + 2) < out_size) {
+        strcat(out, "#");
+        strcat(out, r.fragment);
+    }
+    return 0;
+}

@@ -1,0 +1,67 @@
+# A tag vX.Y.Z (matching src/version.h) builds Mill, makes a GitHub release with its
+# .hqx, .bin, and .dsk, and rebuilds the download site (mill.1in1e6.com) from every
+# release. Run it by hand to rebuild the site alone.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Check the tag against src/version.h
+        run: |
+          v=$(sed -n 's/^#define MILL_VERSION "\(.*\)"/\1/p' src/version.h)
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match MILL_VERSION $v"
+            exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      - name: Test
+        run: tests/run.sh
+      - name: Build
+        run: ./build.sh
+      - name: Release files
+        run: python3 tools/release.py
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/site.py notes "$VERSION" > notes.txt
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Mill $VERSION" --notes-file notes.txt
+
+  site:
+    needs: release
+    if: always() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Every release's files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site/download
+          gh release list --limit 100 --json tagName -q '.[].tagName' | while read -r tag; do
+            gh release download "$tag" --dir site/download --pattern 'Mill-*'
+          done
+      - name: Page
+        run: python3 tools/site.py site site
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1

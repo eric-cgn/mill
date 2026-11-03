@@ -1,0 +1,9 @@
+TJpgDec R0.03, ChaN's Tiny JPEG Decompressor (http://elm-chan.org/fsw/tjpgd/),
+from https://elm-chan.org/fsw/tjpgd/arc/tjpgd3.zip
+  sha256 052fe3efbc9a8be29f31597ad009c5b51a4f6905878eb28569e0ab3d46d0c013
+
+tjpgd.c and tjpgd.h are unchanged. tjpgdcnf.h is changed in one line: JD_FORMAT 2,
+grayscale output, since Mill dithers everything to black and white.
+
+License (from tjpgd.c): free software, no restriction on use; redistributions of
+source code must retain the copyright notice.
