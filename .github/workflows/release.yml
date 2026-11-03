@@ -1,6 +1,6 @@
-# A tag vX.Y.Z (matching src/version.h) builds Mill, makes a GitHub release with its
-# .hqx, .bin, and .dsk, and rebuilds the download site (mill.1in1e6.com) from every
-# release. Run it by hand to rebuild the site alone.
+# A tag vX.Y.Z on a commit in main (matching src/version.h) builds Mill, makes a GitHub
+# release with its .hqx, .bin, and .dsk, and rebuilds the download site (mill.1in1e6.com)
+# from every release. Run it by hand to rebuild the site alone.
 name: Release
 
 on:
@@ -16,6 +16,14 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check the tag is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME isn't on main"
+            exit 1
+          fi
       - name: Check the tag against src/version.h
         run: |
           v=$(sed -n 's/^#define MILL_VERSION "\(.*\)"/\1/p' src/version.h)
