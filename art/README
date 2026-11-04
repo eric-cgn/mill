@@ -5,3 +5,5 @@ From https://commons.wikimedia.org/wiki/File:Don_Quixote_fighting_windmills.jpg
   sha256 fad2399819f9086d29864714a7606357e0cccb46effbf48b4b7abeadea9d8207
 
 Used on Mill's splash screen (src/splash.r) and about.
+
+icon.gif: the Finder icon, written by tools/icons.py; shown on the download site.

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 '''Mill's icons, drawn as ASCII art ('#' = black): writes src/mac_icons.h (toolbar
-bitmaps and the windmill's sail frames) and src/icons.r (the Finder icon).
+bitmaps and the windmill's sail frames), src/icons.r (the Finder icon), and
+art/icon.gif (the Finder icon for the download site).
 Run after editing: python3 tools/icons.py'''
 
 import os
+import struct
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, '..', 'src')
+ART = os.path.join(HERE, '..', 'art')
 
 BACK = '''
 ....#....
@@ -200,6 +203,34 @@ def silhouette(art):
     return '\n'.join(''.join('.' if (x, y) in outside else '#' for x in range(w)) for y in range(h))
 
 
+def gif(art, mask):
+    '''A GIF89a of an icon: black and white inside its mask, transparent outside.
+    The LZW stream is all literals, with a clear code every two so codes stay 3 bits.'''
+    g, m = rows(art), rows(mask)
+    h, w = len(g), len(g[0])
+    pixels = [(1 if g[y][x] == '#' else 0) if m[y][x] == '#' else 2 for y in range(h) for x in range(w)]
+    codes = []
+    for i in range(0, len(pixels), 2):
+        codes += [4] + pixels[i:i + 2]      # clear, then two literals
+    codes.append(5)                         # end of information
+    bits = acc = 0
+    data = bytearray()
+    for c in codes:
+        acc |= c << bits
+        bits += 3
+        while bits >= 8:
+            data.append(acc & 0xFF)
+            acc >>= 8
+            bits -= 8
+    if bits:
+        data.append(acc)
+    blocks = b''.join(bytes([len(data[i:i + 255])]) + data[i:i + 255] for i in range(0, len(data), 255))
+    return (b'GIF89a' + struct.pack('<HHBBB', w, h, 0x81, 0, 0) +
+            bytes([255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255]) +   # white, black, (transparent), unused
+            b'\x21\xf9\x04\x01\x00\x00\x02\x00' +                       # index 2 is transparent
+            b'\x2c' + struct.pack('<HHHHB', 0, 0, w, h, 0) + b'\x02' + blocks + b'\x00\x3b')
+
+
 def c_array(name, art):
     ws = words(art)
     body = ', '.join('0x%04X' % v for v in ws)
@@ -235,6 +266,8 @@ def main():
         f.write("data 'ICN#' (128, \"Mill\") {\n%s\n%s\n};\n" % (hex32(big), hex32(mask)))
         small = frame(2)
         f.write("data 'ics#' (128, \"Mill\") {\n%s\n%s\n};\n" % (hex16(small), hex16(fill_mask(small))))
+    with open(os.path.join(ART, 'icon.gif'), 'wb') as f:
+        f.write(gif(big, mask))
     print('\n'.join(a + '  ' + b for a, b in zip(rows(big), rows(mask))))
 
 
