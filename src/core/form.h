@@ -14,11 +14,13 @@ typedef struct {
     char type;
     char checked;       /* checkboxes and radio buttons */
     char multiple;      /* SELECT MULTIPLE */
+    char disabled;      /* DISABLED (HTML 4.0): shown dimmed, can't be changed, isn't sent */
     char *value;        /* what's typed (text, password, textarea), a hidden value, or a chosen file's path */
     long *options;      /* SELECT: its OPTION nodes */
     char *selected;     /* SELECT: whether each option is chosen */
     short noptions;
     short size, maxlength, rows, cols;
+    long scroll;        /* TEXTAREA: how far its text is scrolled up, in pixels (the Mac side's) */
 } Field;
 
 typedef struct { Field *fields; long n; } Forms;

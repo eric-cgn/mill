@@ -69,6 +69,7 @@ static void initial(Field *f, const Doc *d)
     short i;
     free(f->value);
     f->value = NULL;
+    f->scroll = 0;
     f->checked = html_attr(d, n, "checked") != NULL;
     if (f->type == FIELD_TEXTAREA) f->value = text_of(d, f->node);
     else if (f->type == FIELD_TEXT || f->type == FIELD_PASSWORD || f->type == FIELD_HIDDEN)
@@ -107,6 +108,7 @@ int forms_build(Forms *F, const Doc *d)
                                                        : (char)field_type(html_attr(d, n, "type"));
         f->name = html_attr(d, n, "name");
         f->multiple = n->tag == TAG_SELECT && html_attr(d, n, "multiple") != NULL;
+        f->disabled = html_attr(d, n, "disabled") != NULL;
         f->size = (v = html_attr(d, n, "size")) ? (short)atoi(v) : 0;
         f->maxlength = (v = html_attr(d, n, "maxlength")) ? (short)atoi(v) : 0;
         f->rows = (v = html_attr(d, n, "rows")) ? (short)atoi(v) : 0;
@@ -161,6 +163,7 @@ void forms_click(Forms *F, long index)
 {
     Field *f = &F->fields[index];
     long i;
+    if (f->disabled) return;
     if (f->type == FIELD_CHECKBOX) { f->checked = !f->checked; return; }
     if (f->type != FIELD_RADIO) return;
     f->checked = 1;
@@ -270,7 +273,7 @@ int forms_submit(const Forms *F, const Doc *d, long form, long by, short x, shor
         const Field *f = &F->fields[i];
         const char *name = f->name, *v = html_attr(d, &d->nodes[f->node], "value");
         short k;
-        if (f->form != form || !name || !*name) continue;
+        if (f->form != form || !name || !*name || f->disabled) continue;
         switch (f->type) {
         case FIELD_TEXT: case FIELD_PASSWORD: case FIELD_HIDDEN: case FIELD_TEXTAREA:
             /* a first field named isindex (ISINDEX makes one) sends just its words */

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 '''Makes Mill's release files from the build: dist/Mill-VERSION.bin (MacBinary, with the
 Finder's "has bundle" flag set so the windmill icon shows), .hqx (BinHex 4.0), and .dsk
-(the build's disk image). The version comes from src/version.h.
+(the build's disk image). The version comes from src/version.h. Inside the .bin and .hqx
+the application is named "Mill VERSION", with a space, as Mac applications were.
 python3 tools/release.py [build dir] [dist dir]'''
 
 import os, re, shutil, struct, sys
@@ -25,9 +26,14 @@ def crc16(data, crc=0):
     return crc
 
 
-def with_bundle(mb):
-    '''The MacBinary file with "has bundle" set and "inited" clear, and its header CRC redone'''
+def with_bundle(mb, name):
+    '''The MacBinary file named name, with "has bundle" set and "inited" clear, and its
+    header CRC redone'''
     b = bytearray(mb)
+    n = name.encode('mac_roman')
+    assert len(n) <= 63
+    b[1] = len(n)
+    b[2:65] = n + b'\0' * (63 - len(n))
     b[73] = (b[73] | 0x20) & ~0x01
     crc = crc16(b[:124])
     b[124], b[125] = crc >> 8, crc & 0xFF
@@ -88,7 +94,7 @@ def binhex(mb):
 def main():
     v = version()
     os.makedirs(dist, exist_ok=True)
-    mb = with_bundle(open(os.path.join(build, 'Mill.bin'), 'rb').read())
+    mb = with_bundle(open(os.path.join(build, 'Mill.bin'), 'rb').read(), 'Mill %s' % v)
     base = os.path.join(dist, 'Mill-%s' % v)
     open(base + '.bin', 'wb').write(mb)
     open(base + '.hqx', 'wb').write(binhex(mb))

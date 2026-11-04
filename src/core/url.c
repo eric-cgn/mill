@@ -9,7 +9,79 @@ static int prefix_ci(const char *s, const char *p)
     return 1;
 }
 
-static const char *SCHEMES[] = { "http://", "file://", "mill://" };
+static const char *SCHEMES[] = { "http://", "file://", "mill://", "https://" };
+#define NSCHEMES 4
+
+int url_is_web(int scheme) { return scheme == SCHEME_HTTP || scheme == SCHEME_HTTPS; }
+
+static int same_ci(const char *a, const char *b, long n)
+{
+    while (n-- > 0) { if ((*a | 32) != (*b | 32)) return 0; a++; b++; }
+    return 1;
+}
+
+/* n characters of s as a dotted IPv4 address into *a; 0 if they aren't one */
+static int ipv4(const char *s, long n, unsigned long *a)
+{
+    unsigned long v = 0, part = 0;
+    int parts = 0, digits = 0;
+    long i;
+    for (i = 0; i <= n; i++) {
+        if (i == n || s[i] == '.') {
+            if (!digits || part > 255) return 0;
+            v = (v << 8 | part) & 0xFFFFFFFFUL;
+            parts++;
+            part = 0;
+            digits = 0;
+        } else if (s[i] >= '0' && s[i] <= '9' && digits < 3) {
+            part = part * 10 + (s[i] - '0');
+            digits++;
+        } else {
+            return 0;
+        }
+    }
+    if (parts != 4) return 0;
+    *a = v;
+    return 1;
+}
+
+int url_host_in(const char *host, const char *list)
+{
+    long hn = strlen(host);
+    unsigned long ip, net;
+    int host_ip = ipv4(host, hn, &ip);
+    while (*list) {
+        const char *d, *slash;
+        long n;
+        while (*list == ' ' || *list == ',') list++;
+        for (d = list; *list && *list != ' ' && *list != ','; list++) {}
+        n = list - d;
+        slash = memchr(d, '/', n);
+        if (ipv4(d, slash ? slash - d : n, &net)) {
+            /* an address, or a range of them: only ever an address's match */
+            long bits = 32;
+            unsigned long mask;
+            if (slash) {
+                const char *b = slash + 1;
+                if (b == d + n || d + n - b > 2) continue;
+                for (bits = 0; b < d + n; b++) {
+                    if (*b < '0' || *b > '9') break;
+                    bits = bits * 10 + (*b - '0');
+                }
+                if (b < d + n || bits > 32) continue;
+            }
+            mask = bits ? (0xFFFFFFFFUL << (32 - bits)) & 0xFFFFFFFFUL : 0;
+            if (host_ip && (ip & mask) == (net & mask)) return 1;
+            continue;
+        }
+        if (host_ip) continue;  /* a name never matches an address */
+        if (n && *d == '.') { d++; n--; }
+        if (!n) continue;
+        if (hn == n && same_ci(host, d, n)) return 1;
+        if (hn > n && host[hn - n - 1] == '.' && same_ci(host + hn - n, d, n)) return 1;
+    }
+    return 0;
+}
 
 static int hex(char c)
 {
@@ -47,8 +119,9 @@ int url_parse(const char *s, Url *u)
     memset(u, 0, sizeof *u);
     u->port = 80;
     while (*s == ' ') s++;
-    for (k = 0; k < 3 && !prefix_ci(s, SCHEMES[k]); k++) {}
-    if (k < 3) { u->scheme = (char)k; s += 7; }
+    for (k = 0; k < NSCHEMES && !prefix_ci(s, SCHEMES[k]); k++) {}
+    if (k < NSCHEMES) { u->scheme = (char)k; s += strlen(SCHEMES[k]); }
+    if (u->scheme == SCHEME_HTTPS) u->port = 443;
     else if (strstr(s, "://")) return -1;
     for (end = s; *end && *end != '/' && *end != '?' && *end != '#'; end++) {}
     /* user:password@ before the host (the last @, as a password may hold one) */
@@ -65,7 +138,7 @@ int url_parse(const char *s, Url *u)
     if (n >= (long)sizeof u->host || (n == 0 && u->scheme != SCHEME_FILE)) return -1;
     memcpy(u->host, s, n);
     if (u->scheme == SCHEME_MILL) for (k = 0; u->host[k]; k++) u->host[k] |= 32;  /* mill://About is mill://about */
-    if (u->scheme == SCHEME_HTTP && (p = strchr(u->host, ':'))) {
+    if (url_is_web(u->scheme) && (p = strchr(u->host, ':'))) {
         u->port = 0;
         for (p++; *p >= '0' && *p <= '9'; p++) u->port = (unsigned short)(u->port * 10 + (*p - '0'));
         *strchr(u->host, ':') = 0;
@@ -88,8 +161,8 @@ void url_format(const Url *u, char *out, int out_size)
 {
     if (u->scheme == SCHEME_FILE) snprintf(out, out_size, "file://%s", u->path);
     else if (u->scheme == SCHEME_MILL) snprintf(out, out_size, "mill://%s%s", u->host, strcmp(u->path, "/") ? u->path : "");
-    else if (u->port == 80) snprintf(out, out_size, "http://%s%s", u->host, u->path);
-    else snprintf(out, out_size, "http://%s:%u%s", u->host, u->port, u->path);
+    else if (u->port == (u->scheme == SCHEME_HTTPS ? 443 : 80)) snprintf(out, out_size, "%s%s%s", SCHEMES[(int)u->scheme], u->host, u->path);
+    else snprintf(out, out_size, "%s%s:%u%s", SCHEMES[(int)u->scheme], u->host, u->port, u->path);
     if (u->user[0]) {
         char with[300];
         if (!url_with_login(out, u->user, u->pass, with, sizeof with)) snprintf(out, out_size, "%s", with);
@@ -187,7 +260,7 @@ int url_resolve(const char *base, const char *href, char *out, int out_size)
 {
     Url b, r;
     while (*href == ' ') href++;
-    if (prefix_ci(href, "http://") || prefix_ci(href, "file://") || prefix_ci(href, "mill://")) {
+    if (prefix_ci(href, "http://") || prefix_ci(href, "https://") || prefix_ci(href, "file://") || prefix_ci(href, "mill://")) {
         if (url_parse(href, &r)) return -1;
         normalize(r.path);
     } else if (other_scheme(href)) {
@@ -200,7 +273,8 @@ int url_resolve(const char *base, const char *href, char *out, int out_size)
             strncpy(r.fragment, href + 1, sizeof r.fragment - 1);
         } else if (href[0] == '/' && href[1] == '/') {
             char tmp[300];
-            snprintf(tmp, sizeof tmp, "%.4s:%s", SCHEMES[(int)b.scheme], href);
+            snprintf(tmp, sizeof tmp, "%.*s%s", (int)(strchr(SCHEMES[(int)b.scheme], ':') + 1 - SCHEMES[(int)b.scheme]),
+                     SCHEMES[(int)b.scheme], href);
             if (url_parse(tmp, &r)) return -1;
         } else {
             char path[300];

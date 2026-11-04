@@ -108,7 +108,7 @@ unsigned long cookie_date(const char *s, long len)
     return days * 86400UL + (unsigned long)(hh * 3600L + mm * 60L + ss);
 }
 
-void jar_set(Jar *j, const char *host, const char *path, const char *line, long len, unsigned long now)
+void jar_set(Jar *j, const char *host, const char *path, int https, const char *line, long len, unsigned long now)
 {
     const char *name, *value, *p = line, *end = line + len;
     long nlen, vlen, plen;
@@ -155,7 +155,7 @@ void jar_set(Jar *j, const char *host, const char *path, const char *line, long 
             cpath = copy_lower(v, avlen, 0);
         }
     }
-    if (secure) goto out;  /* for https only */
+    if (secure && !https) goto out;  /* for https only */
     if (domain) {
         /* the host's own domain or a parent with a dot in it (not "com") */
         if (!strchr(domain, '.') || !domain_match(host, domain)) goto out;
@@ -190,6 +190,7 @@ void jar_set(Jar *j, const char *host, const char *path, const char *line, long 
     c->path = cpath;
     c->expires = expires;
     c->host_only = (char)host_only;
+    c->secure = (char)secure;
     j->bytes += nlen + vlen + (long)(strlen(domain) + strlen(cpath));
     j->n++;
     return;
@@ -198,7 +199,7 @@ out:
     free(cpath);
 }
 
-int jar_header(Jar *j, const char *host, const char *path, unsigned long now, char *out, int size)
+int jar_header(Jar *j, const char *host, const char *path, int https, unsigned long now, char *out, int size)
 {
     int k = 0, o = 0;
     char lhost[128];
@@ -213,7 +214,7 @@ int jar_header(Jar *j, const char *host, const char *path, unsigned long now, ch
         if (c->expires && c->expires <= now) { drop(j, k); continue; }
         k++;
         if (c->host_only ? strcmp(lhost, c->domain) : !domain_match(lhost, c->domain)) continue;
-        if (!path_match(path, c->path)) continue;
+        if (!path_match(path, c->path) || (c->secure && !https)) continue;
         n = (long)(strlen(c->name) + strlen(c->value) + 1 + (o ? 2 : 0));
         if (o + n >= size) continue;
         if (o) { out[o++] = ';'; out[o++] = ' '; }

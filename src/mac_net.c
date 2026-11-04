@@ -167,15 +167,11 @@ static OSErr tcp_call(TCPiopb *pb, short code)
     return pb->ioResult;
 }
 
-OSErr net_http_get(const char *host, unsigned short port, const char *path, net_sink sink, void *ref)
-{
-    return net_http_request(host, port, path, NULL, NULL, NULL, 0, sink, ref);
-}
-
 #define BODY_PIECES 8   /* a send's buffers are at most 64K each: a body of up to 512K */
 
-OSErr net_http_request(const char *host, unsigned short port, const char *path, const char *headers,
-                       const char *content_type, const char *body, long body_len, net_sink sink, void *ref)
+OSErr net_http_request(const char *host, unsigned short port, const char *target, const char *site,
+                       const char *headers, const char *content_type, const char *body, long body_len,
+                       net_sink sink, void *ref)
 {
     TCPiopb pb;
     Ptr rcv_buffer, chunk;
@@ -194,7 +190,7 @@ OSErr net_http_request(const char *host, unsigned short port, const char *path, 
     if (!(chunk = NewPtr(2048))) { DisposePtr(rcv_buffer); return memFullErr; }
     if (body_len > 65535L * BODY_PIECES) body_len = 65535L * BODY_PIECES;
     if (!headers) headers = "";
-    if (!(request = NewPtr(strlen(path) + strlen(host) + strlen(headers) + 256))) { DisposePtr(chunk); DisposePtr(rcv_buffer); return memFullErr; }
+    if (!(request = NewPtr(strlen(target) + strlen(site) + strlen(headers) + 256))) { DisposePtr(chunk); DisposePtr(rcv_buffer); return memFullErr; }
 
     memset(&pb, 0, sizeof pb);
     pb.csParam.create.rcvBuff = rcv_buffer;
@@ -216,9 +212,9 @@ OSErr net_http_request(const char *host, unsigned short port, const char *path, 
 
     /* An HTTP/1.0 request, as browsers of 1996 sent them */
     strcpy(request, content_type ? "POST " : "GET ");
-    strcat(request, path);
+    strcat(request, target);
     strcat(request, " HTTP/1.0\r\nUser-Agent: Mill/" MILL_VERSION "\r\nAccept: */*\r\nHost: ");
-    strcat(request, host);
+    strcat(request, site);
     if (headers[0]) {
         strcat(request, "\r\n");
         strcat(request, headers);
