@@ -1005,6 +1005,87 @@ static void area_bar_update(const Field *f)
     unclip(save);
 }
 
+/* TextEdit only scrolls up and down, and only to follow typing: a one-line field
+   (or the address bar) scrolls sideways here instead */
+
+/* How wide te's text is up to offset n, in its own font */
+static short te_width(TEHandle te, short n)
+{
+    short font = win->txFont, size = win->txSize, w;
+    TextFont((*te)->txFont);
+    TextSize((*te)->txSize);
+    HLock((*te)->hText);
+    w = TextWidth(*(*te)->hText, 0, n);
+    HUnlock((*te)->hText);
+    TextFont(font);
+    TextSize(size);
+    return w;
+}
+
+/* Scroll a one-line te sideways so the insertion point shows, and no further left
+   than its text needs */
+static void te_show_caret(TEHandle te)
+{
+    Rect view = (*te)->viewRect;
+    short left = (*te)->destRect.left, room = view.right - view.left - 2;
+    short x = te_width(te, (*te)->selEnd), end = te_width(te, (*te)->teLength);
+    short to = view.left - left;              /* how far it's scrolled now */
+    if (x - to > room) to = x - room;
+    if (x < to) to = x;
+    if (to > end - room) to = end - room;     /* no empty space after the text */
+    if (to < 0) to = 0;
+    if (to != view.left - left) TEScroll(view.left - left - to, 0, te);
+}
+
+/* While a selection is dragged past a field's edge, scroll toward the mouse: called by
+   TextEdit (from glue below) for as long as the button is down */
+static TEHandle dragging_te;
+static unsigned long drag_tick;
+__attribute__((used)) void drag_scroll(void)
+{
+    TEHandle te = dragging_te;
+    Rect view;
+    Point m;
+    if (!te || TickCount() - drag_tick < 2) return;
+    drag_tick = TickCount();
+    view = (*te)->viewRect;
+    GetMouse(&m);
+    if ((*te)->destRect.right - (*te)->destRect.left > view.right - view.left) {
+        /* one line: sideways, a few pixels at a time */
+        short scrolled = view.left - (*te)->destRect.left;
+        short rest = te_width(te, (*te)->teLength) - scrolled - (view.right - view.left - 2);
+        if (m.h > view.right && rest > 0) TEScroll(-(rest < 6 ? rest : 6), 0, te);
+        else if (m.h < view.left && scrolled > 0) TEScroll(scrolled < 6 ? scrolled : 6, 0, te);
+    } else {
+        /* a text area: a line at a time */
+        short line = (*te)->lineHeight;
+        long top = view.top - (*te)->destRect.top;
+        long below = (long)(*te)->nLines * line - top - (view.bottom - view.top);
+        if (m.v > view.bottom && below > 0) TEScroll(0, (short)-(below < line ? below : line), te);
+        else if (m.v < view.top && top > 0) TEScroll(0, (short)(top < line ? top : line), te);
+    }
+}
+
+/* TextEdit calls clikLoop with nothing on the stack, expects D0 nonzero to go on, and
+   counts on D1, D2, A0, and A1 surviving */
+extern void drag_loop(void);
+asm(".text\n"
+    "drag_loop:\n"
+    "\tmovem.l %d1-%d2/%a0-%a1,-(%sp)\n"
+    "\tjsr drag_scroll\n"
+    "\tmovem.l (%sp)+,%d1-%d2/%a0-%a1\n"
+    "\tmoveq #1,%d0\n"
+    "\trts\n");
+
+/* TEClick, scrolling as the mouse leaves te */
+static void te_click(Point p, Boolean shift, TEHandle te)
+{
+    dragging_te = te;
+    (*te)->clikLoop = (ProcPtr)drag_loop;
+    TEClick(p, shift, te);
+    dragging_te = NULL;
+}
+
 /* Type in a field: a text field, password field, or text area */
 static void focus_field(long i, const Point *click, Boolean shift)
 {
@@ -1013,7 +1094,7 @@ static void focus_field(long i, const Point *click, Boolean shift)
     if (focus == i) {
         if (click && f->type != FIELD_PASSWORD) {
             RgnHandle save = clip_to(&focus_clip);
-            TEClick(*click, shift, field_te);
+            te_click(*click, shift, field_te);
             unclip(save);
             if (f->type == FIELD_TEXTAREA) area_bar_update(f);
         }
@@ -1037,7 +1118,7 @@ static void focus_field(long i, const Point *click, Boolean shift)
         TESetText(f->value, strlen(f->value), field_te);
         TECalText(field_te);
         TEActivate(field_te);
-        if (click) TEClick(*click, shift, field_te);
+        if (click) te_click(*click, shift, field_te);
         else TESetSelect(0, 32767, field_te);
         TEAutoView(f->type == FIELD_TEXTAREA, field_te);   /* then typing keeps in view */
     }
@@ -1075,6 +1156,7 @@ static void type_in_field(char c, EventRecord *ev)
         (*field_te)->selStart == (*field_te)->selEnd) return;
     save = clip_to(&focus_clip);
     TEKey(c, field_te);
+    if (f->type != FIELD_TEXTAREA) te_show_caret(field_te);
     unclip(save);
     if (f->type == FIELD_TEXTAREA) area_bar_update(f);
     (void)ev;
@@ -1277,6 +1359,9 @@ static void finish_save(Response *r, OSErr err)
 
 static void show_url(const char *url)
 {
+    /* from the start, however far the last address was scrolled */
+    (*url_te)->destRect.left = (*url_te)->viewRect.left;
+    (*url_te)->destRect.right = (*url_te)->viewRect.left + 2000;
     TESetText((Ptr)url, strlen(url), url_te);
     TESetSelect(0, 0, url_te);
     InvalRect(&(*url_te)->viewRect);
@@ -1388,18 +1473,19 @@ static Boolean answer(const Url *u, const Challenge *ch, Cred *sent, char *login
     return true;
 }
 
-/* The extra header lines for an HTTP request: cookies, and a name and password kept
-   for where it goes (which *sent says, or NULL) */
+/* The extra header lines for an HTTP request: the User-Agent, cookies, and a name and
+   password kept for where it goes (which *sent says, or NULL) */
 static const char *request_headers(const Url *u, const char *method, Cred **sent)
 {
-    static char headers[1700], value[600];
+    static char headers[1900], value[600];
     static unsigned long count;
     unsigned long now;
     int n = 0;
     ReadDateTime(&now);  /* the trap: GetDateTime is a low-memory read GCC flags */
     headers[0] = 0;
-    if (accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + 8, 1024) > 0) {
-        memcpy(headers, "Cookie: ", 8);
+    if (user_agent()[0]) n = snprintf(headers, 160, "User-Agent: %.140s", user_agent());
+    if (accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + n + (n ? 10 : 8), 1024) > 0) {
+        memcpy(headers + n, n ? "\r\nCookie: " : "Cookie: ", n ? 10 : 8);
         n = strlen(headers);
     }
     if ((*sent = auth_for_path(&keyring, u->host, u->port, u->path)) != NULL) {
@@ -2531,7 +2617,7 @@ static void do_mouse(EventRecord *ev)
         } else if (PtInRect(p, &back_r)) { if (hist_pos > 0 && press(&back_r)) go_history(-1); }
         else if (PtInRect(p, &fwd_r)) { if (hist_pos < hist_len - 1 && press(&fwd_r)) go_history(1); }
         else if (PtInRect(p, &reload_r)) { if (hist_pos >= 0 && press(&reload_r)) reload(); }
-        else if (PtInRect(p, &(*url_te)->viewRect)) { blur(); TEClick(p, (ev->modifiers & shiftKey) != 0, url_te); }
+        else if (PtInRect(p, &(*url_te)->viewRect)) { blur(); te_click(p, (ev->modifiers & shiftKey) != 0, url_te); }
         else if (click_control(p, ev)) {}
         else page_click(p, ev);
         break;
@@ -2571,6 +2657,7 @@ static void do_key(EventRecord *ev)
     }
     if (c == '\r' || c == 3) { go_typed(); return; }
     TEKey(c, url_te);
+    te_show_caret(url_te);
 }
 
 /* Show a link's address in the status line while the mouse is over it, as browsers did */

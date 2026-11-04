@@ -17,6 +17,7 @@ OSErr local_request(const Url *u, const char *content_type, const char *body, lo
 int local_image(const char *url, Bitmap1 *out);
 
 #define MILL_DEFAULT_HOME "mill://about"
+#define MILL_DEFAULT_AGENT "Mozilla/1.22 (compatible; Mill/" MILL_VERSION "; Macintosh; 68K)"
 #define MILL_DEFAULT_IMAGE_K 128
 
 /* A Mac file's full path ("Macintosh HD:Web:index.html") */
@@ -38,6 +39,8 @@ const char *file_type_rules(void);
 int decode_macbinary(void);
 /* Whether sites may keep cookies (until Mill quits) */
 int accept_cookies(void);
+/* The User-Agent sent with each request; "" sends none */
+const char *user_agent(void);
 /* Whether to use the proxy; the proxy that fetches pages for Mill (host:port), kept
    while it's off; the domains and addresses that skip it (see url_host_in); and
    whether https: addresses go to it */

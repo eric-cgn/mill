@@ -426,6 +426,11 @@ int accept_cookies(void)
     return strcmp(setting("cookies", "yes"), "no") != 0;
 }
 
+const char *user_agent(void)
+{
+    return setting("user_agent", MILL_DEFAULT_AGENT);
+}
+
 const char *proxy(void)
 {
     return setting("proxy", "");
@@ -617,7 +622,7 @@ static int form_value(const char *body, long len, const char *name, char *out_bu
 static void config(Out *o, const char *body, long len)
 {
     static char types[2048], typed[2048];
-    char note[120] = "", home[256], where[300], k[16], via[140], skip[256];
+    char note[120] = "", home[256], where[300], k[16], via[140], skip[256], agent[141];
     const char *shown = NULL;   /* rules typed with a mistake in them, shown again to fix */
     FSSpec spec;
     if (body) {
@@ -638,6 +643,11 @@ static void config(Out *o, const char *body, long len)
         else put_setting("decode_macbinary", 16, "no", 2);
         if (form_value(body, len, "cookies", k, sizeof k)) put_setting("cookies", 7, "yes", 3);
         else put_setting("cookies", 7, "no", 2);
+        if (form_value(body, len, "user_agent", agent, sizeof agent)) {
+            char *c;
+            for (c = agent; *c; c++) if ((unsigned char)*c < ' ') *c = ' ';  /* one header line */
+            put_setting("user_agent", 10, agent, strlen(agent));
+        }
         if (form_value(body, len, "proxy", via, sizeof via)) {
             Url p;
             if (via[0] && (url_parse(via, &p) || p.scheme != SCHEME_HTTP || strcmp(p.path, "/")))
@@ -701,6 +711,9 @@ static void config(Out *o, const char *body, long len)
              "<TR><TD VALIGN=TOP WIDTH=110><B>Accept cookies</B><TD><INPUT TYPE=checkbox NAME=cookies VALUE=yes");
     if (accept_cookies()) out_s(o, " CHECKED");
     out_s(o, "> Lets sites remember you, as after signing in; kept until you quit."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>User agent</B><TD><INPUT NAME=user_agent SIZE=36 VALUE=\"");
+    out_text(o, user_agent());
+    out_s(o, "\"><BR>Empty sends none."
              "<TR><TD VALIGN=TOP WIDTH=110><B>File types</B><TD>Mac type and creator for saved files, so the Finder knows "
              "what opens them. One rule per line: MIME type, file name, TYPE/CREATOR; * matches anything, and "
              "the first match wins. Empty uses Mill's defaults.<BR><TEXTAREA NAME=file_types ROWS=8 COLS=36>");

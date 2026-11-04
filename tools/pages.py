@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-'''Writes src/pages.r from Mill's longer built-in pages, kept as 'TEXT' resources so each
+'''Writes pages.r from Mill's longer built-in pages, kept as 'TEXT' resources so each
 is read only when it's opened: mill://license (license.html, TEXT 128) and
-mill://change-log (changes.html, TEXT 129). Run after editing either:
-python3 tools/pages.py'''
+mill://change-log (changes.html, TEXT 129). The build runs it:
+python3 tools/pages.py <out.r>'''
 
 import os
+import sys
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src')
 PAGES = [(128, 'License', 'license.html'), (129, 'Change Log', 'changes.html')]
@@ -20,7 +21,7 @@ def main():
         for i in range(0, len(text), 32):
             lines.append('\t$"%s"' % text[i:i + 32].hex().upper())
         lines.append('};')
-    open(os.path.join(SRC, 'pages.r'), 'w').write('\n'.join(lines) + '\n')
+    open(sys.argv[1], 'w').write('\n'.join(lines) + '\n')
 
 
 if __name__ == '__main__':
