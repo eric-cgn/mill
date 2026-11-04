@@ -41,8 +41,6 @@ http://mill.1in1e6.com/
 [Retro68](https://github.com/autc04/Retro68) in a container (image pinned by digest).
 The code is plain 68000. `tests/run.sh` runs the host tests for the portable core.
 
-After editing `src/changes.html` or `src/license.html`, run `python3 tools/pages.py`.
-
 ## Releases
 
 Pushing a tag `vX.Y.Z` that matches `MILL_VERSION` in `src/version.h` builds Mill, makes a
