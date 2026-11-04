@@ -705,10 +705,10 @@ static void config(Out *o, const char *body, long len)
              "what opens them. One rule per line: MIME type, file name, TYPE/CREATOR; * matches anything, and "
              "the first match wins. Empty uses Mill's defaults.<BR><TEXTAREA NAME=file_types ROWS=8 COLS=36>");
     out_rules(o, shown ? shown : file_type_rules());
-    out_s(o, "</TEXTAREA><TR><TD VALIGN=TOP WIDTH=110><B>Decode MacBinary automatically</B>"
+    out_s(o, "</TEXTAREA><TR><TD VALIGN=TOP WIDTH=110><B>Decode MacBinary</B>"
              "<TD><INPUT TYPE=checkbox NAME=decode_macbinary VALUE=yes");
     if (decode_macbinary()) out_s(o, " CHECKED");
-    out_s(o, "> Saves the Mac file inside a MacBinary download (often .bin), not the .bin itself.</TABLE>"
+    out_s(o, "> Automatically decode MacBinary if detected in a .bin download.</TABLE>"
              "<H3><A NAME=proxy>Proxy</A></H3>" SETTINGS_TABLE
              "<TR><TD VALIGN=TOP WIDTH=110><B>Enable proxy</B><TD><INPUT TYPE=checkbox NAME=proxy_on VALUE=yes");
     if (proxy_on()) out_s(o, " CHECKED");
