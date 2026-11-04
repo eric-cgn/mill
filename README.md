@@ -43,9 +43,10 @@ The code is plain 68000. `tests/run.sh` runs the host tests for the portable cor
 
 ## Releases
 
-Pushing a tag `vX.Y.Z` that matches `MILL_VERSION` in `src/version.h` builds Mill, makes a
-GitHub release with `Mill-X.Y.Z.hqx`, `.bin`, and `.dsk` (`tools/release.py`), and rebuilds
-the download site from every release (`tools/site.py`).
+Landing a change on main that sets a new `MILL_VERSION` in `src/version.h` releases it:
+the Release workflow builds Mill, tags the commit `vX.Y.Z`, makes a GitHub release with
+`Mill-X.Y.Z.hqx`, `.bin`, and `.dsk` (`tools/release.py`), and rebuilds the download site
+from every release (`tools/site.py`). Changes that keep the version release nothing.
 
 ## License
 

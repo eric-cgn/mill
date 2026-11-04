@@ -1,53 +1,60 @@
-# A tag vX.Y.Z on a commit in main (matching src/version.h) builds Mill, makes a GitHub
-# release with its .hqx, .bin, and .dsk, and rebuilds the download site (mill.1in1e6.com)
-# from every release. Run it by hand to rebuild the site alone.
+# Every push to main: if src/version.h names a version with no release yet, build Mill,
+# tag the commit vX.Y.Z, make a GitHub release with its .hqx, .bin, and .dsk, and
+# rebuild the download site (mill.1in1e6.com) from every release. A push that keeps the
+# version does nothing. Run it by hand to rebuild the site alone.
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
+
+# One at a time, so two quick landings can't both release the same version
+concurrency: release
 
 jobs:
   release:
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      new: ${{ steps.version.outputs.new }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Check the tag is on main
-        run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::tag $GITHUB_REF_NAME isn't on main"
-            exit 1
-          fi
-      - name: Check the tag against src/version.h
+      - id: version
+        name: A new version?
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           v=$(sed -n 's/^#define MILL_VERSION "\(.*\)"/\1/p' src/version.h)
-          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
-            echo "::error::tag $GITHUB_REF_NAME doesn't match MILL_VERSION $v"
-            exit 1
-          fi
           echo "VERSION=$v" >> "$GITHUB_ENV"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "Mill $v is already released"
+            echo "new=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=yes" >> "$GITHUB_OUTPUT"
+          fi
       - name: Test
+        if: steps.version.outputs.new == 'yes'
         run: tests/run.sh
       - name: Build
+        if: steps.version.outputs.new == 'yes'
         run: ./build.sh
       - name: Release files
+        if: steps.version.outputs.new == 'yes'
         run: python3 tools/release.py
       - name: Release
+        if: steps.version.outputs.new == 'yes'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 tools/site.py notes "$VERSION" > notes.txt
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Mill $VERSION" --notes-file notes.txt
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Mill $VERSION" --notes-file notes.txt
 
   site:
     needs: release
-    if: always() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
+    if: always() && ((needs.release.result == 'success' && needs.release.outputs.new == 'yes') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
