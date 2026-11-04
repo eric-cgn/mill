@@ -13,6 +13,7 @@
 #define IS_INVISIBLE 0x4000
 #define MAX_FILE (192L * 1024)
 #define HTML_MAC "text/html; charset=macintosh"
+#define SETTINGS_TABLE "<TABLE BORDER=1 CELLPADDING=4 CELLSPACING=0 WIDTH=\"100%\">"
 
 /* ------------------------------------------------------------ responses */
 
@@ -425,6 +426,26 @@ int accept_cookies(void)
     return strcmp(setting("cookies", "yes"), "no") != 0;
 }
 
+const char *proxy(void)
+{
+    return setting("proxy", "");
+}
+
+int proxy_on(void)
+{
+    return !strcmp(setting("proxy_on", "no"), "yes");
+}
+
+const char *proxy_excluded(void)
+{
+    return setting("proxy_exclude", "");
+}
+
+int proxy_https(void)
+{
+    return !strcmp(setting("proxy_https", "no"), "yes");
+}
+
 /* Each slot is a setting, bookmark1 to bookmark10: "address title" (addresses have no spaces) */
 static void bookmark_name(int n, char *name)
 {
@@ -522,7 +543,7 @@ static void about(Out *o)
         "<H3>What Mill reads</H3><UL>"
         "<LI>HTML 3.2, which included text, lists, tables, images (and maps), and forms, as well as a few extras "
         "like bgcolor and font face. No applets, JavaScript, style sheets, or frames."
-        "<LI>URL schemes: http://, file://, and mill:// (built-ins)"
+        "<LI>URL schemes: http://, https:// (through a proxy), file://, and mill:// (built-ins)"
         "<LI>Character sets: UTF-8, ISO 8859-1, and Mac Roman"
         "<LI>Image formats: GIF (static) and JPEG (baseline)"
         "<LI>Pages up to 192K for rendering, but larger for downloads"
@@ -596,7 +617,7 @@ static int form_value(const char *body, long len, const char *name, char *out_bu
 static void config(Out *o, const char *body, long len)
 {
     static char types[2048], typed[2048];
-    char note[120] = "", home[256], where[300], k[16];
+    char note[120] = "", home[256], where[300], k[16], via[140], skip[256];
     const char *shown = NULL;   /* rules typed with a mistake in them, shown again to fix */
     FSSpec spec;
     if (body) {
@@ -617,6 +638,19 @@ static void config(Out *o, const char *body, long len)
         else put_setting("decode_macbinary", 16, "no", 2);
         if (form_value(body, len, "cookies", k, sizeof k)) put_setting("cookies", 7, "yes", 3);
         else put_setting("cookies", 7, "no", 2);
+        if (form_value(body, len, "proxy", via, sizeof via)) {
+            Url p;
+            if (via[0] && (url_parse(via, &p) || p.scheme != SCHEME_HTTP || strcmp(p.path, "/")))
+                snprintf(note, sizeof note, "The HTTP proxy should be a host and port, such as proxy.example:8080.");
+            else put_setting("proxy", 5, via, strlen(via));
+        }
+        if (form_value(body, len, "proxy_on", k, sizeof k)) {
+            if (!proxy()[0]) snprintf(note, sizeof note, "Enable proxy needs an HTTP proxy.");
+            else put_setting("proxy_on", 8, "yes", 3);
+        } else put_setting("proxy_on", 8, "no", 2);
+        if (form_value(body, len, "proxy_exclude", skip, sizeof skip)) put_setting("proxy_exclude", 13, skip, strlen(skip));
+        if (form_value(body, len, "proxy_https", k, sizeof k)) put_setting("proxy_https", 11, "yes", 3);
+        else put_setting("proxy_https", 11, "no", 2);
         if (form_value(body, len, "file_types", types, sizeof types)) {
             int bad;
             strcpy(typed, types);
@@ -650,43 +684,61 @@ static void config(Out *o, const char *body, long len)
     head(o, 200, HTML_MAC);
     out_s(o, "<TITLE>Mill Settings</TITLE><H2>Settings</H2>");
     if (note[0]) { out_s(o, "<P><B>"); out_text(o, note); out_s(o, "</B>"); }
-    out_s(o, "<FORM METHOD=POST ACTION=\"mill://config\"><P><B>Home page</B><BR><INPUT NAME=homepage SIZE=40 VALUE=\"");
+    /* each section a table: the setting's name, then its control and what it does */
+    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#proxy\">Proxy</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
+             "<FORM METHOD=POST ACTION=\"mill://config\"><H3><A NAME=general>General</A></H3>"
+             SETTINGS_TABLE
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Home page</B><TD><INPUT NAME=homepage SIZE=36 VALUE=\"");
     out_text(o, setting("homepage", MILL_DEFAULT_HOME));
     out_s(o, "\"><BR>Opens at startup and with Home in the Go menu."
-             "<P><B>Image memory</B><BR><INPUT NAME=image_memory SIZE=5 VALUE=\"");
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Image memory</B><TD><INPUT NAME=image_memory SIZE=5 VALUE=\"");
     sprintf(k, "%ld", image_memory_k());
     out_s(o, k);
     out_s(o, "\"> K<BR>Memory for caching images, much faster when images are reused between pages; 0 to turn off."
-             "<P><INPUT TYPE=checkbox NAME=load_images VALUE=yes");
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Load images automatically</B><TD><INPUT TYPE=checkbox NAME=load_images VALUE=yes");
     if (auto_images()) out_s(o, " CHECKED");
-    out_s(o, "> <B>Load images automatically</B><BR>When off, use the context menu to load individually."
-             "<P><INPUT TYPE=checkbox NAME=cookies VALUE=yes");
+    out_s(o, "> When off, use the context menu to load individually."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Accept cookies</B><TD><INPUT TYPE=checkbox NAME=cookies VALUE=yes");
     if (accept_cookies()) out_s(o, " CHECKED");
-    out_s(o, "> <B>Accept cookies</B><BR>Lets sites remember you, as after signing in; kept until you quit."
-             "<P><B>File types</B><BR>Mac type and creator for saved files, so the Finder knows what opens them. "
-             "One rule per line: MIME type, file name, TYPE/CREATOR; * matches anything, and the first match "
-             "wins. Empty uses Mill's defaults.<BR><TEXTAREA NAME=file_types ROWS=8 COLS=36>");
+    out_s(o, "> Lets sites remember you, as after signing in; kept until you quit."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>File types</B><TD>Mac type and creator for saved files, so the Finder knows "
+             "what opens them. One rule per line: MIME type, file name, TYPE/CREATOR; * matches anything, and "
+             "the first match wins. Empty uses Mill's defaults.<BR><TEXTAREA NAME=file_types ROWS=8 COLS=36>");
     out_rules(o, shown ? shown : file_type_rules());
-    out_s(o, "</TEXTAREA><P><INPUT TYPE=checkbox NAME=decode_macbinary VALUE=yes");
+    out_s(o, "</TEXTAREA><TR><TD VALIGN=TOP WIDTH=110><B>Decode MacBinary automatically</B>"
+             "<TD><INPUT TYPE=checkbox NAME=decode_macbinary VALUE=yes");
     if (decode_macbinary()) out_s(o, " CHECKED");
-    out_s(o, "> <B>Decode MacBinary automatically</B><BR>Saves the Mac file inside a MacBinary download "
-             "(often .bin), not the .bin itself."
-             "<H3><A NAME=bookmarks>Bookmarks</A></H3>Command-1 to Command-0 open these; Command-D adds the "
-             "current page (Option-Command and a number picks the slot). Clear an address to empty its slot.");
+    out_s(o, "> Saves the Mac file inside a MacBinary download (often .bin), not the .bin itself.</TABLE>"
+             "<H3><A NAME=proxy>Proxy</A></H3>" SETTINGS_TABLE
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Enable proxy</B><TD><INPUT TYPE=checkbox NAME=proxy_on VALUE=yes");
+    if (proxy_on()) out_s(o, " CHECKED");
+    out_s(o, ">"
+             "<TR><TD VALIGN=TOP WIDTH=110><B>HTTP proxy</B><TD><INPUT NAME=proxy SIZE=30 VALUE=\"");
+    out_text(o, proxy());
+    out_s(o, "\"><BR>A proxy server, as host:port."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Proxy excluded domains</B><TD><INPUT NAME=proxy_exclude SIZE=36 VALUE=\"");
+    out_text(o, proxy_excluded());
+    out_s(o, "\"><BR>Domains (with their subdomains), IP addresses, or ranges such as 192.168.0.0/16, "
+             "separated by spaces."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Enable https over proxy</B><TD><INPUT TYPE=checkbox NAME=proxy_https VALUE=yes");
+    if (proxy_https()) out_s(o, " CHECKED");
+    out_s(o, "> Sends https:// addresses to the proxy. The connection from Mill to the proxy is not encrypted."
+             "</TABLE><H3><A NAME=bookmarks>Bookmarks</A></H3>" SETTINGS_TABLE "<TR><TH><TH>Title<TH>Address");
     {
         int n;
         for (n = 0; n < BOOKMARKS; n++) {
-            char url[300], title[100], line[64];
+            char url[300], title[100], line[80];
             if (!bookmark(n, url, sizeof url, title, sizeof title)) url[0] = title[0] = 0;
-            sprintf(line, "<BR><TT>%d</TT> <INPUT NAME=bt%d SIZE=16 VALUE=\"", n == 9 ? 0 : n + 1, n + 1);
+            sprintf(line, "<TR><TD ALIGN=CENTER><TT>%d</TT><TD><INPUT NAME=bt%d SIZE=16 VALUE=\"", n == 9 ? 0 : n + 1, n + 1);
             out_s(o, line);
             out_text(o, title);
-            sprintf(line, "\"> <INPUT NAME=bu%d SIZE=40 VALUE=\"", n + 1);
+            sprintf(line, "\"><TD><INPUT NAME=bu%d SIZE=36 VALUE=\"", n + 1);
             out_s(o, line);
             out_text(o, url);
             out_s(o, "\">");
         }
     }
+    out_s(o, "</TABLE>");
     out_s(o, "<P><INPUT TYPE=submit VALUE=\"Save\"></FORM><HR><P>Settings are saved in ");
     if (settings_spec(&spec) == noErr) {
         spec_to_path(&spec, where, sizeof where);

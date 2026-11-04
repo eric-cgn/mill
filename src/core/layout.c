@@ -782,8 +782,24 @@ static void distribute(Grid *g, long inner)
     } else if (inner <= smin || smax == smin) {
         for (k = 0; k < g->ncols; k++) g->cw[k] = g->cmin[k];
     } else {
-        long room = inner - smin, want = smax - smin;
-        for (k = 0; k < g->ncols; k++) g->cw[k] = g->cmin[k] + (short)((long)(g->cmax[k] - g->cmin[k]) * room / want);
+        /* short of room: columns with a set width keep it if the others can still have
+           their narrowest, and those others share what's left */
+        long fixed_w = 0, free_min = 0, free_max = 0, room, want;
+        for (k = 0; k < g->ncols; k++) {
+            if (g->fixed[k]) fixed_w += g->cmax[k];
+            else { free_min += g->cmin[k]; free_max += g->cmax[k]; }
+        }
+        if (any_free && fixed_w && inner >= fixed_w + free_min) {
+            room = inner - fixed_w - free_min;
+            want = free_max - free_min;
+            for (k = 0; k < g->ncols; k++)
+                g->cw[k] = g->fixed[k] ? g->cmax[k]
+                         : g->cmin[k] + (short)(want ? (long)(g->cmax[k] - g->cmin[k]) * room / want : 0);
+        } else {
+            room = inner - smin;
+            want = smax - smin;
+            for (k = 0; k < g->ncols; k++) g->cw[k] = g->cmin[k] + (short)((long)(g->cmax[k] - g->cmin[k]) * room / want);
+        }
     }
     for (k = 0; k < g->ncols; k++) used += g->cw[k];
     if (inner > used && last >= 0 && inner > smin) g->cw[last] += (short)(inner - used);

@@ -376,10 +376,17 @@ static int scheme_of(const char *url)
     return url_parse(url, &u) ? -1 : u.scheme;
 }
 
+/* The kind of address: http: and https: are one kind, the web's */
+static int kind_of(const char *url)
+{
+    int s = scheme_of(url);
+    return s == SCHEME_HTTPS ? SCHEME_HTTP : s;
+}
+
 static void pics_collect(void)
 {
     long i;
-    int scheme = scheme_of(page_url);
+    int kind = kind_of(page_url);
     pic_of = calloc(doc.nnodes, sizeof(short));
     if (!pic_of) return;
     for (i = 0; i < doc.nnodes; i++) {
@@ -389,7 +396,7 @@ static void pics_collect(void)
         short k, aw, ah;
         Pic *p;
         if (n->tag != TAG_IMG || !(src = html_attr(&doc, n, "src")) || url_resolve(page_url, src, url, sizeof url)) continue;
-        if (scheme_of(url) != scheme) continue;  /* no pictures from another kind of address */
+        if (kind_of(url) != kind) continue;  /* no pictures from another kind of address */
         aw = px_attr(n, "width");
         ah = px_attr(n, "height");
         for (k = 0; k < npics; k++) if (pics[k].aw == aw && pics[k].ah == ah && !strcmp(pics[k].url, url)) break;
@@ -433,6 +440,7 @@ static int qd_image_size(void *ctx, long node, short *w, short *h)
 #define CHOOSE "Choose..."
 
 static long focus = -1;         /* the field being typed in, or -1 for the address */
+#define AREA_BAR 16              /* a text area's scroll bar, wide as the Mac's */
 static TEHandle field_te;       /* typing in a text field or text area happens here */
 static Boolean focus_shown;     /* the focused field was on screen at the last draw */
 static Rect focus_clip;         /* and where */
@@ -499,7 +507,7 @@ static int qd_control_size(void *ctx, long node, short *w, short *h, short *asc)
         break;
     }
     case FIELD_TEXTAREA:
-        *w = (f->cols > 0 ? f->cols : 20) * cw + 8;
+        *w = (f->cols > 0 ? f->cols : 20) * cw + 8 + AREA_BAR;
         *h = (f->rows > 0 ? f->rows : 2) * LINE_H + 4;
         *asc = *h - 4;
         break;
@@ -535,8 +543,61 @@ static Boolean control_box(long node, Rect *box)
 static Rect text_part(const Field *f, Rect box)
 {
     if (f->type == FIELD_FILE) box.right -= TextWidth(CHOOSE, 0, strlen(CHOOSE)) + 20;
+    if (f->type == FIELD_TEXTAREA) box.right -= AREA_BAR - 1;
     InsetRect(&box, 2, 2);
     return box;
+}
+
+/* A text area's scroll bar, along its right side */
+static Rect area_bar(const Rect *box)
+{
+    Rect bar;
+    SetRect(&bar, box->right - AREA_BAR, box->top, box->right, box->bottom);
+    return bar;
+}
+
+/* How tall a text area's text is, laid out in inner, in pixels */
+static long area_height(const Field *f, const Rect *inner)
+{
+    TEHandle te;
+    long h;
+    if (f - forms.fields == focus) return (long)(*field_te)->nLines * (*field_te)->lineHeight;
+    if (!(te = TENew(inner, inner))) return 0;
+    TESetText(f->value, strlen(f->value), te);
+    TECalText(te);
+    h = (long)(*te)->nLines * (*te)->lineHeight;
+    TEDispose(te);
+    return h;
+}
+
+/* The scroll bar, for text scrolled up by top of height in a view of view pixels:
+   arrows at the ends, a gray track and its thumb between, all blank if it all fits */
+static void draw_area_bar(const Rect *box, long top, long height, long view)
+{
+    Rect bar = area_bar(box), up, down, track, thumb;
+    short i, x = bar.left + AREA_BAR / 2;
+    EraseRect(&bar);
+    FrameRect(&bar);
+    if (height <= view) return;
+    if (top > height - view) top = height - view;
+    if (top < 0) top = 0;
+    SetRect(&up, bar.left, bar.top, bar.right, bar.top + AREA_BAR);
+    SetRect(&down, bar.left, bar.bottom - AREA_BAR, bar.right, bar.bottom);
+    FrameRect(&up);
+    FrameRect(&down);
+    for (i = 0; i < 4; i++) {
+        MoveTo(x - i, up.top + 4 + i); LineTo(x + i, up.top + 4 + i);
+        MoveTo(x - i, down.bottom - 5 - i); LineTo(x + i, down.bottom - 5 - i);
+    }
+    SetRect(&track, bar.left + 1, up.bottom, bar.right - 1, down.top);
+    if (track.bottom - track.top < AREA_BAR) return;
+    FillRect(&track, &qd.gray);
+    thumb = track;
+    thumb.top += (short)((track.bottom - track.top - AREA_BAR) * top / (height - view));
+    thumb.bottom = thumb.top + AREA_BAR;
+    InsetRect(&thumb, -1, 0);
+    EraseRect(&thumb);
+    FrameRect(&thumb);
 }
 
 static void draw_button(const Rect *b, const char *label)
@@ -570,7 +631,9 @@ static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
         focus_shown = true;
         SectRect(&inner, &view_r, &focus_clip);
     } else if (f->type == FIELD_TEXTAREA) {
-        TETextBox(f->value, strlen(f->value), &inner, teFlushLeft);
+        Rect from = inner;
+        from.top -= (short)f->scroll;   /* the lines scrolled past are drawn above, and clipped */
+        TETextBox(f->value, strlen(f->value), &from, teFlushLeft);
     } else {
         const char *v = f->value ? f->value : "";
         long n = strlen(v);
@@ -584,6 +647,12 @@ static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
         }
     }
     unclip(save);
+    if (f->type == FIELD_TEXTAREA) {
+        long top = focused ? (*field_te)->viewRect.top - (*field_te)->destRect.top : f->scroll;
+        save = clip_to(box);
+        draw_area_bar(box, top, area_height(f, &inner), inner.bottom - inner.top);
+        unclip(save);
+    }
 }
 
 static void draw_popup(const Field *f, const Rect *box)
@@ -663,6 +732,12 @@ static void draw_control(const Run *r, short top)
     }
     default:
         draw_text_box(f, &box, f - forms.fields == focus);
+    }
+    if (f->disabled) {          /* dimmed, as the Control Manager dims a control */
+        PenPat(&qd.gray);
+        PenMode(patBic);
+        PaintRect(&box);
+        PenNormal();
     }
 }
 
@@ -907,6 +982,7 @@ static void blur(void)
                 forms_set_value(f, v);
                 free(v);
             }
+            f->scroll = (*field_te)->viewRect.top - (*field_te)->destRect.top;
         }
         TEDeactivate(field_te);
         focus = -1;
@@ -915,13 +991,32 @@ static void blur(void)
     TEActivate(url_te);
 }
 
+/* Redraw the scroll bar of the text area being typed in */
+static void area_bar_update(const Field *f)
+{
+    Rect box, inner;
+    RgnHandle save;
+    if (!control_box(f->node, &box)) return;
+    inner = text_part(f, box);
+    save = clip_to(&box);
+    control_font();
+    draw_area_bar(&box, (*field_te)->viewRect.top - (*field_te)->destRect.top, area_height(f, &inner),
+                  inner.bottom - inner.top);
+    unclip(save);
+}
+
 /* Type in a field: a text field, password field, or text area */
 static void focus_field(long i, const Point *click, Boolean shift)
 {
     Field *f = &forms.fields[i];
     Rect box;
     if (focus == i) {
-        if (click && f->type != FIELD_PASSWORD) TEClick(*click, shift, field_te);
+        if (click && f->type != FIELD_PASSWORD) {
+            RgnHandle save = clip_to(&focus_clip);
+            TEClick(*click, shift, field_te);
+            unclip(save);
+            if (f->type == FIELD_TEXTAREA) area_bar_update(f);
+        }
         return;
     }
     blur();
@@ -937,11 +1032,14 @@ static void focus_field(long i, const Point *click, Boolean shift)
         (*field_te)->viewRect = inner;
         (*field_te)->destRect = inner;
         if (f->type != FIELD_TEXTAREA) (*field_te)->destRect.right = inner.left + 2000;  /* one long line */
+        else OffsetRect(&(*field_te)->destRect, 0, (short)-f->scroll);
+        TEAutoView(false, field_te);       /* (starting where it was scrolled to) */
         TESetText(f->value, strlen(f->value), field_te);
         TECalText(field_te);
         TEActivate(field_te);
         if (click) TEClick(*click, shift, field_te);
         else TESetSelect(0, 32767, field_te);
+        TEAutoView(f->type == FIELD_TEXTAREA, field_te);   /* then typing keeps in view */
     }
     draw_view();
 }
@@ -953,7 +1051,7 @@ static void next_field(int step)
     for (i = 1; i <= n; i++) {
         long k = ((focus < 0 ? (step > 0 ? -1 : 0) : focus) + i * step + n * 2) % n;
         char t = forms.fields[k].type;
-        if (t == FIELD_TEXT || t == FIELD_PASSWORD || t == FIELD_TEXTAREA) { focus_field(k, NULL, false); return; }
+        if ((t == FIELD_TEXT || t == FIELD_PASSWORD || t == FIELD_TEXTAREA) && !forms.fields[k].disabled) { focus_field(k, NULL, false); return; }
     }
 }
 
@@ -978,6 +1076,7 @@ static void type_in_field(char c, EventRecord *ev)
     save = clip_to(&focus_clip);
     TEKey(c, field_te);
     unclip(save);
+    if (f->type == FIELD_TEXTAREA) area_bar_update(f);
     (void)ev;
 }
 
@@ -1069,10 +1168,10 @@ static void read_head(Response *r)
             return;
         }
         if (line == 0 && e > 12 && !memcmp(r->buf, "HTTP/", 5)) r->code = atoi(r->buf + 9);
-        if (e - line > 11 && prefix_ci(r->buf + line, "Set-Cookie:", 11) && r->req && r->req->scheme == SCHEME_HTTP && accept_cookies()) {
+        if (e - line > 11 && prefix_ci(r->buf + line, "Set-Cookie:", 11) && r->req && url_is_web(r->req->scheme) && accept_cookies()) {
             unsigned long now;
             ReadDateTime(&now);  /* the trap: GetDateTime is a low-memory read GCC flags */
-            jar_set(&jar, r->req->host, r->req->path, r->buf + line + 11, e - line - 11, now);
+            jar_set(&jar, r->req->host, r->req->path, r->req->scheme == SCHEME_HTTPS, r->buf + line + 11, e - line - 11, now);
         }
         if (e - line > 15 && prefix_ci(r->buf + line, "Content-Length:", 15)) length = atol(r->buf + line + 15);
         if (e - line > 13 && prefix_ci(r->buf + line, "Content-Type:", 13)) {
@@ -1151,7 +1250,8 @@ static Boolean collect(const char *data, long len, void *ref)
     if (r->total > 0) sprintf(msg, "%s... %ldK of %ldK", r->saving ? "Saving" : "Reading", (r->len + 1023) / 1024, (r->total + 1023) / 1024);
     else sprintf(msg, "%s... %ldK", r->saving ? "Saving" : "Reading", (r->len + 1023) / 1024);
     progress(msg);
-    return true;
+    /* done at the length it gave, even if the server (or a proxy) keeps the connection open */
+    return !(r->total > 0 && r->len >= r->total);
 }
 
 /* After a fetch that saved, or was to: say how it went */
@@ -1254,7 +1354,7 @@ static void split_response(const char *b, long len, Head *h)
     }
 }
 
-enum { FETCH_BAD_URL = 1, FETCH_CROSS };
+enum { FETCH_BAD_URL = 1, FETCH_CROSS, FETCH_NO_TLS };
 
 /* A 401 Mill can answer: with the address's own name and password the first time, again
    with a new nonce when Digest's went stale, and otherwise by asking. sent is what went
@@ -1298,7 +1398,7 @@ static const char *request_headers(const Url *u, const char *method, Cred **sent
     int n = 0;
     ReadDateTime(&now);  /* the trap: GetDateTime is a low-memory read GCC flags */
     headers[0] = 0;
-    if (accept_cookies() && jar_header(&jar, u->host, u->path, now, headers + 8, 1024) > 0) {
+    if (accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + 8, 1024) > 0) {
         memcpy(headers, "Cookie: ", 8);
         n = strlen(headers);
     }
@@ -1312,10 +1412,33 @@ static const char *request_headers(const Url *u, const char *method, Cred **sent
     return headers;
 }
 
+static char asked[140];    /* who the last web request went to: the site, or the proxy */
+
+/* An http: or https: request, through the proxy if there is one and the site isn't
+   excluded from it; https: only goes that way, as Mill can't do TLS itself */
+static OSErr web_request(const Url *u, const char *headers, const char *content_type, const char *body,
+                         long body_len, Response *resp)
+{
+    char site[140], whole[420];
+    Url via;
+    if (u->port == (u->scheme == SCHEME_HTTPS ? 443 : 80)) snprintf(site, sizeof site, "%s", u->host);
+    else snprintf(site, sizeof site, "%s:%u", u->host, u->port);
+    if (proxy_on() && proxy()[0] && !url_parse(proxy(), &via) && !url_host_in(u->host, proxy_excluded()) &&
+        (u->scheme == SCHEME_HTTP || proxy_https())) {
+        /* a proxy is asked for the whole address */
+        strcpy(asked, via.host);
+        url_format(u, whole, sizeof whole);
+        return net_http_request(via.host, via.port, whole, site, headers, content_type, body, body_len, collect, resp);
+    }
+    if (u->scheme == SCHEME_HTTPS) return FETCH_NO_TLS;
+    strcpy(asked, u->host);
+    return net_http_request(u->host, u->port, u->path, site, headers, content_type, body, body_len, collect, resp);
+}
+
 /* Fetch a URL into resp (a POST when content_type is given), following up to five
    redirects of the same kind and answering a site's request for a name and password;
    target becomes where it ended up, without any user:password@. Returns noErr, a MacTCP
-   error, FETCH_BAD_URL, or FETCH_CROSS. */
+   error, FETCH_BAD_URL, FETCH_CROSS, or FETCH_NO_TLS. */
 static OSErr fetch(char *target, const char *content_type, const char *body, long body_len,
                    Response *resp, Url *u, Head *h)
 {
@@ -1343,9 +1466,9 @@ static OSErr fetch(char *target, const char *content_type, const char *body, lon
         resp->headed = resp->cut = false;
         resp->url = target;
         resp->req = u;
-        if (u->scheme == SCHEME_HTTP) {
+        if (url_is_web(u->scheme)) {
             const char *headers = request_headers(u, content_type ? "POST" : "GET", &sent);
-            err = net_http_request(u->host, u->port, u->path, headers, content_type, body, body_len, collect, resp);
+            err = web_request(u, headers, content_type, body, body_len, resp);
         } else {
             err = local_request(u, content_type, body, body_len, collect, resp);
         }
@@ -1355,13 +1478,13 @@ static OSErr fetch(char *target, const char *content_type, const char *body, lon
             login_user[0] = 0;  /* redirected somewhere else */
             memset(login_pass, 0, sizeof login_pass);
         }
-        if (h->code == 401 && h->challenge.scheme != AUTH_NONE && u->scheme == SCHEME_HTTP && answers++ < 4 &&
+        if (h->code == 401 && h->challenge.scheme != AUTH_NONE && url_is_web(u->scheme) && answers++ < 4 &&
             answer(u, &h->challenge, sent, login_user, login_pass))
             continue;
         if ((h->code == 301 || h->code == 302 || h->code == 303) && h->location[0] && redirects++ < 5) {
             char next[300];
             if (url_resolve(target, h->location, next, sizeof next)) return noErr;
-            if (scheme_of(next) != u->scheme) return FETCH_CROSS;
+            if (kind_of(next) != kind_of(target)) return FETCH_CROSS;
             strcpy(target, next);
             content_type = NULL;  /* a redirect after a POST is fetched with GET */
             continue;
@@ -1526,16 +1649,25 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
     }
     show_url(shown_url);
     if (stopped || err == userCanceledErr) { set_status("Stopped."); goto done; }
-    if (err == FETCH_BAD_URL) { set_status("Mill opens http:, file:, and mill: addresses."); goto done; }
+    if (err == FETCH_NO_TLS) {
+        /* https: without a proxy: a page that says so, at the address asked for */
+        static const char no_tls[] = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n"
+            "<TITLE>TLS is not supported</TITLE><H2>TLS is not supported</H2>"
+            "<P>Please configure a proxy for https:// in Preferences, in the Edit menu.";
+        collect(no_tls, sizeof no_tls - 1, &resp);
+        split_response(resp.buf, resp.len, &h);
+        err = noErr;
+    }
+    if (err == FETCH_BAD_URL) { set_status("Mill opens http:, https:, file:, and mill: addresses."); goto done; }
     if (err == FETCH_CROSS) { set_status("Stopped at a redirect to another kind of address."); goto done; }
     if (err != noErr) {
         char msg[200];
         if (net_stage == NET_LOOKUP)
-            snprintf(msg, sizeof msg, err == commandTimeout ? "Looking up %s took too long." : "Couldn't find %s.", u.host);
+            snprintf(msg, sizeof msg, err == commandTimeout ? "Looking up %s took too long." : "Couldn't find %s.", asked);
         else if (net_stage == NET_CONNECT)
-            snprintf(msg, sizeof msg, "Couldn't connect to %s.", u.host);
+            snprintf(msg, sizeof msg, "Couldn't connect to %s.", asked);
         else
-            snprintf(msg, sizeof msg, "The connection to %s failed (MacTCP error %d).", u.host, err);
+            snprintf(msg, sizeof msg, "The connection to %s failed (MacTCP error %d).", asked, err);
         set_status(msg);
         goto done;
     }
@@ -1608,10 +1740,10 @@ static Boolean go(const char *url, Boolean record)
 
 static Boolean same_kind(const char *url)
 {
-    return scheme_of(url) == scheme_of(page_url);
+    return kind_of(url) == kind_of(page_url);
 }
 
-/* file: and mill: are this Mac's own: a web page (http:, and later others) can't link
+/* file: and mill: are this Mac's own: a web page (http: or https:) can't link
    into them, as browsers since keep web pages out of file: and about:. Any other link
    may change kind. Images, forms, and redirects stay with their page's own kind. */
 static Boolean local_scheme(int scheme) { return scheme == SCHEME_FILE || scheme == SCHEME_MILL; }
@@ -1978,6 +2110,51 @@ static void choose_option(Field *f, const Rect *box)
     draw_view();
 }
 
+/* A click in text area i's scroll bar at p: a line at a time on the arrows, a view at a
+   time on the track, for as long as the button is held. The area takes the typing. */
+static void area_scroll(long i, Point p)
+{
+    Field *f = &forms.fields[i];
+    Rect box, inner, bar;
+    long view, most, by, wait;
+    if (focus != i) {
+        focus_field(i, NULL, false);
+        TEAutoView(false, field_te);
+        TESetSelect(0, 0, field_te);
+        TEAutoView(true, field_te);
+    }
+    if (!control_box(f->node, &box)) return;
+    inner = text_part(f, box);
+    bar = area_bar(&box);
+    view = inner.bottom - inner.top;
+    most = area_height(f, &inner) - view;
+    if (most <= 0) return;
+    if (p.v < bar.top + AREA_BAR) by = -(*field_te)->lineHeight;
+    else if (p.v >= bar.bottom - AREA_BAR) by = (*field_te)->lineHeight;
+    else {
+        long top = (*field_te)->viewRect.top - (*field_te)->destRect.top;
+        short thumb = bar.top + AREA_BAR + (short)((bar.bottom - bar.top - 3 * AREA_BAR) * top / most);
+        by = (view / (*field_te)->lineHeight - 1) * (*field_te)->lineHeight;
+        if (by < (*field_te)->lineHeight) by = (*field_te)->lineHeight;
+        if (p.v < thumb) by = -by;
+    }
+    for (wait = 15; ; wait = 4) {   /* a pause before it repeats, as the Mac's scroll bars */
+        long top = (*field_te)->viewRect.top - (*field_te)->destRect.top, to = top + by;
+        unsigned long until = TickCount() + wait;
+        RgnHandle save;
+        if (to < 0) to = 0;
+        if (to > most) to = most;
+        if (to != top) {
+            save = clip_to(&focus_clip);
+            TEScroll(0, (short)(top - to), field_te);
+            unclip(save);
+            area_bar_update(f);
+        }
+        while (TickCount() < until && StillDown()) {}
+        if (!StillDown()) break;
+    }
+}
+
 /* A click on a form control: true if it was one */
 static Boolean click_control(Point p, EventRecord *ev)
 {
@@ -1987,6 +2164,11 @@ static Boolean click_control(Point p, EventRecord *ev)
     Rect box;
     if (!r || r->kind != RUN_CONTROL || (i = forms_find(&forms, r->text)) < 0 || !control_box(r->text, &box)) return false;
     f = &forms.fields[i];
+    if (f->disabled) return true;
+    if (f->type == FIELD_TEXTAREA) {
+        Rect bar = area_bar(&box);
+        if (PtInRect(p, &bar)) { area_scroll(i, p); return true; }
+    }
     switch (f->type) {
     case FIELD_CHECKBOX: case FIELD_RADIO:
         if (press(&box)) { forms_click(&forms, i); draw_view(); }
@@ -2149,7 +2331,7 @@ static void bookmark_dialog(short slot)
     Cred *login = NULL;
     Url pu;
     if (!page_url[0]) return;
-    if (!url_parse(page_url, &pu) && pu.scheme == SCHEME_HTTP) login = auth_for_path(&keyring, pu.host, pu.port, pu.path);
+    if (!url_parse(page_url, &pu) && url_is_web(pu.scheme)) login = auth_for_path(&keyring, pu.host, pu.port, pu.path);
     blur();
     if (slot < 0) {
         for (slot = 0; slot < BOOKMARKS && bookmark(slot, url, sizeof url, title, sizeof title); slot++) {}

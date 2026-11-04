@@ -84,6 +84,26 @@ static void test_utf8(void)
     html_free(&d);
 }
 
+/* DISABLED controls can't be changed and aren't sent */
+static void test_disabled(void)
+{
+    Doc d;
+    Forms F;
+    Submission sub;
+    const char *html = "<FORM ACTION=/f><INPUT NAME=a VALUE=1><INPUT NAME=b VALUE=2 DISABLED>"
+                       "<INPUT TYPE=checkbox NAME=c VALUE=yes CHECKED DISABLED><INPUT TYPE=checkbox NAME=e VALUE=yes DISABLED></FORM>";
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(forms_build(&F, &d) == 0 && F.n == 4);
+    CHECK(!F.fields[0].disabled && F.fields[1].disabled && F.fields[2].disabled);
+    forms_click(&F, 3);
+    CHECK(!F.fields[3].checked);
+    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, NULL, NULL, &sub) == 0);
+    if (strcmp(sub.data, "a=1")) { printf("FAIL disabled form data: %s\n", sub.data); failures++; }
+    submission_free(&sub);
+    forms_free(&F);
+    html_free(&d);
+}
+
 static void test_parse(void)
 {
     Doc d;
@@ -163,6 +183,24 @@ static void test_lists(void)
     one = find(&L, &d, "one"); two = find(&L, &d, "two"); key = find(&L, &d, "Key"); what = find(&L, &d, "what");
     CHECK(one && two && one->x == two->x && one->x > 8);
     CHECK(key && what && what->x > key->x);
+    layout_free(&L);
+    html_free(&d);
+}
+
+/* A cell's set WIDTH holds when the table is short of room, so tables line up */
+static void test_fixed_width(void)
+{
+    Doc d;
+    Layout L;
+    const char *html = "<TABLE WIDTH=100% BORDER=0 CELLSPACING=0 CELLPADDING=0><TR><TD WIDTH=110>Label</TD>"
+                       "<TD>one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                       "sixteen seventeen eighteen nineteen twenty</TD></TR></TABLE>";
+    const Run *one;
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 300) == 0);
+    one = find(&L, &d, "one");
+    if (one && one->x != 8 + 110) printf("fixed width: second column at %d, not %d\n", one->x, 8 + 110);
+    CHECK(one && one->x == 8 + 110);
     layout_free(&L);
     html_free(&d);
 }
@@ -414,17 +452,27 @@ static void check_resolve(const char *base, const char *href, const char *want)
     if (r || strcmp(out, want)) { printf("FAIL resolve %s + %s = %s (want %s)\n", base, href, r ? "ERR" : out, want); failures++; }
 }
 
-static void check_cookies(Jar *j, const char *host, const char *path, unsigned long now, const char *want)
+static void check_cookies_by(Jar *j, const char *host, const char *path, int https, unsigned long now, const char *want)
 {
     char got[256];
-    jar_header(j, host, path, now, got, sizeof got);
+    jar_header(j, host, path, https, now, got, sizeof got);
     if (strcmp(got, want)) printf("cookies for %s%s: \"%s\", not \"%s\"\n", host, path, got, want);
     CHECK(!strcmp(got, want));
 }
 
+static void check_cookies(Jar *j, const char *host, const char *path, unsigned long now, const char *want)
+{
+    check_cookies_by(j, host, path, 0, now, want);
+}
+
+static void set_cookie_by(Jar *j, const char *host, const char *path, int https, const char *line, unsigned long now)
+{
+    jar_set(j, host, path, https, line, strlen(line), now);
+}
+
 static void set_cookie(Jar *j, const char *host, const char *path, const char *line, unsigned long now)
 {
-    jar_set(j, host, path, line, strlen(line), now);
+    set_cookie_by(j, host, path, 0, line, now);
 }
 
 static void test_cookies(void)
@@ -456,6 +504,10 @@ static void test_cookies(void)
     set_cookie(&j, "shop.example.com", "/", "id=43", y2k);                              /* replaces id=42 */
     set_cookie(&j, "shop.example.com", "/", "site=; Domain=example.com; Max-Age=0", y2k); /* deletes site */
     check_cookies(&j, "shop.example.com", "/", y2k, "id=43");
+    /* Secure: kept from https, and only sent back over it */
+    set_cookie_by(&j, "shop.example.com", "/", 1, "s=2; Secure", y2k);
+    check_cookies(&j, "shop.example.com", "/", y2k, "id=43");
+    check_cookies_by(&j, "shop.example.com", "/", 1, y2k, "id=43; s=2");
     /* full: the oldest go first */
     memset(big, 'v', sizeof big - 1);
     big[sizeof big - 1] = 0;
@@ -467,7 +519,7 @@ static void test_cookies(void)
     CHECK(j.n <= JAR_MAX_COOKIES && j.bytes <= JAR_MAX_BYTES);
     {
         char got[64];
-        jar_header(&j, "a.example.com", "/", y2k, got, sizeof got);  /* too long to fit: none */
+        jar_header(&j, "a.example.com", "/", 0, y2k, got, sizeof got);  /* too long to fit: none */
         CHECK(got[0] == 0);
     }
     jar_free(&j);
@@ -623,7 +675,45 @@ static void test_urls(void)
         CHECK(url_parse("file:///Macintosh%20HD/x.html", &u) == 0 && u.scheme == SCHEME_FILE && !u.host[0]);
         CHECK(url_parse("www.example.com", &u) == 0 && u.scheme == SCHEME_HTTP);
         CHECK(url_parse("gopher://x", &u) == -1);
+        CHECK(url_parse("HTTPS://Secure.example/a", &u) == 0 && u.scheme == SCHEME_HTTPS && u.port == 443 &&
+              !strcmp(u.host, "Secure.example") && !strcmp(u.path, "/a"));
+        CHECK(url_parse("https://h:8443/", &u) == 0 && u.port == 8443);
+        CHECK(url_parse("proxy.example:5001", &u) == 0 && u.scheme == SCHEME_HTTP && u.port == 5001 && !strcmp(u.host, "proxy.example"));
+        CHECK(url_is_web(SCHEME_HTTP) && url_is_web(SCHEME_HTTPS) && !url_is_web(SCHEME_FILE) && !url_is_web(SCHEME_MILL));
     }
+    /* https: resolves like http:, and keeps its own default port */
+    check_resolve("https://www.example.com/news/", "a.html", "https://www.example.com/news/a.html");
+    check_resolve("https://www.example.com/", "//cdn.example.com/x.gif", "https://cdn.example.com/x.gif");
+    check_resolve("http://www.example.com/", "//cdn.example.com/x.gif", "http://cdn.example.com/x.gif");
+    check_resolve("http://www.example.com/", "https://www.example.com:443/", "https://www.example.com/");
+    check_resolve("https://www.example.com:8443/a", "b", "https://www.example.com:8443/b");
+    check_resolve("https://www.example.com/", "http://www.example.com:80/", "http://www.example.com/");
+    /* domains that skip the proxy */
+    CHECK(url_host_in("example.com", "example.com"));
+    CHECK(url_host_in("www.Example.COM", "other.org, example.com"));
+    CHECK(url_host_in("news.example.lan", ".lan"));
+    CHECK(url_host_in("lan", ".lan"));
+    CHECK(!url_host_in("badexample.com", "example.com"));
+    CHECK(!url_host_in("example.com", "www.example.com"));
+    CHECK(!url_host_in("example.com", ""));
+    CHECK(!url_host_in("example.com", " , ."));
+    /* addresses: only themselves, or a range that holds them; never a domain's suffix */
+    CHECK(url_host_in("10.1.2.5", "10.1.2.5"));
+    CHECK(!url_host_in("10.1.2.5", "2.5"));
+    CHECK(!url_host_in("10.0.0.1", "0.1 0.0.1"));
+    CHECK(!url_host_in("10.1.2.50", "10.1.2.5"));
+    CHECK(url_host_in("172.16.5.5", "example.com 172.16.0.0/12"));
+    CHECK(url_host_in("172.31.255.255", "172.16.0.0/12"));
+    CHECK(!url_host_in("172.32.0.1", "172.16.0.0/12"));
+    CHECK(url_host_in("192.168.1.20", "192.168.1.0/24"));
+    CHECK(!url_host_in("192.168.2.20", "192.168.1.0/24"));
+    CHECK(url_host_in("8.8.8.8", "0.0.0.0/0"));
+    CHECK(url_host_in("10.1.2.3", "10.1.2.3/32"));
+    CHECK(!url_host_in("10.1.2.3", "10.1.2.0/33 10.1.2.0/ 10.1.2.0/x 10.1.2.0/024"));
+    CHECK(!url_host_in("1.2.3.4", ".lan, 1.2.3"));
+    CHECK(!url_host_in("www.example.com", "1.2.3.4 0.0.0.0/0"));
+    CHECK(url_host_in("1.2.3.4.example.com", "example.com"));
+    CHECK(url_host_in("256.1.1.1", "256.1.1.1"));  /* not an address: a name, and it matches as one */
 }
 
 /* The layout as a picture: text as bars, rules, borders, and image boxes */
@@ -805,6 +895,8 @@ static void test_logins(void)
 int main(void)
 {
     test_charset();
+    test_fixed_width();
+    test_disabled();
     test_utf8();
     test_parse();
     test_layout();

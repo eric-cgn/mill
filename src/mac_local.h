@@ -38,6 +38,13 @@ const char *file_type_rules(void);
 int decode_macbinary(void);
 /* Whether sites may keep cookies (until Mill quits) */
 int accept_cookies(void);
+/* Whether to use the proxy; the proxy that fetches pages for Mill (host:port), kept
+   while it's off; the domains and addresses that skip it (see url_host_in); and
+   whether https: addresses go to it */
+int proxy_on(void);
+const char *proxy(void);
+const char *proxy_excluded(void);
+int proxy_https(void);
 
 /* Bookmarks: ten slots, n from 0 (Command-1) to 9 (Command-0), kept in the settings */
 #define BOOKMARKS 10
