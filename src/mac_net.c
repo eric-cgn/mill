@@ -213,7 +213,7 @@ OSErr net_http_request(const char *host, unsigned short port, const char *target
     /* An HTTP/1.0 request, as browsers of 1996 sent them */
     strcpy(request, content_type ? "POST " : "GET ");
     strcat(request, target);
-    strcat(request, " HTTP/1.0\r\nUser-Agent: Mill/" MILL_VERSION "\r\nAccept: */*\r\nHost: ");
+    strcat(request, " HTTP/1.0\r\nAccept: */*\r\nHost: ");
     strcat(request, site);
     if (headers[0]) {
         strcat(request, "\r\n");

@@ -1388,18 +1388,19 @@ static Boolean answer(const Url *u, const Challenge *ch, Cred *sent, char *login
     return true;
 }
 
-/* The extra header lines for an HTTP request: cookies, and a name and password kept
-   for where it goes (which *sent says, or NULL) */
+/* The extra header lines for an HTTP request: the User-Agent, cookies, and a name and
+   password kept for where it goes (which *sent says, or NULL) */
 static const char *request_headers(const Url *u, const char *method, Cred **sent)
 {
-    static char headers[1700], value[600];
+    static char headers[1900], value[600];
     static unsigned long count;
     unsigned long now;
     int n = 0;
     ReadDateTime(&now);  /* the trap: GetDateTime is a low-memory read GCC flags */
     headers[0] = 0;
-    if (accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + 8, 1024) > 0) {
-        memcpy(headers, "Cookie: ", 8);
+    if (user_agent()[0]) n = snprintf(headers, 160, "User-Agent: %.140s", user_agent());
+    if (accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + n + (n ? 10 : 8), 1024) > 0) {
+        memcpy(headers + n, n ? "\r\nCookie: " : "Cookie: ", n ? 10 : 8);
         n = strlen(headers);
     }
     if ((*sent = auth_for_path(&keyring, u->host, u->port, u->path)) != NULL) {
