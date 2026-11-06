@@ -70,7 +70,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p site/download
-          gh release list --limit 100 --json tagName -q '.[].tagName' | while read -r tag; do
+          gh release list --limit 100 --exclude-pre-releases --json tagName -q '.[].tagName' | while read -r tag; do
             gh release download "$tag" --dir site/download --pattern 'Mill-*'
           done
       - name: Page
