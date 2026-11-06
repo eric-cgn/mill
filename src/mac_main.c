@@ -24,7 +24,7 @@
 #include "version.h"
 
 enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
-enum { FILE_LOCATION = 1, FILE_OPEN, FILE_QUIT = 4 };
+enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_QUIT = 6 };
 enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_PREFERENCES = 7 };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
@@ -37,46 +37,70 @@ enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the s
 #define HISTORY 32
 #define FILE_MSG "Web pages can't open this Mac's files or Mill's own pages. Type the address to go there."
 #define FORM_MSG "Forms can only send to the same kind of address as their page."
+#define ALERT_MEMORY 202
 
-static WindowPtr win;
-static TEHandle url_te;
-static ControlHandle vscroll, hscroll;   /* hscroll shows only when the page is wider than the view */
-static Boolean hbar;
-static Boolean quitting = false, loading = false;
-static char status_text[128];
-static short mill_frame = 0;
-static long mill_tick = 0;
+/* One per distinct picture on the page (the same SRC at the same size is fetched once) */
+typedef struct {
+    char *url;
+    short aw, ah;       /* WIDTH and HEIGHT from the page, -1 when not given */
+    char state;         /* PIC_WAITING, PIC_SHOWN, PIC_FAILED */
+    Boolean owned;      /* its bits are its own, not the picture memory's */
+    Bitmap1 bm;
+} Pic;
+enum { PIC_WAITING, PIC_SHOWN, PIC_FAILED };
 
-static Doc doc;
+/* A browser window and its page */
+typedef struct Browser {
+    struct Browser *next;
+    WindowPtr win;
+    TEHandle url_te;
+    TEHandle field_te;          /* typing in a text field or text area happens here */
+    ControlHandle vscroll, hscroll;   /* hscroll shows only when the page is wider than the view */
+    Boolean hbar, loading;
+    Rect back_r, fwd_r, reload_r, mill_r, view_r, status_r;
+    char status_text[128];
+    Boolean status_up, status_held;  /* showing; held by the mouse on a link */
+    long status_tick;                /* when it last changed */
+    short mill_frame;
+    long mill_tick;
+    Doc doc;
+    Layout lay;
+    Forms forms;
+    Boolean have_page;
+    long scroll_y;              /* page pixels above the view */
+    long scroll_x;              /* page pixels left of the view */
+    short page_w;               /* how wide the laid-out page is */
+    short scroll_scale;         /* page pixels per scroll bar unit (control values are 16-bit) */
+    char page_url[300];
+    char *history[HISTORY];
+    short hist_len, hist_pos;
+    Pic *pics;
+    short npics;
+    short *pic_of;              /* IMG node -> index in pics + 1, or 0 */
+    long focus;                 /* the field being typed in, or -1 for the address */
+    Boolean focus_shown;        /* the focused field was on screen at the last draw */
+    Rect focus_clip;            /* and where */
+} Browser;
+
+static Browser *browsers;       /* every window, front or not */
+static Browser *br;             /* the one being worked on */
+static Boolean quitting = false;
 static Jar jar;         /* cookies, while Mill runs */
 static Keyring keyring; /* names and passwords given for sites, while Mill runs */
-static Layout lay;
-static Forms forms;
-static Boolean have_page = false;
-static long scroll_y = 0;       /* page pixels above the view */
-static long scroll_x = 0;       /* page pixels left of the view */
-static short page_w;            /* how wide the laid-out page is */
-#define PAGE_LEFT (view_r.left - (short)scroll_x)  /* where page x 0 is in the window */
-static short scroll_scale = 1;  /* page pixels per scroll bar unit (control values are 16-bit) */
-static char page_url[300];
-
-static char *history[HISTORY];
-static short hist_len = 0, hist_pos = -1;
+#define PAGE_LEFT (br->view_r.left - (short)br->scroll_x)  /* where page x 0 is in the window */
 
 /* ------------------------------------------------------------ geometry */
 
-static Rect back_r, fwd_r, reload_r, mill_r, view_r, status_r;
-
 static void geometry(void)
 {
-    Rect r = win->portRect;
-    SetRect(&back_r, 3, 3, 3 + TOOL_ICON, 3 + TOOL_ICON);
-    fwd_r = back_r;
-    OffsetRect(&fwd_r, 13, 0);
-    reload_r = fwd_r;
-    OffsetRect(&reload_r, 13, 0);
-    SetRect(&mill_r, r.right - SCROLL + 1, 0, r.right - SCROLL + 1 + MILL_ICON, MILL_ICON);  /* above the scroll bar */
-    SetRect(&view_r, 0, BAR + 1, r.right - SCROLL + 1, r.bottom - (hbar ? SCROLL - 1 : 0));
+    Rect r = br->win->portRect;
+    SetRect(&br->back_r, 3, 3, 3 + TOOL_ICON, 3 + TOOL_ICON);
+    br->fwd_r = br->back_r;
+    OffsetRect(&br->fwd_r, 13, 0);
+    br->reload_r = br->fwd_r;
+    OffsetRect(&br->reload_r, 13, 0);
+    SetRect(&br->mill_r, r.right - SCROLL + 1, 0, r.right - SCROLL + 1 + MILL_ICON, MILL_ICON);  /* above the scroll bar */
+    SetRect(&br->view_r, 0, BAR + 1, r.right - SCROLL + 1, r.bottom - (br->hbar ? SCROLL - 1 : 0));
 }
 
 /* Drawing limited to r, within the page view; returns the clip to put back */
@@ -85,7 +109,7 @@ static RgnHandle clip_to(const Rect *r)
     RgnHandle save = NewRgn();
     Rect c;
     GetClip(save);
-    SectRect(r, &view_r, &c);
+    SectRect(r, &br->view_r, &c);
     ClipRect(&c);
     return save;
 }
@@ -108,7 +132,7 @@ static void draw_bits(const unsigned short *rows, short n, short width, const Re
     bm.rowBytes = 2;
     SetRect(&bm.bounds, 0, 0, 16, n);
     SetRect(&src, 0, 0, width, n);
-    CopyBits(&bm, &win->portBits, &src, where, srcCopy, NULL);
+    CopyBits(&bm, &br->win->portBits, &src, where, srcCopy, NULL);
     if (dim) {
         PenPat(&qd.gray);
         PenMode(patBic);
@@ -119,30 +143,30 @@ static void draw_bits(const unsigned short *rows, short n, short width, const Re
 
 static void draw_mill(void)
 {
-    draw_bits(ICON_MILL[mill_frame], 16, 16, &mill_r, false);
+    draw_bits(ICON_MILL[br->mill_frame], 16, 16, &br->mill_r, false);
 }
 
 /* Turn the sails a step; called while loading, at most every few ticks */
 static void spin(void)
 {
     GrafPtr old;
-    if (TickCount() - mill_tick < 4) return;
-    mill_tick = TickCount();
-    mill_frame = (mill_frame + 1) & 3;
+    if (TickCount() - br->mill_tick < 4) return;
+    br->mill_tick = TickCount();
+    br->mill_frame = (br->mill_frame + 1) & 3;
     GetPort(&old);
-    SetPort(win);
+    SetPort(br->win);
     draw_mill();
     SetPort(old);
 }
 
 static void draw_toolbar(void)
 {
-    Rect r = win->portRect;
-    draw_bits(ICON_BACK, TOOL_ICON, TOOL_ICON, &back_r, hist_pos <= 0);
-    draw_bits(ICON_FORWARD, TOOL_ICON, TOOL_ICON, &fwd_r, hist_pos >= hist_len - 1);
+    Rect r = br->win->portRect;
+    draw_bits(ICON_BACK, TOOL_ICON, TOOL_ICON, &br->back_r, br->hist_pos <= 0);
+    draw_bits(ICON_FORWARD, TOOL_ICON, TOOL_ICON, &br->fwd_r, br->hist_pos >= br->hist_len - 1);
     /* reload, or a stop sign while something loads */
-    draw_bits(loading ? ICON_STOP : ICON_RELOAD, TOOL_ICON, TOOL_ICON, &reload_r, !loading && hist_pos < 0);
-    TEUpdate(&(*url_te)->viewRect, url_te);
+    draw_bits(br->loading ? ICON_STOP : ICON_RELOAD, TOOL_ICON, TOOL_ICON, &br->reload_r, !br->loading && br->hist_pos < 0);
+    TEUpdate(&(*br->url_te)->viewRect, br->url_te);
     draw_mill();
     MoveTo(r.left, BAR);
     LineTo(r.right, BAR);
@@ -152,10 +176,10 @@ static void draw_toolbar(void)
 static void set_loading(Boolean on)
 {
     GrafPtr old;
-    loading = on;
+    br->loading = on;
     GetPort(&old);
-    SetPort(win);
-    draw_bits(loading ? ICON_STOP : ICON_RELOAD, TOOL_ICON, TOOL_ICON, &reload_r, !loading && hist_pos < 0);
+    SetPort(br->win);
+    draw_bits(br->loading ? ICON_STOP : ICON_RELOAD, TOOL_ICON, TOOL_ICON, &br->reload_r, !br->loading && br->hist_pos < 0);
     SetPort(old);
 }
 
@@ -164,8 +188,6 @@ static void set_loading(Boolean on)
 /* Black text on a small white patch, lined along its top and right, over the page's
    bottom left corner. It stays while something loads or the mouse is on a link, and goes
    STATUS_SECS after it last changed. */
-static Boolean status_up, status_held;  /* showing; held by the mouse on a link */
-static long status_tick;                /* when it last changed */
 static Boolean page_limited;            /* draw_page: only page_limit */
 static Rect page_limit;
 
@@ -177,24 +199,24 @@ static void status_box(Rect *r)
     TextFont(kFontIDGeneva);
     TextSize(9);
     TextFace(0);
-    w = TextWidth(status_text, 0, strlen(status_text)) + 9;
-    if (w > view_r.right - view_r.left) w = view_r.right - view_r.left;
-    SetRect(r, view_r.left, view_r.bottom - 13, view_r.left + w, view_r.bottom);
+    w = TextWidth(br->status_text, 0, strlen(br->status_text)) + 9;
+    if (w > br->view_r.right - br->view_r.left) w = br->view_r.right - br->view_r.left;
+    SetRect(r, br->view_r.left, br->view_r.bottom - 13, br->view_r.left + w, br->view_r.bottom);
 }
 
 static void draw_status(void)
 {
     RgnHandle save;
-    if (!status_up) return;
-    status_box(&status_r);
-    save = clip_to(&status_r);
-    EraseRect(&status_r);
+    if (!br->status_up) return;
+    status_box(&br->status_r);
+    save = clip_to(&br->status_r);
+    EraseRect(&br->status_r);
     /* a line along the top and down the right, so it reads as its own patch */
-    MoveTo(status_r.left, status_r.top);
-    LineTo(status_r.right - 1, status_r.top);
-    LineTo(status_r.right - 1, status_r.bottom - 1);
-    MoveTo(status_r.left + 4, status_r.bottom - 3);
-    DrawText(status_text, 0, strlen(status_text));
+    MoveTo(br->status_r.left, br->status_r.top);
+    LineTo(br->status_r.right - 1, br->status_r.top);
+    LineTo(br->status_r.right - 1, br->status_r.bottom - 1);
+    MoveTo(br->status_r.left + 4, br->status_r.bottom - 3);
+    DrawText(br->status_text, 0, strlen(br->status_text));
     unclip(save);
 }
 
@@ -210,31 +232,31 @@ static void draw_page_area(const Rect *r)
 static void hide_status(void)
 {
     GrafPtr old;
-    if (!status_up) return;
-    status_up = status_held = false;
+    if (!br->status_up) return;
+    br->status_up = br->status_held = false;
     GetPort(&old);
-    SetPort(win);
-    draw_page_area(&status_r);
+    SetPort(br->win);
+    draw_page_area(&br->status_r);
     SetPort(old);
 }
 
 static void set_status(const char *msg)
 {
     GrafPtr old;
-    Rect was = status_r;
-    Boolean was_up = status_up;
-    status_tick = TickCount();
-    status_held = false;
-    if (!strcmp(msg, status_text) && (status_up || !msg[0])) { spin(); return; }
-    strncpy(status_text, msg, sizeof status_text - 1);
+    Rect was = br->status_r;
+    Boolean was_up = br->status_up;
+    br->status_tick = TickCount();
+    br->status_held = false;
+    if (!strcmp(msg, br->status_text) && (br->status_up || !msg[0])) { spin(); return; }
+    strncpy(br->status_text, msg, sizeof br->status_text - 1);
     if (!msg[0]) { hide_status(); spin(); return; }
     GetPort(&old);
-    SetPort(win);
-    status_up = true;
-    status_box(&status_r);
-    if (was_up && was.right > status_r.right) {
+    SetPort(br->win);
+    br->status_up = true;
+    status_box(&br->status_r);
+    if (was_up && was.right > br->status_r.right) {
         /* the part a longer message covered */
-        was.left = status_r.right;
+        was.left = br->status_r.right;
         draw_page_area(&was);
     }
     draw_status();
@@ -245,7 +267,7 @@ static void set_status(const char *msg)
 /* Called when Mill is idle */
 static void status_idle(void)
 {
-    if (status_up && !loading && !status_held && TickCount() - status_tick > STATUS_SECS * 60L) hide_status();
+    if (br->status_up && !br->loading && !br->status_held && TickCount() - br->status_tick > STATUS_SECS * 60L) hide_status();
 }
 
 /* ------------------------------------------------------------ QuickDraw metrics */
@@ -285,6 +307,7 @@ typedef struct {
     short aw, ah;
     Bitmap1 bm;
     long used;          /* the page load that last showed it */
+    short users;        /* windows whose page shows it now */
 } Kept;
 
 static Kept *kept;
@@ -300,14 +323,14 @@ static Kept *kept_find(const char *url, short aw, short ah)
     return NULL;
 }
 
-/* Make room for need bytes under limit by letting go of pictures this page isn't showing,
+/* Make room for need bytes under limit by letting go of pictures no window is showing,
    least recently shown first; returns whether there's room */
 static Boolean kept_trim(long need, long limit)
 {
     while (kept_bytes + need > limit) {
         short i, oldest = -1;
         for (i = 0; i < nkept; i++)
-            if (kept[i].used != page_number && (oldest < 0 || kept[i].used < kept[oldest].used)) oldest = i;
+            if (!kept[i].users && (oldest < 0 || kept[i].used < kept[oldest].used)) oldest = i;
         if (oldest < 0) return false;
         kept_bytes -= bitmap_bytes(&kept[oldest].bm);
         free(kept[oldest].url);
@@ -332,6 +355,7 @@ static Boolean kept_add(const char *url, short aw, short ah, const Bitmap1 *bm)
     k->ah = ah;
     k->bm = *bm;
     k->used = page_number;
+    k->users = 1;
     kept_bytes += size;
     nkept++;
     return true;
@@ -339,34 +363,26 @@ static Boolean kept_add(const char *url, short aw, short ah, const Bitmap1 *bm)
 
 /* ------------------------------------------------------------ pictures */
 
-/* One per distinct picture on the page (the same SRC at the same size is fetched once) */
-typedef struct {
-    char *url;
-    short aw, ah;       /* WIDTH and HEIGHT from the page, -1 when not given */
-    char state;         /* PIC_WAITING, PIC_SHOWN, PIC_FAILED */
-    Boolean owned;      /* its bits are its own, not the picture memory's */
-    Bitmap1 bm;
-} Pic;
-enum { PIC_WAITING, PIC_SHOWN, PIC_FAILED };
-
-static Pic *pics;
-static short npics;
-static short *pic_of;   /* IMG node -> index in pics + 1, or 0 */
-
 static void pics_free(void)
 {
     short i;
-    for (i = 0; i < npics; i++) { free(pics[i].url); if (pics[i].owned) image_free(&pics[i].bm); }
-    free(pics);
-    free(pic_of);
-    pics = NULL;
-    pic_of = NULL;
-    npics = 0;
+    for (i = 0; i < br->npics; i++) {
+        Pic *p = &br->pics[i];
+        Kept *k;
+        if (p->owned) image_free(&p->bm);
+        else if (p->state == PIC_SHOWN && (k = kept_find(p->url, p->aw, p->ah))) k->users--;
+        free(p->url);
+    }
+    free(br->pics);
+    free(br->pic_of);
+    br->pics = NULL;
+    br->pic_of = NULL;
+    br->npics = 0;
 }
 
 static short px_attr(const Node *n, const char *name)
 {
-    const char *v = html_attr(&doc, n, name);
+    const char *v = html_attr(&br->doc, n, name);
     return v && !strchr(v, '%') && atoi(v) > 0 ? (short)atoi(v) : -1;
 }
 
@@ -386,25 +402,25 @@ static int kind_of(const char *url)
 static void pics_collect(void)
 {
     long i;
-    int kind = kind_of(page_url);
-    pic_of = calloc(doc.nnodes, sizeof(short));
-    if (!pic_of) return;
-    for (i = 0; i < doc.nnodes; i++) {
-        const Node *n = &doc.nodes[i];
+    int kind = kind_of(br->page_url);
+    br->pic_of = calloc(br->doc.nnodes, sizeof(short));
+    if (!br->pic_of) return;
+    for (i = 0; i < br->doc.nnodes; i++) {
+        const Node *n = &br->doc.nodes[i];
         const char *src;
         char url[300];
         short k, aw, ah;
         Pic *p;
-        if (n->tag != TAG_IMG || !(src = html_attr(&doc, n, "src")) || url_resolve(page_url, src, url, sizeof url)) continue;
+        if (n->tag != TAG_IMG || !(src = html_attr(&br->doc, n, "src")) || url_resolve(br->page_url, src, url, sizeof url)) continue;
         if (kind_of(url) != kind) continue;  /* no pictures from another kind of address */
         aw = px_attr(n, "width");
         ah = px_attr(n, "height");
-        for (k = 0; k < npics; k++) if (pics[k].aw == aw && pics[k].ah == ah && !strcmp(pics[k].url, url)) break;
-        if (k == npics) {
+        for (k = 0; k < br->npics; k++) if (br->pics[k].aw == aw && br->pics[k].ah == ah && !strcmp(br->pics[k].url, url)) break;
+        if (k == br->npics) {
             Kept *keep;
-            if (!(p = realloc(pics, (npics + 1) * sizeof(Pic)))) break;
-            pics = p;
-            p = &pics[npics];
+            if (!(p = realloc(br->pics, (br->npics + 1) * sizeof(Pic)))) break;
+            br->pics = p;
+            p = &br->pics[br->npics];
             memset(p, 0, sizeof *p);
             if (!(p->url = malloc(strlen(url) + 1))) break;
             strcpy(p->url, url);
@@ -415,10 +431,11 @@ static void pics_collect(void)
                 p->bm = keep->bm;
                 p->state = PIC_SHOWN;
                 keep->used = page_number;
+                keep->users++;
             }
-            npics++;
+            br->npics++;
         }
-        pic_of[i] = k + 1;
+        br->pic_of[i] = k + 1;
     }
 }
 
@@ -426,8 +443,8 @@ static int qd_image_size(void *ctx, long node, short *w, short *h)
 {
     const Pic *p;
     (void)ctx;
-    if (!pic_of || !pic_of[node]) return 0;
-    p = &pics[pic_of[node] - 1];
+    if (!br->pic_of || !br->pic_of[node]) return 0;
+    p = &br->pics[br->pic_of[node] - 1];
     if (p->state != PIC_SHOWN) return 0;
     *w = p->bm.w;
     *h = p->bm.h;
@@ -439,11 +456,7 @@ static int qd_image_size(void *ctx, long node, short *w, short *h)
 #define LINE_H 11       /* a line of Geneva 9, which every control uses */
 #define CHOOSE "Choose..."
 
-static long focus = -1;         /* the field being typed in, or -1 for the address */
 #define AREA_BAR 16              /* a text area's scroll bar, wide as the Mac's */
-static TEHandle field_te;       /* typing in a text field or text area happens here */
-static Boolean focus_shown;     /* the focused field was on screen at the last draw */
-static Rect focus_clip;         /* and where */
 
 static void control_font(void)
 {
@@ -454,16 +467,16 @@ static void control_font(void)
 
 static Field *field_of(long node)
 {
-    long i = forms.n ? forms_find(&forms, node) : -1;
-    return i >= 0 ? &forms.fields[i] : NULL;
+    long i = br->forms.n ? forms_find(&br->forms, node) : -1;
+    return i >= 0 ? &br->forms.fields[i] : NULL;
 }
 
 static const char *button_label(const Field *f)
 {
-    const char *v = html_attr(&doc, &doc.nodes[f->node], "value");
+    const char *v = html_attr(&br->doc, &br->doc.nodes[f->node], "value");
     if (v && *v) return v;
     if (f->type == FIELD_RESET) return "Reset";
-    if (f->type == FIELD_IMAGE && (v = html_attr(&doc, &doc.nodes[f->node], "alt")) && *v) return v;
+    if (f->type == FIELD_IMAGE && (v = html_attr(&br->doc, &br->doc.nodes[f->node], "alt")) && *v) return v;
     return "Submit";
 }
 
@@ -477,7 +490,7 @@ static short list_rows(const Field *f)
 static int qd_control_size(void *ctx, long node, short *w, short *h, short *asc)
 {
     Field *f = field_of(node);
-    short cw, i, most = view_r.right - view_r.left - 24;
+    short cw, i, most = br->view_r.right - br->view_r.left - 24;
     (void)ctx;
     if (!f || f->type == FIELD_HIDDEN) return 0;
     control_font();
@@ -499,7 +512,7 @@ static int qd_control_size(void *ctx, long node, short *w, short *h, short *asc)
         char label[100];
         for (i = 0; i < f->noptions; i++) {
             short lw;
-            forms_option_label(&doc, f->options[i], label, sizeof label);
+            forms_option_label(&br->doc, f->options[i], label, sizeof label);
             if ((lw = TextWidth(label, 0, strlen(label))) > widest) widest = lw;
         }
         if (list_rows(f)) { *w = widest + 8; *h = list_rows(f) * LINE_H + 4; *asc = *h - 4; }
@@ -525,12 +538,12 @@ static Metrics qd_m = { qd_width, qd_metrics, qd_image_size, qd_control_size, NU
 static Boolean control_box(long node, Rect *box)
 {
     long i, k;
-    for (i = 0; i < lay.nlines; i++) {
-        const MLine *ln = &lay.lines[i];
+    for (i = 0; i < br->lay.nlines; i++) {
+        const MLine *ln = &br->lay.lines[i];
         for (k = ln->first; k < ln->first + ln->count; k++) {
-            const Run *r = &lay.runs[k];
+            const Run *r = &br->lay.runs[k];
             if (r->kind == RUN_CONTROL && r->text == node) {
-                short top = view_r.top + (short)(ln->y - scroll_y) + ln->ascent - r->font;
+                short top = br->view_r.top + (short)(ln->y - br->scroll_y) + ln->ascent - r->font;
                 SetRect(box, PAGE_LEFT + r->x, top, PAGE_LEFT + r->x + r->width, top + r->size);
                 return true;
             }
@@ -561,7 +574,7 @@ static long area_height(const Field *f, const Rect *inner)
 {
     TEHandle te;
     long h;
-    if (f - forms.fields == focus) return (long)(*field_te)->nLines * (*field_te)->lineHeight;
+    if (f - br->forms.fields == br->focus) return (long)(*br->field_te)->nLines * (*br->field_te)->lineHeight;
     if (!(te = TENew(inner, inner))) return 0;
     TESetText(f->value, strlen(f->value), te);
     TECalText(te);
@@ -611,10 +624,10 @@ static void draw_button(const Rect *b, const char *label)
 /* Put the typing area over a field, keeping any sideways scroll it has */
 static void place_te(const Rect *inner, Boolean wrap)
 {
-    Rect old = (*field_te)->viewRect;
-    (*field_te)->viewRect = *inner;
-    OffsetRect(&(*field_te)->destRect, inner->left - old.left, inner->top - old.top);
-    if (wrap) (*field_te)->destRect.right = (*field_te)->destRect.left + (inner->right - inner->left);
+    Rect old = (*br->field_te)->viewRect;
+    (*br->field_te)->viewRect = *inner;
+    OffsetRect(&(*br->field_te)->destRect, inner->left - old.left, inner->top - old.top);
+    if (wrap) (*br->field_te)->destRect.right = (*br->field_te)->destRect.left + (inner->right - inner->left);
 }
 
 static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
@@ -627,9 +640,9 @@ static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
     save = clip_to(&inner);
     if (focused && f->type != FIELD_PASSWORD) {
         place_te(&inner, f->type == FIELD_TEXTAREA);
-        TEUpdate(&inner, field_te);
-        focus_shown = true;
-        SectRect(&inner, &view_r, &focus_clip);
+        TEUpdate(&inner, br->field_te);
+        br->focus_shown = true;
+        SectRect(&inner, &br->view_r, &br->focus_clip);
     } else if (f->type == FIELD_TEXTAREA) {
         Rect from = inner;
         from.top -= (short)f->scroll;   /* the lines scrolled past are drawn above, and clipped */
@@ -648,7 +661,7 @@ static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
     }
     unclip(save);
     if (f->type == FIELD_TEXTAREA) {
-        long top = focused ? (*field_te)->viewRect.top - (*field_te)->destRect.top : f->scroll;
+        long top = focused ? (*br->field_te)->viewRect.top - (*br->field_te)->destRect.top : f->scroll;
         save = clip_to(box);
         draw_area_bar(box, top, area_height(f, &inner), inner.bottom - inner.top);
         unclip(save);
@@ -660,7 +673,7 @@ static void draw_popup(const Field *f, const Rect *box)
     char label[100] = "";
     short i, x = box->right - 12;
     Rect in = *box;
-    for (i = 0; i < f->noptions; i++) if (f->selected[i]) { forms_option_label(&doc, f->options[i], label, sizeof label); break; }
+    for (i = 0; i < f->noptions; i++) if (f->selected[i]) { forms_option_label(&br->doc, f->options[i], label, sizeof label); break; }
     EraseRect(box);
     FrameRect(box);
     MoveTo(box->left + 1, box->bottom);   /* a pop-up menu's shadow */
@@ -688,7 +701,7 @@ static void draw_list(const Field *f, const Rect *box)
     for (i = 0; i < rows && i < f->noptions; i++) {
         Rect row;
         SetRect(&row, box->left + 1, box->top + 2 + i * LINE_H, box->right - 1, box->top + 2 + (i + 1) * LINE_H);
-        forms_option_label(&doc, f->options[i], label, sizeof label);
+        forms_option_label(&br->doc, f->options[i], label, sizeof label);
         MoveTo(row.left + 3, row.bottom - 2);
         DrawText(label, 0, strlen(label));
         if (f->selected[i]) InvertRect(&row);
@@ -731,7 +744,7 @@ static void draw_control(const Run *r, short top)
         break;
     }
     default:
-        draw_text_box(f, &box, f - forms.fields == focus);
+        draw_text_box(f, &box, f - br->forms.fields == br->focus);
     }
     if (f->disabled) {          /* dimmed, as the Control Manager dims a control */
         PenPat(&qd.gray);
@@ -746,7 +759,7 @@ static void draw_control(const Run *r, short top)
 static void draw_picture(const Run *r, short top)
 {
     Rect box, in;
-    const Pic *p = pic_of && pic_of[r->text] ? &pics[pic_of[r->text] - 1] : NULL;
+    const Pic *p = br->pic_of && br->pic_of[r->text] ? &br->pics[br->pic_of[r->text] - 1] : NULL;
     SetRect(&box, PAGE_LEFT + r->x, top, PAGE_LEFT + r->x + r->width, top + r->size);
     in = box;
     if (r->face) {
@@ -760,10 +773,10 @@ static void draw_picture(const Run *r, short top)
         bm.baseAddr = (Ptr)p->bm.bits;
         bm.rowBytes = p->bm.row_bytes;
         SetRect(&bm.bounds, 0, 0, p->bm.w, p->bm.h);
-        CopyBits(&bm, &win->portBits, &bm.bounds, &in, srcCopy, NULL);
+        CopyBits(&bm, &br->win->portBits, &bm.bounds, &in, srcCopy, NULL);
     } else {
         /* not here (yet): a gray frame, the image icon, and the ALT text if they fit */
-        const char *alt = html_attr(&doc, &doc.nodes[r->text], "alt");
+        const char *alt = html_attr(&br->doc, &br->doc.nodes[r->text], "alt");
         short text_x = in.left + 3;
         PenPat(&qd.gray);
         FrameRect(&in);
@@ -790,47 +803,47 @@ static void draw_picture(const Run *r, short top)
 /* Draw the page's visible part; with only >= 0, just the runs showing that picture */
 static void draw_page(short only)
 {
-    long i, top = scroll_y, bottom = scroll_y + (view_r.bottom - view_r.top);
+    long i, top = br->scroll_y, bottom = br->scroll_y + (br->view_r.bottom - br->view_r.top);
     RgnHandle save = NewRgn();
-    Rect area = view_r;
-    if (page_limited) SectRect(&view_r, &page_limit, &area);
+    Rect area = br->view_r;
+    if (page_limited) SectRect(&br->view_r, &page_limit, &area);
     GetClip(save);
     ClipRect(&area);
-    if (only < 0) { EraseRect(&area); if (!page_limited) focus_shown = false; }
-    if (have_page) {
+    if (only < 0) { EraseRect(&area); if (!page_limited) br->focus_shown = false; }
+    if (br->have_page) {
         /* fills first, last to first so outer cells go under inner ones; then frames */
-        for (i = lay.nboxes - 1; i >= 0 && only < 0; i--) {
-            const Box *b = &lay.boxes[i];
+        for (i = br->lay.nboxes - 1; i >= 0 && only < 0; i--) {
+            const Box *b = &br->lay.boxes[i];
             Rect r;
             if (b->thick > 0 || b->y + b->h <= top || b->y >= bottom) continue;
-            SetRect(&r, PAGE_LEFT + b->x, view_r.top + (short)(b->y - scroll_y),
-                    PAGE_LEFT + b->x + b->w, view_r.top + (short)(b->y - scroll_y) + b->h);
+            SetRect(&r, PAGE_LEFT + b->x, br->view_r.top + (short)(b->y - br->scroll_y),
+                    PAGE_LEFT + b->x + b->w, br->view_r.top + (short)(b->y - br->scroll_y) + b->h);
             if (b->thick == 0) PaintRect(&r);
             else EraseRect(&r);
         }
-        for (i = 0; i < lay.nboxes && only < 0; i++) {
-            const Box *b = &lay.boxes[i];
+        for (i = 0; i < br->lay.nboxes && only < 0; i++) {
+            const Box *b = &br->lay.boxes[i];
             Rect r;
             if (b->thick <= 0 || b->y + b->h <= top || b->y >= bottom) continue;
-            SetRect(&r, PAGE_LEFT + b->x, view_r.top + (short)(b->y - scroll_y),
-                    PAGE_LEFT + b->x + b->w, view_r.top + (short)(b->y - scroll_y) + b->h);
+            SetRect(&r, PAGE_LEFT + b->x, br->view_r.top + (short)(b->y - br->scroll_y),
+                    PAGE_LEFT + b->x + b->w, br->view_r.top + (short)(b->y - br->scroll_y) + b->h);
             PenSize(b->thick, b->thick);
             FrameRect(&r);
             PenNormal();
         }
-        for (i = layout_line_at(&lay, top); i < lay.nlines && lay.lines[i].y < bottom; i++) {
-            const MLine *ln = &lay.lines[i];
+        for (i = layout_line_at(&br->lay, top); i < br->lay.nlines && br->lay.lines[i].y < bottom; i++) {
+            const MLine *ln = &br->lay.lines[i];
             long k;
-            short base = view_r.top + (short)(ln->y - scroll_y) + ln->ascent;
+            short base = br->view_r.top + (short)(ln->y - br->scroll_y) + ln->ascent;
             if (ln->y + ln->height <= top) continue;
             for (k = ln->first; k < ln->first + ln->count; k++) {
-                const Run *r = &lay.runs[k];
+                const Run *r = &br->lay.runs[k];
                 if (only >= 0) {
-                    if (r->kind == RUN_IMAGE && pic_of && pic_of[r->text] == only + 1) draw_picture(r, base - r->font);
+                    if (r->kind == RUN_IMAGE && br->pic_of && br->pic_of[r->text] == only + 1) draw_picture(r, base - r->font);
                     continue;
                 }
                 if (r->kind == RUN_RULE) {
-                    short y = view_r.top + (short)(ln->y - scroll_y) + ln->height / 2;
+                    short y = br->view_r.top + (short)(ln->y - br->scroll_y) + ln->height / 2;
                     MoveTo(PAGE_LEFT + r->x, y);
                     LineTo(PAGE_LEFT + r->x + r->width - 1, y);
                     continue;
@@ -842,7 +855,7 @@ static void draw_page(short only)
                 TextFace(r->face & ~FACE_INVERSE);
                 if (r->face & FACE_INVERSE) TextMode(srcBic);  /* white, on a dark cell */
                 MoveTo(PAGE_LEFT + r->x, base);
-                DrawText(r->kind == RUN_GEN ? lay.gen + r->text : doc.text + r->text, 0, r->len);
+                DrawText(r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text, 0, r->len);
                 TextMode(srcOr);
             }
         }
@@ -856,16 +869,16 @@ static void draw_view(void) { draw_page(-1); }
 
 static long max_scroll(void)
 {
-    long m = have_page ? lay.height - (view_r.bottom - view_r.top) : 0;
+    long m = br->have_page ? br->lay.height - (br->view_r.bottom - br->view_r.top) : 0;
     return m > 0 ? m : 0;
 }
 
 static void update_scroll(void)
 {
     long m = max_scroll();
-    scroll_scale = (short)(m / 30000 + 1);
-    SetControlMaximum(vscroll, (short)(m / scroll_scale));
-    SetControlValue(vscroll, (short)(scroll_y / scroll_scale));
+    br->scroll_scale = (short)(m / 30000 + 1);
+    SetControlMaximum(br->vscroll, (short)(m / br->scroll_scale));
+    SetControlValue(br->vscroll, (short)(br->scroll_y / br->scroll_scale));
 }
 
 static void scroll_to(long y)
@@ -873,44 +886,44 @@ static void scroll_to(long y)
     long m = max_scroll(), dy;
     if (y > m) y = m;
     if (y < 0) y = 0;
-    dy = scroll_y - y;
+    dy = br->scroll_y - y;
     if (!dy) return;
-    scroll_y = y;
-    SetControlValue(vscroll, (short)(scroll_y / scroll_scale));
+    br->scroll_y = y;
+    SetControlValue(br->vscroll, (short)(br->scroll_y / br->scroll_scale));
     draw_view();
 }
 
 static long max_scroll_x(void)
 {
-    long m = hbar ? page_w - (view_r.right - view_r.left) : 0;
+    long m = br->hbar ? br->page_w - (br->view_r.right - br->view_r.left) : 0;
     return m > 0 ? m : 0;
 }
 
 /* The horizontal scroll bar runs along the bottom, beside the grow box */
 static void place_hbar(void)
 {
-    Rect r = win->portRect;
-    MoveControl(hscroll, -1, r.bottom - SCROLL + 1);
-    SizeControl(hscroll, r.right - SCROLL + 3, SCROLL);
+    Rect r = br->win->portRect;
+    MoveControl(br->hscroll, -1, r.bottom - SCROLL + 1);
+    SizeControl(br->hscroll, r.right - SCROLL + 3, SCROLL);
 }
 
 /* Show the horizontal scroll bar when the page is wider than the view, else give its
    room to the page */
 static void fit_hbar(void)
 {
-    Boolean need = have_page && page_w > view_r.right - view_r.left;
-    if (need != hbar) {
-        hbar = need;
+    Boolean need = br->have_page && br->page_w > br->view_r.right - br->view_r.left;
+    if (need != br->hbar) {
+        br->hbar = need;
         geometry();
         place_hbar();
-        if (hbar) ShowControl(hscroll);
-        else HideControl(hscroll);
-        if (scroll_y > max_scroll()) scroll_y = max_scroll();
+        if (br->hbar) ShowControl(br->hscroll);
+        else HideControl(br->hscroll);
+        if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
         update_scroll();
     }
-    if (scroll_x > max_scroll_x()) scroll_x = max_scroll_x();
-    SetControlMaximum(hscroll, (short)max_scroll_x());
-    SetControlValue(hscroll, (short)scroll_x);
+    if (br->scroll_x > max_scroll_x()) br->scroll_x = max_scroll_x();
+    SetControlMaximum(br->hscroll, (short)max_scroll_x());
+    SetControlValue(br->hscroll, (short)br->scroll_x);
 }
 
 static void scroll_x_to(long x)
@@ -918,51 +931,110 @@ static void scroll_x_to(long x)
     long m = max_scroll_x();
     if (x > m) x = m;
     if (x < 0) x = 0;
-    if (x == scroll_x) return;
-    scroll_x = x;
-    SetControlValue(hscroll, (short)scroll_x);
+    if (x == br->scroll_x) return;
+    br->scroll_x = x;
+    SetControlValue(br->hscroll, (short)br->scroll_x);
     draw_view();
 }
 
 static void relayout(void)
 {
     long i;
-    if (!have_page) return;
-    layout_free(&lay);
+    if (!br->have_page) return;
+    layout_free(&br->lay);
     set_status("Laying out...");
-    if (layout_doc(&lay, &doc, &qd_m, view_r.right - view_r.left)) set_status("Not enough memory for this page.");
+    if (layout_doc(&br->lay, &br->doc, &qd_m, br->view_r.right - br->view_r.left)) set_status("Not enough memory for this page.");
     /* the page's width: its widest run or frame, and the margin to its right */
-    page_w = 0;
-    for (i = 0; i < lay.nruns; i++) if (lay.runs[i].x + lay.runs[i].width > page_w) page_w = lay.runs[i].x + lay.runs[i].width;
-    for (i = 0; i < lay.nboxes; i++) if (lay.boxes[i].x + lay.boxes[i].w > page_w) page_w = lay.boxes[i].x + lay.boxes[i].w;
-    page_w += 8;
-    SetPort(win);
+    br->page_w = 0;
+    for (i = 0; i < br->lay.nruns; i++) if (br->lay.runs[i].x + br->lay.runs[i].width > br->page_w) br->page_w = br->lay.runs[i].x + br->lay.runs[i].width;
+    for (i = 0; i < br->lay.nboxes; i++) if (br->lay.boxes[i].x + br->lay.boxes[i].w > br->page_w) br->page_w = br->lay.boxes[i].x + br->lay.boxes[i].w;
+    br->page_w += 8;
+    SetPort(br->win);
     fit_hbar();
+}
+
+/* Just the grow box: DrawGrowIcon also outlines a horizontal scroll bar that's often
+   not there */
+static void draw_grow(void)
+{
+    Rect g = br->win->portRect;
+    RgnHandle save = NewRgn();
+    g.left = g.right - SCROLL + 1;
+    g.top = g.bottom - SCROLL + 1;
+    GetClip(save);
+    ClipRect(&g);
+    DrawGrowIcon(br->win);
+    SetClip(save);
+    DisposeRgn(save);
 }
 
 /* The whole window, now rather than at the next update event */
 static void redraw(void)
 {
-    SetPort(win);
-    EraseRect(&win->portRect);
+    SetPort(br->win);
+    EraseRect(&br->win->portRect);
     draw_toolbar();
     draw_view();
-    DrawControls(win);
-    {
-        /* just the grow box: DrawGrowIcon also outlines a horizontal scroll bar that's
-           often not there */
-        Rect g = win->portRect;
-        RgnHandle save = NewRgn();
-        g.left = g.right - SCROLL + 1;
-        g.top = g.bottom - SCROLL + 1;
-        GetClip(save);
-        ClipRect(&g);
-        DrawGrowIcon(win);
-        SetClip(save);
-        DisposeRgn(save);
-    }
+    DrawControls(br->win);
+    draw_grow();
     draw_status();
-    ValidRect(&win->portRect);
+    ValidRect(&br->win->portRect);
+}
+
+/* ------------------------------------------------------------ windows */
+
+static Browser *browser_of(WindowPtr w)
+{
+    Browser *x;
+    for (x = browsers; x && x->win != w; x = x->next) {}
+    return x;
+}
+
+static Browser *new_browser(WindowPtr behind);
+static void close_browser(Browser *x);
+static Browser *need(void);
+
+/* Work on window x from here on */
+static void use(Browser *x)
+{
+    br = x;
+    if (x) SetPort(x->win);
+}
+
+/* The front window, if it's Mill's (a desk accessory's may be in front) */
+static Browser *front(void)
+{
+    return browser_of(FrontWindow());
+}
+
+/* Draw a window the Window Manager says needs it, whichever it is, and come back to
+   the one being worked on */
+static void update_window(WindowPtr w)
+{
+    Browser *was = br, *x = browser_of(w);
+    GrafPtr old;
+    GetPort(&old);
+    BeginUpdate(w);
+    if (x) { use(x); redraw(); }
+    EndUpdate(w);
+    br = was;
+    SetPort(old);
+}
+
+/* A window coming to the front, or going behind another: its scroll bars, its typing,
+   and its grow box show which one is active */
+static void activate(WindowPtr w, Boolean on)
+{
+    Browser *was = br, *x = browser_of(w);
+    TEHandle te;
+    if (!x) return;
+    use(x);
+    te = x->focus >= 0 && x->forms.fields[x->focus].type != FIELD_PASSWORD ? x->field_te : x->url_te;
+    if (on) TEActivate(te); else TEDeactivate(te);
+    HiliteControl(x->vscroll, on ? 0 : 255);
+    HiliteControl(x->hscroll, on ? 0 : 255);
+    draw_grow();
+    use(was ? was : x);
 }
 
 /* ------------------------------------------------------------ typing in fields */
@@ -970,11 +1042,11 @@ static void redraw(void)
 /* Keep what's been typed, and give the keyboard back to the address */
 static void blur(void)
 {
-    if (focus >= 0) {
-        Field *f = &forms.fields[focus];
+    if (br->focus >= 0) {
+        Field *f = &br->forms.fields[br->focus];
         if (f->type != FIELD_PASSWORD) {
-            CharsHandle h = TEGetText(field_te);
-            long n = (*field_te)->teLength;
+            CharsHandle h = TEGetText(br->field_te);
+            long n = (*br->field_te)->teLength;
             char *v = malloc(n + 1);
             if (v) {
                 memcpy(v, *h, n);
@@ -982,13 +1054,13 @@ static void blur(void)
                 forms_set_value(f, v);
                 free(v);
             }
-            f->scroll = (*field_te)->viewRect.top - (*field_te)->destRect.top;
+            f->scroll = (*br->field_te)->viewRect.top - (*br->field_te)->destRect.top;
         }
-        TEDeactivate(field_te);
-        focus = -1;
-        focus_shown = false;
+        TEDeactivate(br->field_te);
+        br->focus = -1;
+        br->focus_shown = false;
     }
-    TEActivate(url_te);
+    TEActivate(br->url_te);
 }
 
 /* Redraw the scroll bar of the text area being typed in */
@@ -1000,7 +1072,7 @@ static void area_bar_update(const Field *f)
     inner = text_part(f, box);
     save = clip_to(&box);
     control_font();
-    draw_area_bar(&box, (*field_te)->viewRect.top - (*field_te)->destRect.top, area_height(f, &inner),
+    draw_area_bar(&box, (*br->field_te)->viewRect.top - (*br->field_te)->destRect.top, area_height(f, &inner),
                   inner.bottom - inner.top);
     unclip(save);
 }
@@ -1011,7 +1083,7 @@ static void area_bar_update(const Field *f)
 /* How wide te's text is up to offset n, in its own font */
 static short te_width(TEHandle te, short n)
 {
-    short font = win->txFont, size = win->txSize, w;
+    short font = br->win->txFont, size = br->win->txSize, w;
     TextFont((*te)->txFont);
     TextSize((*te)->txSize);
     HLock((*te)->hText);
@@ -1089,38 +1161,38 @@ static void te_click(Point p, Boolean shift, TEHandle te)
 /* Type in a field: a text field, password field, or text area */
 static void focus_field(long i, const Point *click, Boolean shift)
 {
-    Field *f = &forms.fields[i];
+    Field *f = &br->forms.fields[i];
     Rect box;
-    if (focus == i) {
+    if (br->focus == i) {
         if (click && f->type != FIELD_PASSWORD) {
-            RgnHandle save = clip_to(&focus_clip);
-            te_click(*click, shift, field_te);
+            RgnHandle save = clip_to(&br->focus_clip);
+            te_click(*click, shift, br->field_te);
             unclip(save);
             if (f->type == FIELD_TEXTAREA) area_bar_update(f);
         }
         return;
     }
     blur();
-    TEDeactivate(url_te);
-    focus = i;
+    TEDeactivate(br->url_te);
+    br->focus = i;
     if (!control_box(f->node, &box)) return;
-    if (box.top < view_r.top || box.bottom > view_r.bottom) {
-        scroll_to(scroll_y + (box.top - view_r.top) - 20);
+    if (box.top < br->view_r.top || box.bottom > br->view_r.bottom) {
+        scroll_to(br->scroll_y + (box.top - br->view_r.top) - 20);
         control_box(f->node, &box);
     }
     if (f->type != FIELD_PASSWORD) {
         Rect inner = text_part(f, box);
-        (*field_te)->viewRect = inner;
-        (*field_te)->destRect = inner;
-        if (f->type != FIELD_TEXTAREA) (*field_te)->destRect.right = inner.left + 2000;  /* one long line */
-        else OffsetRect(&(*field_te)->destRect, 0, (short)-f->scroll);
-        TEAutoView(false, field_te);       /* (starting where it was scrolled to) */
-        TESetText(f->value, strlen(f->value), field_te);
-        TECalText(field_te);
-        TEActivate(field_te);
-        if (click) te_click(*click, shift, field_te);
-        else TESetSelect(0, 32767, field_te);
-        TEAutoView(f->type == FIELD_TEXTAREA, field_te);   /* then typing keeps in view */
+        (*br->field_te)->viewRect = inner;
+        (*br->field_te)->destRect = inner;
+        if (f->type != FIELD_TEXTAREA) (*br->field_te)->destRect.right = inner.left + 2000;  /* one long line */
+        else OffsetRect(&(*br->field_te)->destRect, 0, (short)-f->scroll);
+        TEAutoView(false, br->field_te);       /* (starting where it was scrolled to) */
+        TESetText(f->value, strlen(f->value), br->field_te);
+        TECalText(br->field_te);
+        TEActivate(br->field_te);
+        if (click) te_click(*click, shift, br->field_te);
+        else TESetSelect(0, 32767, br->field_te);
+        TEAutoView(f->type == FIELD_TEXTAREA, br->field_te);   /* then typing keeps in view */
     }
     draw_view();
 }
@@ -1128,17 +1200,17 @@ static void focus_field(long i, const Point *click, Boolean shift)
 /* Tab: the next field to type in, or the previous one with Shift */
 static void next_field(int step)
 {
-    long i, n = forms.n;
+    long i, n = br->forms.n;
     for (i = 1; i <= n; i++) {
-        long k = ((focus < 0 ? (step > 0 ? -1 : 0) : focus) + i * step + n * 2) % n;
-        char t = forms.fields[k].type;
-        if ((t == FIELD_TEXT || t == FIELD_PASSWORD || t == FIELD_TEXTAREA) && !forms.fields[k].disabled) { focus_field(k, NULL, false); return; }
+        long k = ((br->focus < 0 ? (step > 0 ? -1 : 0) : br->focus) + i * step + n * 2) % n;
+        char t = br->forms.fields[k].type;
+        if ((t == FIELD_TEXT || t == FIELD_PASSWORD || t == FIELD_TEXTAREA) && !br->forms.fields[k].disabled) { focus_field(k, NULL, false); return; }
     }
 }
 
 static void type_in_field(char c, EventRecord *ev)
 {
-    Field *f = &forms.fields[focus];
+    Field *f = &br->forms.fields[br->focus];
     RgnHandle save;
     if (f->type == FIELD_PASSWORD) {
         long n = strlen(f->value);
@@ -1152,11 +1224,11 @@ static void type_in_field(char c, EventRecord *ev)
         draw_view();
         return;
     }
-    if ((unsigned char)c >= 32 && c != 0x7F && f->maxlength && (*field_te)->teLength >= f->maxlength &&
-        (*field_te)->selStart == (*field_te)->selEnd) return;
-    save = clip_to(&focus_clip);
-    TEKey(c, field_te);
-    if (f->type != FIELD_TEXTAREA) te_show_caret(field_te);
+    if ((unsigned char)c >= 32 && c != 0x7F && f->maxlength && (*br->field_te)->teLength >= f->maxlength &&
+        (*br->field_te)->selStart == (*br->field_te)->selEnd) return;
+    save = clip_to(&br->focus_clip);
+    TEKey(c, br->field_te);
+    if (f->type != FIELD_TEXTAREA) te_show_caret(br->field_te);
     unclip(save);
     if (f->type == FIELD_TEXTAREA) area_bar_update(f);
     (void)ev;
@@ -1205,19 +1277,21 @@ static void progress(const char *msg)
 static Boolean stop_asked(void)
 {
     EventRecord e;
+    /* other windows uncovered meanwhile are drawn; only this one loads */
+    while (GetNextEvent(updateMask, &e)) update_window((WindowPtr)e.message);
     if (!stopped && EventAvail(mDownMask, &e)) {
         WindowPtr w;
-        if (FindWindow(e.where, &w) == inContent && w == win) {
+        if (FindWindow(e.where, &w) == inContent && w == br->win) {
             GrafPtr old;
             Point p = e.where;
             GetPort(&old);
-            SetPort(win);
+            SetPort(br->win);
             GlobalToLocal(&p);
-            if (PtInRect(p, &reload_r)) {
+            if (PtInRect(p, &br->reload_r)) {
                 GetNextEvent(mDownMask, &e);
-                InvertRect(&reload_r);   /* pressed, briefly */
+                InvertRect(&br->reload_r);   /* pressed, briefly */
                 while (StillDown()) {}
-                InvertRect(&reload_r);
+                InvertRect(&br->reload_r);
                 stopped = true;
             }
             SetPort(old);
@@ -1360,26 +1434,26 @@ static void finish_save(Response *r, OSErr err)
 static void show_url(const char *url)
 {
     /* from the start, however far the last address was scrolled */
-    (*url_te)->destRect.left = (*url_te)->viewRect.left;
-    (*url_te)->destRect.right = (*url_te)->viewRect.left + 2000;
-    TESetText((Ptr)url, strlen(url), url_te);
-    TESetSelect(0, 0, url_te);
-    InvalRect(&(*url_te)->viewRect);
+    (*br->url_te)->destRect.left = (*br->url_te)->viewRect.left;
+    (*br->url_te)->destRect.right = (*br->url_te)->viewRect.left + 2000;
+    TESetText((Ptr)url, strlen(url), br->url_te);
+    TESetSelect(0, 0, br->url_te);
+    InvalRect(&(*br->url_te)->viewRect);
 }
 
 static void remember(const char *url)
 {
     short i;
-    if (hist_pos >= 0 && !strcmp(history[hist_pos], url)) return;
-    for (i = hist_pos + 1; i < hist_len; i++) free(history[i]);
-    hist_len = hist_pos + 1;
-    if (hist_len == HISTORY) {
-        free(history[0]);
-        memmove(history, history + 1, (HISTORY - 1) * sizeof(char *));
-        hist_len--;
+    if (br->hist_pos >= 0 && !strcmp(br->history[br->hist_pos], url)) return;
+    for (i = br->hist_pos + 1; i < br->hist_len; i++) free(br->history[i]);
+    br->hist_len = br->hist_pos + 1;
+    if (br->hist_len == HISTORY) {
+        free(br->history[0]);
+        memmove(br->history, br->history + 1, (HISTORY - 1) * sizeof(char *));
+        br->hist_len--;
     }
-    history[hist_len] = malloc(strlen(url) + 1);
-    if (history[hist_len]) { strcpy(history[hist_len], url); hist_pos = hist_len++; }
+    br->history[br->hist_len] = malloc(strlen(url) + 1);
+    if (br->history[br->hist_len]) { strcpy(br->history[br->hist_len], url); br->hist_pos = br->hist_len++; }
 }
 
 static int prefix_ci(const char *s, const char *p, long n)
@@ -1620,13 +1694,24 @@ static void load_images(Response *resp, short which)
 {
     short i, waiting = 0, n = 0;
     Boolean resized = false;
-    for (i = 0; i < npics; i++) if (wanted(&pics[i], which, i)) waiting++;
-    for (i = 0; i < npics && !stop_asked(); i++) {
-        Pic *p = &pics[i];
+    for (i = 0; i < br->npics; i++) if (wanted(&br->pics[i], which, i)) waiting++;
+    for (i = 0; i < br->npics && !stop_asked(); i++) {
+        Pic *p = &br->pics[i];
         char target[300];
         Url u;
         Head h;
+        Kept *keep;
         if (!wanted(p, which, i)) continue;
+        if ((keep = kept_find(p->url, p->aw, p->ah))) {
+            /* another window loaded it meanwhile */
+            p->bm = keep->bm;
+            p->state = PIC_SHOWN;
+            keep->used = page_number;
+            keep->users++;
+            if (p->aw < 0 || p->ah < 0) resized = true;
+            else { SetPort(br->win); draw_page(i); }
+            continue;
+        }
         if (waiting > 1) sprintf(activity, "Image %d of %d", ++n, waiting);
         else strcpy(activity, "Image");
         p->state = PIC_FAILED;
@@ -1646,14 +1731,14 @@ static void load_images(Response *resp, short which)
         p->state = PIC_SHOWN;
         p->owned = !kept_add(p->url, p->aw, p->ah, &p->bm);
         if (p->aw < 0 || p->ah < 0) resized = true;  /* the page has to make room for it */
-        else { SetPort(win); draw_page(i); }
+        else { SetPort(br->win); draw_page(i); }
     }
     activity[0] = 0;
     if (resized) {
         relayout();
-        if (scroll_y > max_scroll()) scroll_y = max_scroll();
+        if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
         update_scroll();
-        SetPort(win);
+        SetPort(br->win);
         draw_view();
     }
     if (stopped) set_status("Stopped.");
@@ -1664,7 +1749,7 @@ static void set_title(const char *t)
     Str255 title;
     title[0] = (unsigned char)(strlen(t) > 250 ? 250 : strlen(t));
     memcpy(title + 1, t, title[0]);
-    SetWTitle(win, title);
+    SetWTitle(br->win, title);
 }
 
 /* Open a URL (a POST when content_type is given). Returns whether a page came. */
@@ -1730,7 +1815,7 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
     if (resp.saving || resp.declined) {
         /* a file Mill can't show: saved, and the page stays */
         finish_save(&resp, err);
-        show_url(page_url);
+        show_url(br->page_url);
         goto done;
     }
     show_url(shown_url);
@@ -1759,7 +1844,7 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
     }
 
     set_status("Formatting...");
-    if (have_page) { layout_free(&lay); pics_free(); forms_free(&forms); html_free(&doc); have_page = false; }
+    if (br->have_page) { layout_free(&br->lay); pics_free(); forms_free(&br->forms); html_free(&br->doc); br->have_page = false; }
     page_number++;
     if (source || h.kind != BODY_HTML) {
         /* source and plain text show preformatted, and a picture by itself on a page */
@@ -1780,26 +1865,26 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
             page = pre_page("", text, n, &len);
         }
         if (page) {
-            have_page = html_parse_charset(&doc, page, len, cs) == 0;
+            br->have_page = html_parse_charset(&br->doc, page, len, cs) == 0;
             free(page);
         }
     } else {
-        have_page = html_parse_charset(&doc, resp.buf + h.body, resp.len - h.body, h.charset) == 0;
+        br->have_page = html_parse_charset(&br->doc, resp.buf + h.body, resp.len - h.body, h.charset) == 0;
     }
-    if (have_page && forms_build(&forms, &doc)) forms_free(&forms);
-    if (!have_page) { set_status("Not enough memory for this page."); goto done; }
-    strcpy(page_url, shown_url);
+    if (br->have_page && forms_build(&br->forms, &br->doc)) forms_free(&br->forms);
+    if (!br->have_page) { set_status("Not enough memory for this page."); goto done; }
+    strcpy(br->page_url, shown_url);
     if (record) remember(shown_url);
-    set_title(doc.title[0] ? doc.title : shown_url);
+    set_title(br->doc.title[0] ? br->doc.title : shown_url);
     pics_collect();
-    scroll_x = 0;
+    br->scroll_x = 0;
     relayout();
-    scroll_y = 0;
+    br->scroll_y = 0;
     if (u.fragment[0]) {
         long i;
-        for (i = 0; i < lay.nanchors; i++)
-            if (!strcmp(lay.anchors[i].name, u.fragment)) { scroll_y = lay.anchors[i].y; break; }
-        if (scroll_y > max_scroll()) scroll_y = max_scroll();
+        for (i = 0; i < br->lay.nanchors; i++)
+            if (!strcmp(br->lay.anchors[i].name, u.fragment)) { br->scroll_y = br->lay.anchors[i].y; break; }
+        if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
     }
     update_scroll();
     redraw();
@@ -1813,7 +1898,7 @@ done:
     free(resp.buf);
     set_loading(false);
     InitCursor();
-    InvalRect(&win->portRect);
+    InvalRect(&br->win->portRect);
     return shown;
 }
 
@@ -1826,7 +1911,7 @@ static Boolean go(const char *url, Boolean record)
 
 static Boolean same_kind(const char *url)
 {
-    return kind_of(url) == kind_of(page_url);
+    return kind_of(url) == kind_of(br->page_url);
 }
 
 /* file: and mill: are this Mac's own: a web page (http: or https:) can't link
@@ -1836,15 +1921,15 @@ static Boolean local_scheme(int scheme) { return scheme == SCHEME_FILE || scheme
 
 static Boolean may_follow(const char *url)
 {
-    return local_scheme(scheme_of(page_url)) || !local_scheme(scheme_of(url));
+    return local_scheme(scheme_of(br->page_url)) || !local_scheme(scheme_of(url));
 }
 
 static void go_typed(void)
 {
     char url[300];
-    long n = (*url_te)->teLength;
+    long n = (*br->url_te)->teLength;
     if (n > 290) n = 290;
-    memcpy(url, *(*url_te)->hText, n);
+    memcpy(url, *(*br->url_te)->hText, n);
     url[n] = 0;
     if (!url_has_scheme(url)) {
         memmove(url + 7, url, n + 1);
@@ -1855,14 +1940,14 @@ static void go_typed(void)
 
 static void go_history(short delta)
 {
-    if (hist_pos + delta < 0 || hist_pos + delta >= hist_len) return;
-    hist_pos += delta;
-    go(history[hist_pos], false);
+    if (br->hist_pos + delta < 0 || br->hist_pos + delta >= br->hist_len) return;
+    br->hist_pos += delta;
+    go(br->history[br->hist_pos], false);
 }
 
 static void reload(void)
 {
-    if (hist_pos >= 0) go(history[hist_pos], false);
+    if (br->hist_pos >= 0) go(br->history[br->hist_pos], false);
 }
 
 static void go_home(void)
@@ -1874,7 +1959,7 @@ static void go_home(void)
 static void load_image(short which)
 {
     Response resp;
-    if (!have_page || loading) return;
+    if (!br->have_page || br->loading) return;
     if (!(resp.buf = malloc(MAX_PAGE))) { set_status("Not enough memory."); return; }
     response_init(&resp);
     blur();
@@ -1882,7 +1967,7 @@ static void load_image(short which)
     stopped = false;
     SetCursor(*GetCursor(watchCursor));
     load_images(&resp, which);
-    if (!stopped) set_status(pics[which].state == PIC_SHOWN ? "Done." : "Mill couldn't load that image.");
+    if (!stopped) set_status(br->pics[which].state == PIC_SHOWN ? "Done." : "Mill couldn't load that image.");
     free(resp.buf);
     set_loading(false);
     InitCursor();
@@ -1896,7 +1981,7 @@ static void save_url(const char *url)
     Url u;
     Head h;
     OSErr err;
-    if (loading) return;
+    if (br->loading) return;
     if (!(resp.buf = malloc(MAX_PAGE))) { set_status("Not enough memory."); return; }
     response_init(&resp);
     if (!ask_where(url, &resp.spec)) { free(resp.buf); InitCursor(); return; }
@@ -1930,8 +2015,8 @@ static void submit(long form, long by, short x, short y)
     char target[300], content_type[80];
     char *q;
     blur();
-    if (forms_submit(&forms, &doc, form, by, x, y, read_upload, NULL, &s)) { set_status("Not enough memory to send the form."); return; }
-    if (url_resolve(page_url, s.action[0] ? s.action : page_url, target, sizeof target)) {
+    if (forms_submit(&br->forms, &br->doc, form, by, x, y, read_upload, NULL, &s)) { set_status("Not enough memory to send the form."); return; }
+    if (url_resolve(br->page_url, s.action[0] ? s.action : br->page_url, target, sizeof target)) {
         set_status("Mill can't send this form to that address.");
     } else if (!same_kind(target)) {
         set_status(FORM_MSG);
@@ -1963,8 +2048,8 @@ static void choose_file(Field *f)
 
 static const Run *run_at(Point p)
 {
-    if (!have_page || !PtInRect(p, &view_r)) return NULL;
-    return layout_hit(&lay, scroll_y + (p.v - view_r.top), p.h - PAGE_LEFT);
+    if (!br->have_page || !PtInRect(p, &br->view_r)) return NULL;
+    return layout_hit(&br->lay, br->scroll_y + (p.v - br->view_r.top), p.h - PAGE_LEFT);
 }
 
 static const Run *link_at(Point p)
@@ -1977,14 +2062,14 @@ static const Run *link_at(Point p)
 static const Run *waiting_image_at(Point p)
 {
     const Run *r = run_at(p);
-    return r && r->kind == RUN_IMAGE && !r->link && pic_of && pic_of[r->text] &&
-           pics[pic_of[r->text] - 1].state == PIC_WAITING ? r : NULL;
+    return r && r->kind == RUN_IMAGE && !r->link && br->pic_of && br->pic_of[r->text] &&
+           br->pics[br->pic_of[r->text] - 1].state == PIC_WAITING ? r : NULL;
 }
 
 static void follow(const Run *r)
 {
     char target[300];
-    if (url_resolve(page_url, lay.links[r->link - 1], target, sizeof target)) {
+    if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) {
         set_status("Mill opens http:, file:, and mill: addresses.");
         return;
     }
@@ -1995,11 +2080,11 @@ static void follow(const Run *r)
 /* A run's box in the window */
 static Boolean run_box(const Run *r, Rect *box)
 {
-    long k = r - lay.runs, i;
-    for (i = 0; i < lay.nlines; i++) {
-        const MLine *ln = &lay.lines[i];
+    long k = r - br->lay.runs, i;
+    for (i = 0; i < br->lay.nlines; i++) {
+        const MLine *ln = &br->lay.lines[i];
         if (k >= ln->first && k < ln->first + ln->count) {
-            short top = view_r.top + (short)(ln->y - scroll_y) + ln->ascent - r->font;
+            short top = br->view_r.top + (short)(ln->y - br->scroll_y) + ln->ascent - r->font;
             SetRect(box, PAGE_LEFT + r->x, top, PAGE_LEFT + r->x + r->width, top + r->size);
             return true;
         }
@@ -2018,13 +2103,13 @@ static int map_target(Point p, const Run *r, char *out, int size)
     if (!r || r->kind != RUN_IMAGE || !run_box(r, &box)) return 0;
     x = p.h - box.left - r->face;  /* in the image, inside its border */
     y = p.v - box.top - r->face;
-    if ((map = imagemap_for(&doc, r->text)) >= 0) {
-        if ((area = imagemap_hit(&doc, map, x, y)) < 0) return -1;
-        return url_resolve(page_url, html_attr(&doc, &doc.nodes[area], "href"), out, size) ? -1 : 1;
+    if ((map = imagemap_for(&br->doc, r->text)) >= 0) {
+        if ((area = imagemap_hit(&br->doc, map, x, y)) < 0) return -1;
+        return url_resolve(br->page_url, html_attr(&br->doc, &br->doc.nodes[area], "href"), out, size) ? -1 : 1;
     }
-    if (r->link && html_attr(&doc, &doc.nodes[r->text], "ismap")) {
+    if (r->link && html_attr(&br->doc, &br->doc.nodes[r->text], "ismap")) {
         long n;
-        if (url_resolve(page_url, lay.links[r->link - 1], out, size)) return -1;
+        if (url_resolve(br->page_url, br->lay.links[r->link - 1], out, size)) return -1;
         n = strcspn(out, "?#");
         snprintf(out + n, size - n, "?%d,%d", x < 0 ? 0 : x, y < 0 ? 0 : y);
         return 1;
@@ -2038,7 +2123,7 @@ static void go_map(const char *target)
     else go(target, true);
 }
 
-enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE };
+enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE };
 #define HOLD 30         /* ticks the button is held for the menu, as Mac browsers did */
 
 /* The menu for what's under the mouse: an image, a link, or the page itself */
@@ -2048,27 +2133,29 @@ static void context_menu(Point p, const Run *r)
     short codes[6], n = 0;
     long choice;
     Point where = p;
-    const char *page = !strncmp(page_url, VIEW_SOURCE, strlen(VIEW_SOURCE)) ? page_url + strlen(VIEW_SOURCE) : page_url;
-    short pic = r && r->kind == RUN_IMAGE && pic_of && pic_of[r->text] ? pic_of[r->text] - 1 : -1;
+    const char *page = !strncmp(br->page_url, VIEW_SOURCE, strlen(VIEW_SOURCE)) ? br->page_url + strlen(VIEW_SOURCE) : br->page_url;
+    short pic = r && r->kind == RUN_IMAGE && br->pic_of && br->pic_of[r->text] ? br->pic_of[r->text] - 1 : -1;
     char target[320];
-    if (!m || !have_page) return;
+    if (!m || !br->have_page) return;
     if (pic >= 0) {
         AppendMenu(m, "\pLoad Image");
         codes[n++] = CM_LOAD_IMAGE;
-        if (pics[pic].state == PIC_SHOWN) DisableItem(m, n);
+        if (br->pics[pic].state == PIC_SHOWN) DisableItem(m, n);
         AppendMenu(m, "\pView Image");
         codes[n++] = CM_VIEW_IMAGE;
         AppendMenu(m, "\pSave Image As...");
         codes[n++] = CM_SAVE_IMAGE;
     }
     if (r && r->link && r->kind != RUN_CONTROL) {
+        AppendMenu(m, "\pOpen Link in New Window");
+        codes[n++] = CM_NEW_WINDOW;
         AppendMenu(m, "\pSave Link As...");
         codes[n++] = CM_SAVE_LINK;
     }
     if (!n) {
         AppendMenu(m, "\pView Source");
         codes[n++] = CM_VIEW_SOURCE;
-        if (page != page_url) DisableItem(m, n);  /* already */
+        if (page != br->page_url) DisableItem(m, n);  /* already */
         AppendMenu(m, "\pSave Page Source As...");
         codes[n++] = CM_SAVE_SOURCE;
     }
@@ -2080,19 +2167,20 @@ static void context_menu(Point p, const Run *r)
     if (!LoWord(choice)) return;
     switch (codes[LoWord(choice) - 1]) {
     case CM_LOAD_IMAGE:
-        pics[pic].state = PIC_WAITING;  /* one that failed can be tried again */
+        br->pics[pic].state = PIC_WAITING;  /* one that failed can be tried again */
         load_image(pic);
         break;
     case CM_VIEW_IMAGE:
-        go(pics[pic].url, true);  /* on a page of its own */
+        go(br->pics[pic].url, true);  /* on a page of its own */
         break;
     case CM_SAVE_IMAGE:
-        save_url(pics[pic].url);
+        save_url(br->pics[pic].url);
         break;
-    case CM_SAVE_LINK:
-        if (url_resolve(page_url, lay.links[r->link - 1], target, sizeof target)) set_status("Mill opens http:, file:, and mill: addresses.");
+    case CM_NEW_WINDOW: case CM_SAVE_LINK:
+        if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill opens http:, file:, and mill: addresses.");
         else if (!may_follow(target)) set_status(FILE_MSG);
-        else save_url(target);
+        else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target);
+        else if (new_browser((WindowPtr)-1)) go(target, true);
         break;
     case CM_VIEW_SOURCE:
         snprintf(target, sizeof target, "%s%s", VIEW_SOURCE, page);
@@ -2131,22 +2219,22 @@ static void page_click(Point p, EventRecord *ev)
 
 static pascal void scroll_action(ControlHandle c, short part)
 {
-    long page = view_r.bottom - view_r.top - 16, line = 16;
-    if (c == hscroll) {
-        page = view_r.right - view_r.left - 16;
+    long page = br->view_r.bottom - br->view_r.top - 16, line = 16;
+    if (c == br->hscroll) {
+        page = br->view_r.right - br->view_r.left - 16;
         switch (part) {
-        case inUpButton: scroll_x_to(scroll_x - line); break;
-        case inDownButton: scroll_x_to(scroll_x + line); break;
-        case inPageUp: scroll_x_to(scroll_x - page); break;
-        case inPageDown: scroll_x_to(scroll_x + page); break;
+        case inUpButton: scroll_x_to(br->scroll_x - line); break;
+        case inDownButton: scroll_x_to(br->scroll_x + line); break;
+        case inPageUp: scroll_x_to(br->scroll_x - page); break;
+        case inPageDown: scroll_x_to(br->scroll_x + page); break;
         }
         return;
     }
     switch (part) {
-    case inUpButton: scroll_to(scroll_y - line); break;
-    case inDownButton: scroll_to(scroll_y + line); break;
-    case inPageUp: scroll_to(scroll_y - page); break;
-    case inPageDown: scroll_to(scroll_y + page); break;
+    case inUpButton: scroll_to(br->scroll_y - line); break;
+    case inDownButton: scroll_to(br->scroll_y + line); break;
+    case inPageUp: scroll_to(br->scroll_y - page); break;
+    case inPageDown: scroll_to(br->scroll_y + page); break;
     }
 }
 
@@ -2174,7 +2262,7 @@ static void choose_option(Field *f, const Rect *box)
     if (!m) return;
     for (i = 0; i < f->noptions; i++) {
         Str255 item;
-        forms_option_label(&doc, f->options[i], label, sizeof label);
+        forms_option_label(&br->doc, f->options[i], label, sizeof label);
         item[0] = (unsigned char)strlen(label);
         memcpy(item + 1, label, item[0]);
         AppendMenu(m, "\p ");
@@ -2200,14 +2288,14 @@ static void choose_option(Field *f, const Rect *box)
    time on the track, for as long as the button is held. The area takes the typing. */
 static void area_scroll(long i, Point p)
 {
-    Field *f = &forms.fields[i];
+    Field *f = &br->forms.fields[i];
     Rect box, inner, bar;
     long view, most, by, wait;
-    if (focus != i) {
+    if (br->focus != i) {
         focus_field(i, NULL, false);
-        TEAutoView(false, field_te);
-        TESetSelect(0, 0, field_te);
-        TEAutoView(true, field_te);
+        TEAutoView(false, br->field_te);
+        TESetSelect(0, 0, br->field_te);
+        TEAutoView(true, br->field_te);
     }
     if (!control_box(f->node, &box)) return;
     inner = text_part(f, box);
@@ -2215,24 +2303,24 @@ static void area_scroll(long i, Point p)
     view = inner.bottom - inner.top;
     most = area_height(f, &inner) - view;
     if (most <= 0) return;
-    if (p.v < bar.top + AREA_BAR) by = -(*field_te)->lineHeight;
-    else if (p.v >= bar.bottom - AREA_BAR) by = (*field_te)->lineHeight;
+    if (p.v < bar.top + AREA_BAR) by = -(*br->field_te)->lineHeight;
+    else if (p.v >= bar.bottom - AREA_BAR) by = (*br->field_te)->lineHeight;
     else {
-        long top = (*field_te)->viewRect.top - (*field_te)->destRect.top;
+        long top = (*br->field_te)->viewRect.top - (*br->field_te)->destRect.top;
         short thumb = bar.top + AREA_BAR + (short)((bar.bottom - bar.top - 3 * AREA_BAR) * top / most);
-        by = (view / (*field_te)->lineHeight - 1) * (*field_te)->lineHeight;
-        if (by < (*field_te)->lineHeight) by = (*field_te)->lineHeight;
+        by = (view / (*br->field_te)->lineHeight - 1) * (*br->field_te)->lineHeight;
+        if (by < (*br->field_te)->lineHeight) by = (*br->field_te)->lineHeight;
         if (p.v < thumb) by = -by;
     }
     for (wait = 15; ; wait = 4) {   /* a pause before it repeats, as the Mac's scroll bars */
-        long top = (*field_te)->viewRect.top - (*field_te)->destRect.top, to = top + by;
+        long top = (*br->field_te)->viewRect.top - (*br->field_te)->destRect.top, to = top + by;
         unsigned long until = TickCount() + wait;
         RgnHandle save;
         if (to < 0) to = 0;
         if (to > most) to = most;
         if (to != top) {
-            save = clip_to(&focus_clip);
-            TEScroll(0, (short)(top - to), field_te);
+            save = clip_to(&br->focus_clip);
+            TEScroll(0, (short)(top - to), br->field_te);
             unclip(save);
             area_bar_update(f);
         }
@@ -2248,8 +2336,8 @@ static Boolean click_control(Point p, EventRecord *ev)
     long i;
     Field *f;
     Rect box;
-    if (!r || r->kind != RUN_CONTROL || (i = forms_find(&forms, r->text)) < 0 || !control_box(r->text, &box)) return false;
-    f = &forms.fields[i];
+    if (!r || r->kind != RUN_CONTROL || (i = forms_find(&br->forms, r->text)) < 0 || !control_box(r->text, &box)) return false;
+    f = &br->forms.fields[i];
     if (f->disabled) return true;
     if (f->type == FIELD_TEXTAREA) {
         Rect bar = area_bar(&box);
@@ -2257,15 +2345,15 @@ static Boolean click_control(Point p, EventRecord *ev)
     }
     switch (f->type) {
     case FIELD_CHECKBOX: case FIELD_RADIO:
-        if (press(&box)) { forms_click(&forms, i); draw_view(); }
+        if (press(&box)) { forms_click(&br->forms, i); draw_view(); }
         break;
     case FIELD_SUBMIT: case FIELD_IMAGE:
         if (press(&box)) submit(f->form, i, p.h - box.left, p.v - box.top);
         break;
     case FIELD_RESET:
         if (press(&box)) {
-            if (focus >= 0 && forms.fields[focus].form == f->form) { TEDeactivate(field_te); focus = -1; TEActivate(url_te); }
-            forms_reset(&forms, &doc, f->form);
+            if (br->focus >= 0 && br->forms.fields[br->focus].form == f->form) { TEDeactivate(br->field_te); br->focus = -1; TEActivate(br->url_te); }
+            forms_reset(&br->forms, &br->doc, f->form);
             draw_view();
         }
         break;
@@ -2299,7 +2387,7 @@ static void open_file(void)
     char url[400];
     if (!sys_choose_file(&spec)) return;
     spec_to_url(&spec, url, sizeof url);
-    go(url, true);
+    if (need()) go(url, true);
 }
 
 /* ------------------------------------------------------------ bookmarks */
@@ -2416,8 +2504,8 @@ static void bookmark_dialog(short slot)
     char url[300], title[100], msg[80];
     Cred *login = NULL;
     Url pu;
-    if (!page_url[0]) return;
-    if (!url_parse(page_url, &pu) && url_is_web(pu.scheme)) login = auth_for_path(&keyring, pu.host, pu.port, pu.path);
+    if (!br->page_url[0]) return;
+    if (!url_parse(br->page_url, &pu) && url_is_web(pu.scheme)) login = auth_for_path(&keyring, pu.host, pu.port, pu.path);
     blur();
     if (slot < 0) {
         for (slot = 0; slot < BOOKMARKS && bookmark(slot, url, sizeof url, title, sizeof title); slot++) {}
@@ -2432,10 +2520,10 @@ static void bookmark_dialog(short slot)
     SetDialogItem(d, BD_SLOT, type, (Handle)(UserItemUPP)draw_slot, &r);
     GetDialogItem(d, BD_RING, &type, &h, &r);
     SetDialogItem(d, BD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
-    pstr_of(doc.title[0] ? doc.title : page_url, s);
+    pstr_of(br->doc.title[0] ? br->doc.title : br->page_url, s);
     GetDialogItem(d, BD_TITLE, &type, &h, &r);
     SetDialogItemText(h, s);
-    pstr_of(page_url, s);
+    pstr_of(br->page_url, s);
     GetDialogItem(d, BD_URL, &type, &h, &r);
     SetDialogItemText(h, s);
     GetDialogItem(d, BD_LOGIN, &type, &h, &r);
@@ -2465,7 +2553,7 @@ static void bookmark_dialog(short slot)
             char with[300];
             if (url_with_login(url, login->user, login->pass, with, sizeof with)) {
                 DisposeDialog(d);
-                SetPort(win);
+                SetPort(br->win);
                 set_status("That address is too long to save with a name and password.");
                 return;
             }
@@ -2474,7 +2562,7 @@ static void bookmark_dialog(short slot)
         }
     }
     DisposeDialog(d);
-    SetPort(win);
+    SetPort(br->win);
     if (item != BD_OK) return;
     n = bd_slot == 9 ? 0 : bd_slot + 1;
     if (url[0]) {
@@ -2490,11 +2578,11 @@ static void bookmark_dialog(short slot)
 static void open_bookmark(short n)
 {
     char url[300], title[100];
-    if (bookmark(n, url, sizeof url, title, sizeof title)) go(url, true);
+    if (bookmark(n, url, sizeof url, title, sizeof title) && need()) go(url, true);
 }
 
-/* The Bookmarks menu shows the slots as they are now */
-static void refresh_bookmarks(void)
+/* The menus as they are now: the bookmark slots, and what needs a window */
+static void refresh_menus(void)
 {
     MenuHandle m = GetMenuHandle(MENU_BOOKMARKS);
     char url[300], title[100];
@@ -2512,8 +2600,24 @@ static void refresh_bookmarks(void)
         }
         SetMenuItemText(m, BM_FIRST + n, s);
     }
-    if (page_url[0]) EnableItem(m, BM_ADD);
+    if (br && br->page_url[0]) EnableItem(m, BM_ADD);
     else DisableItem(m, BM_ADD);
+    {
+        WindowPtr w = FrontWindow();
+        Boolean da = w && ((WindowPeek)w)->windowKind < 0;
+        MenuHandle file = GetMenuHandle(MENU_FILE), edit = GetMenuHandle(MENU_EDIT), nav = GetMenuHandle(MENU_GO);
+        short i;
+        if (br || da) EnableItem(file, FILE_CLOSE); else DisableItem(file, FILE_CLOSE);
+        for (i = EDIT_CUT; i <= EDIT_PASTE; i++) if (br || da) EnableItem(edit, i); else DisableItem(edit, i);
+        for (i = GO_BACK; i <= GO_RELOAD; i++) if (br) EnableItem(nav, i); else DisableItem(nav, i);
+    }
+}
+
+/* The front window, or a new one when there's none; NULL if there's no memory for it */
+static Browser *need(void)
+{
+    if (!br) use(new_browser((WindowPtr)-1));
+    return br;
 }
 
 /* Option-Command and a number key: which slot (0 for 1 ... 9 for 0), or -1. By key code,
@@ -2530,38 +2634,49 @@ static short option_digit(const EventRecord *ev)
 
 static TEHandle typing_te(void)
 {
-    return focus >= 0 && forms.fields[focus].type != FIELD_PASSWORD ? field_te : url_te;
+    return br->focus >= 0 && br->forms.fields[br->focus].type != FIELD_PASSWORD ? br->field_te : br->url_te;
 }
 
 static void do_menu(long choice)
 {
     short menu = HiWord(choice), item = LoWord(choice);
+    WindowPtr w = FrontWindow();
+    if (menu == MENU_EDIT && item <= EDIT_PASTE && SystemEdit(item - 1)) { HiliteMenu(0); return; }  /* a desk accessory's */
     if (menu == MENU_APPLE) {
         if (item == 1) {
-            go("mill://about", true);
+            if (need()) go("mill://about", true);
         } else {
             Str255 name;
             GetMenuItemText(GetMenuHandle(MENU_APPLE), item, name);
             OpenDeskAcc(name);
         }
     } else if (menu == MENU_FILE) {
-        if (item == FILE_LOCATION) { blur(); TESetSelect(0, 32767, url_te); }
+        if (item == FILE_NEW) { Browser *x = new_browser((WindowPtr)-1); if (x) { use(x); go_home(); } }
+        if (item == FILE_LOCATION && need()) { blur(); TESetSelect(0, 32767, br->url_te); }
         if (item == FILE_OPEN) open_file();
+        if (item == FILE_CLOSE) {
+            if (w && ((WindowPeek)w)->windowKind < 0) CloseDeskAcc(((WindowPeek)w)->windowKind);
+            else if (br) close_browser(br);
+        }
         if (item == FILE_QUIT) quitting = true;
     } else if (menu == MENU_EDIT) {
-        if (item == EDIT_CUT) TECut(typing_te());
-        if (item == EDIT_COPY) TECopy(typing_te());
-        if (item == EDIT_PASTE) TEPaste(typing_te());
-        if (item == EDIT_PREFERENCES) go("mill://config", true);
+        if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true); }
+        else if (br) {
+            if (item == EDIT_CUT) TECut(typing_te());
+            if (item == EDIT_COPY) TECopy(typing_te());
+            if (item == EDIT_PASTE) TEPaste(typing_te());
+        }
     } else if (menu == MENU_BOOKMARKS) {
-        if (item == BM_ADD) bookmark_dialog(-1);
-        else if (item == BM_EDIT) go("mill://config#bookmarks", true);
+        if (item == BM_ADD) { if (br) bookmark_dialog(-1); }
+        else if (item == BM_EDIT) { if (need()) go("mill://config#bookmarks", true); }
         else if (item >= BM_FIRST && item < BM_FIRST + BOOKMARKS) open_bookmark(item - BM_FIRST);
     } else if (menu == MENU_GO) {
-        if (item == GO_BACK) go_history(-1);
-        if (item == GO_FORWARD) go_history(1);
-        if (item == GO_RELOAD) reload();
-        if (item == GO_HOME) go_home();
+        if (item == GO_HOME) { if (need()) go_home(); }
+        else if (br) {
+            if (item == GO_BACK) go_history(-1);
+            if (item == GO_FORWARD) go_history(1);
+            if (item == GO_RELOAD) reload();
+        }
     }
     HiliteMenu(0);
 }
@@ -2570,27 +2685,90 @@ static void resized(void)
 {
     Rect t;
     geometry();
-    t = (*url_te)->viewRect;
-    t.right = mill_r.left - 4;
-    (*url_te)->viewRect = t;
-    MoveControl(vscroll, win->portRect.right - SCROLL + 1, BAR);
-    SizeControl(vscroll, SCROLL, win->portRect.bottom - BAR - SCROLL + 2);
+    t = (*br->url_te)->viewRect;
+    t.right = br->mill_r.left - 4;
+    (*br->url_te)->viewRect = t;
+    MoveControl(br->vscroll, br->win->portRect.right - SCROLL + 1, BAR);
+    SizeControl(br->vscroll, SCROLL, br->win->portRect.bottom - BAR - SCROLL + 2);
     place_hbar();
     relayout();
-    if (scroll_y > max_scroll()) scroll_y = max_scroll();
+    if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
     update_scroll();
-    InvalRect(&win->portRect);
+    InvalRect(&br->win->portRect);
+}
+
+/* Room for a window and a page being read into it, and some to spare, so a window can
+   still be closed when memory runs short */
+#define WINDOW_ROOM (MAX_PAGE + 48L * 1024)
+
+/* A new window, empty, behind behind ((WindowPtr)-1 for in front), and worked on from
+   here; NULL, after saying so, if there isn't the memory for it */
+static Browser *new_browser(WindowPtr behind)
+{
+    Browser *x, *y;
+    Rect r, t;
+    short n = 0;
+    if (MaxBlock() < WINDOW_ROOM || !(x = calloc(1, sizeof *x))) {
+        InitCursor();
+        StopAlert(ALERT_MEMORY, NULL);
+        return NULL;
+    }
+    for (y = browsers; y; y = y->next) n++;
+    /* Fits a 512x342 screen, the smallest a Mill Mac has, each a little below and right
+       of the last, four deep */
+    r = qd.screenBits.bounds;
+    SetRect(&r, r.left + 2 + n % 4 * 8, r.top + 40 + n % 4 * 8, r.right - 2, r.bottom - 2);
+    x->win = NewWindow(NULL, &r, "\pMill", true, documentProc + 8 /* with a zoom box */, behind, true, 0);
+    x->hist_pos = -1;
+    x->focus = -1;
+    x->scroll_scale = 1;
+    x->next = browsers;
+    browsers = x;
+    use(x);
+    geometry();
+    SetRect(&t, x->reload_r.right + 6, 3, x->mill_r.left - 4, BAR - 2);
+    TextFont(kFontIDGeneva);
+    TextSize(9);
+    x->url_te = TENew(&t, &t);
+    (*x->url_te)->destRect.right = t.left + 2000;  /* one long line: a URL never wraps */
+    x->field_te = TENew(&t, &t);                   /* moved over a field when one is typed in */
+    TEActivate(x->url_te);
+    SetRect(&t, 0, 0, 10, 10);
+    x->vscroll = NewControl(x->win, &t, "\p", true, 0, 0, 0, scrollBarProc, 0);
+    x->hscroll = NewControl(x->win, &t, "\p", false, 0, 0, 0, scrollBarProc, 0);
+    resized();
+    return x;
+}
+
+/* Close a window and let go of its page; Mill keeps running with none */
+static void close_browser(Browser *x)
+{
+    Browser **p;
+    short i;
+    use(x);
+    if (x->have_page) { layout_free(&x->lay); pics_free(); forms_free(&x->forms); html_free(&x->doc); }
+    for (i = 0; i < x->hist_len; i++) free(x->history[i]);
+    TEDispose(x->url_te);
+    TEDispose(x->field_te);
+    DisposeWindow(x->win);  /* and its scroll bars */
+    for (p = &browsers; *p != x; p = &(*p)->next) {}
+    *p = x->next;
+    free(x);
+    use(front());
 }
 
 static void do_mouse(EventRecord *ev)
 {
     WindowPtr w;
     short part = FindWindow(ev->where, &w);
+    if (part == inMenuBar) { refresh_menus(); do_menu(MenuSelect(ev->where)); return; }
+    if (part == inSysWindow) { SystemClick(ev, w); return; }
+    if (part == inDrag) { DragWindow(w, ev->where, &qd.screenBits.bounds); return; }
+    if (!browser_of(w)) return;
+    if (w != FrontWindow()) { SelectWindow(w); return; }  /* a click in a window behind brings it forward */
+    use(browser_of(w));
     switch (part) {
-    case inMenuBar: refresh_bookmarks(); do_menu(MenuSelect(ev->where)); break;
-    case inSysWindow: SystemClick(ev, w); break;
-    case inDrag: DragWindow(w, ev->where, &qd.screenBits.bounds); break;
-    case inGoAway: if (TrackGoAway(w, ev->where)) quitting = true; break;
+    case inGoAway: if (TrackGoAway(w, ev->where)) close_browser(br); break;
     case inGrow: {
         Rect limits;
         long size;
@@ -2599,7 +2777,7 @@ static void do_mouse(EventRecord *ev)
         break;
     }
     case inZoomIn: case inZoomOut:
-        if (TrackBox(w, ev->where, part)) { SetPort(w); EraseRect(&w->portRect); ZoomWindow(w, part, false); resized(); }
+        if (TrackBox(w, ev->where, part)) { EraseRect(&w->portRect); ZoomWindow(w, part, false); resized(); }
         break;
     case inContent: {
         Point p = ev->where;
@@ -2609,15 +2787,15 @@ static void do_mouse(EventRecord *ev)
         if ((cpart = FindControl(p, w, &c))) {
             if (cpart == inThumb) {
                 TrackControl(c, p, NULL);
-                if (c == hscroll) scroll_x_to(GetControlValue(c));
-                else scroll_to((long)GetControlValue(c) * scroll_scale);
+                if (c == br->hscroll) scroll_x_to(GetControlValue(c));
+                else scroll_to((long)GetControlValue(c) * br->scroll_scale);
             } else {
                 TrackControl(c, p, (ControlActionUPP)scroll_action);
             }
-        } else if (PtInRect(p, &back_r)) { if (hist_pos > 0 && press(&back_r)) go_history(-1); }
-        else if (PtInRect(p, &fwd_r)) { if (hist_pos < hist_len - 1 && press(&fwd_r)) go_history(1); }
-        else if (PtInRect(p, &reload_r)) { if (hist_pos >= 0 && press(&reload_r)) reload(); }
-        else if (PtInRect(p, &(*url_te)->viewRect)) { blur(); te_click(p, (ev->modifiers & shiftKey) != 0, url_te); }
+        } else if (PtInRect(p, &br->back_r)) { if (br->hist_pos > 0 && press(&br->back_r)) go_history(-1); }
+        else if (PtInRect(p, &br->fwd_r)) { if (br->hist_pos < br->hist_len - 1 && press(&br->fwd_r)) go_history(1); }
+        else if (PtInRect(p, &br->reload_r)) { if (br->hist_pos >= 0 && press(&br->reload_r)) reload(); }
+        else if (PtInRect(p, &(*br->url_te)->viewRect)) { blur(); te_click(p, (ev->modifiers & shiftKey) != 0, br->url_te); }
         else if (click_control(p, ev)) {}
         else page_click(p, ev);
         break;
@@ -2628,36 +2806,39 @@ static void do_mouse(EventRecord *ev)
 static void do_key(EventRecord *ev)
 {
     char c = ev->message & charCodeMask;
-    long page = view_r.bottom - view_r.top - 16;
-    Boolean in_area = focus >= 0 && forms.fields[focus].type == FIELD_TEXTAREA;
+    long page;
+    Boolean in_area;
     if (ev->modifiers & cmdKey) {
-        if (c == '[') { go_history(-1); return; }
-        if (c == ']') { go_history(1); return; }
-        if (c == 'r' || c == 'R') { reload(); return; }
-        if ((ev->modifiers & optionKey) && option_digit(ev) >= 0) { bookmark_dialog(option_digit(ev)); return; }
-        refresh_bookmarks();
+        if (br && c == '[') { go_history(-1); return; }
+        if (br && c == ']') { go_history(1); return; }
+        if (br && (c == 'r' || c == 'R')) { reload(); return; }
+        if (br && (ev->modifiers & optionKey) && option_digit(ev) >= 0) { bookmark_dialog(option_digit(ev)); return; }
+        refresh_menus();
         do_menu(MenuKey(c));
         return;
     }
+    if (!br) return;
+    page = br->view_r.bottom - br->view_r.top - 16;
+    in_area = br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_TEXTAREA;
     /* control characters TextEdit would draw as boxes: Escape, Clear, forward delete... */
     if (((unsigned char)c < ' ' && !strchr("\b\t\r\003\001\004\013\014\034\035\036\037", c)) || c == 0x7F) return;
-    if (c == '\t' && forms.n) { next_field((ev->modifiers & shiftKey) ? -1 : 1); return; }
+    if (c == '\t' && br->forms.n) { next_field((ev->modifiers & shiftKey) ? -1 : 1); return; }
     switch (c) {
-    case 0x0B: scroll_to(scroll_y - page); return;   /* page up */
-    case 0x0C: scroll_to(scroll_y + page); return;   /* page down */
+    case 0x0B: scroll_to(br->scroll_y - page); return;   /* page up */
+    case 0x0C: scroll_to(br->scroll_y + page); return;   /* page down */
     case 0x01: scroll_to(0); return;                 /* home */
     case 0x04: scroll_to(max_scroll()); return;      /* end */
-    case 0x1E: if (!in_area) { scroll_to(scroll_y - 16); return; } break;  /* up arrow */
-    case 0x1F: if (!in_area) { scroll_to(scroll_y + 16); return; } break;  /* down arrow */
+    case 0x1E: if (!in_area) { scroll_to(br->scroll_y - 16); return; } break;  /* up arrow */
+    case 0x1F: if (!in_area) { scroll_to(br->scroll_y + 16); return; } break;  /* down arrow */
     }
-    if (focus >= 0) {
-        if ((c == '\r' && !in_area) || c == 3) { submit(forms.fields[focus].form, -1, 0, 0); return; }
+    if (br->focus >= 0) {
+        if ((c == '\r' && !in_area) || c == 3) { submit(br->forms.fields[br->focus].form, -1, 0, 0); return; }
         type_in_field(c, ev);
         return;
     }
     if (c == '\r' || c == 3) { go_typed(); return; }
-    TEKey(c, url_te);
-    te_show_caret(url_te);
+    TEKey(c, br->url_te);
+    te_show_caret(br->url_te);
 }
 
 /* Show a link's address in the status line while the mouse is over it, as browsers did */
@@ -2665,29 +2846,31 @@ static void hover(void)
 {
     static const Run *last = NULL;
     static char last_map[300];   /* on an image map: the address last shown */
+    static Browser *last_br;     /* the window they were in */
     Point p;
     const Run *r;
     char target[300];
     int m;
-    if (loading) return;
-    SetPort(win);
+    if (br->loading) return;
+    if (br != last_br) { last = NULL; last_map[0] = 0; last_br = br; }
+    SetPort(br->win);
     GetMouse(&p);
     if (!(r = link_at(p))) r = waiting_image_at(p);
     /* an image map's address changes as the mouse moves across it */
     m = r && waiting_image_at(p) ? 0 : map_target(p, run_at(p), target, sizeof target);
     if (m > 0) {
         last = run_at(p);
-        if (strcmp(target, last_map) || !status_up) {
+        if (strcmp(target, last_map) || !br->status_up) {
             strcpy(last_map, target);
             set_status(target);
-            status_held = true;
+            br->status_held = true;
         }
         return;
     }
     if (m < 0) {
         last = run_at(p);
         last_map[0] = 0;
-        if (status_held) hide_status();
+        if (br->status_held) hide_status();
         return;
     }
     last_map[0] = 0;
@@ -2695,13 +2878,13 @@ static void hover(void)
     last = r;
     if (r && !r->link) {
         set_status("Use the context menu to load this image.");
-        status_held = true;
+        br->status_held = true;
     } else if (r) {
-        if (url_resolve(page_url, lay.links[r->link - 1], target, sizeof target))
-            snprintf(target, sizeof target, "%s", lay.links[r->link - 1]);
+        if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target))
+            snprintf(target, sizeof target, "%s", br->lay.links[r->link - 1]);
         set_status(target);
-        status_held = true;
-    } else if (status_held) {
+        br->status_held = true;
+    } else if (br->status_held) {
         hide_status();  /* the link's address goes with the mouse */
     }
 }
@@ -2713,7 +2896,7 @@ static void setup_menus(void)
     AppendResMenu(m, 'DRVR');
     InsertMenu(m, 0);
     m = NewMenu(MENU_FILE, "\pFile");
-    AppendMenu(m, "\pOpen Location.../L;Open File.../O;(-;Quit/Q");
+    AppendMenu(m, "\pNew Window/N;Open Location.../L;Open File.../O;Close/W;(-;Quit/Q");
     InsertMenu(m, 0);
     m = NewMenu(MENU_EDIT, "\pEdit");
     AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;(-;Preferences...");
@@ -2748,66 +2931,44 @@ static Boolean net_waiting(void)
 
 int mill_run(WindowPtr splash)
 {
-    Rect r, t;
     EventRecord ev;
     Boolean net_ok;
 
     sys_init();  /* System 6 or 7: which calls to use */
     InitCursor();
     setup_menus();
-
-    /* Fits a 512x342 screen, the smallest a Mill Mac has */
-    r = qd.screenBits.bounds;
-    SetRect(&r, r.left + 2, r.top + 40, r.right - 2, r.bottom - 2);
-    win = NewWindow(NULL, &r, "\pMill", true, documentProc + 8 /* with a zoom box */, splash, true, 0);
-    SetPort(win);
-    geometry();
-    SetRect(&t, reload_r.right + 6, 3, mill_r.left - 4, BAR - 2);
-    TextFont(kFontIDGeneva);
-    TextSize(9);
-    url_te = TENew(&t, &t);
-    (*url_te)->destRect.right = t.left + 2000;  /* one long line: a URL never wraps */
-    field_te = TENew(&t, &t);                   /* moved over a field when one is typed in */
-    TEActivate(url_te);
-    SetRect(&t, 0, 0, 10, 10);
-    vscroll = NewControl(win, &t, "\p", true, 0, 0, 0, scrollBarProc, 0);
-    hscroll = NewControl(win, &t, "\p", false, 0, 0, 0, scrollBarProc, 0);
-    resized();
+    if (!new_browser(splash)) return 1;
 
     settings_load();
     net_status = net_progress;
     net_idle = net_waiting;
     net_ok = net_init() == noErr;
     DisposeWindow(splash);  /* the browser is ready */
-    SetPort(win);
+    SetPort(br->win);
 
     /* the home page, or Mill's own page when the network isn't there */
     if (!net_ok || !go(setting("homepage", MILL_DEFAULT_HOME), true)) {
         char why[128];
-        strcpy(why, net_ok ? status_text : "MacTCP isn't available.");
+        strcpy(why, net_ok ? br->status_text : "MacTCP isn't available.");
         go("mill://about", true);
         set_status(why);  /* why it isn't the home page */
     }
 
     while (!quitting) {
-        if (focus >= 0 && focus_shown && forms.fields[focus].type != FIELD_PASSWORD) {
-            RgnHandle save;
-            SetPort(win);
-            save = clip_to(&focus_clip);
-            TEIdle(field_te);
+        use(front());
+        if (br && br->focus >= 0 && br->focus_shown && br->forms.fields[br->focus].type != FIELD_PASSWORD) {
+            RgnHandle save = clip_to(&br->focus_clip);
+            TEIdle(br->field_te);
             unclip(save);
-        } else if (focus < 0) {
-            TEIdle(url_te);
+        } else if (br && br->focus < 0) {
+            TEIdle(br->url_te);
         }
-        if (!sys_next_event(&ev, 10)) { hover(); status_idle(); continue; }
+        if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); } continue; }
         switch (ev.what) {
         case mouseDown: do_mouse(&ev); break;
         case keyDown: case autoKey: do_key(&ev); break;
-        case updateEvt:
-            BeginUpdate((WindowPtr)ev.message);
-            redraw();
-            EndUpdate((WindowPtr)ev.message);
-            break;
+        case updateEvt: update_window((WindowPtr)ev.message); break;
+        case activateEvt: activate((WindowPtr)ev.message, (ev.modifiers & activeFlag) != 0); break;
         }
     }
     net_shutdown();
