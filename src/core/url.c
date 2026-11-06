@@ -102,11 +102,18 @@ static void decode(const char *s, long n, char *out, int size)
     out[o] = 0;
 }
 
+int url_has_scheme(const char *s)
+{
+    const char *p = s;
+    if (!((*p | 32) >= 'a' && (*p | 32) <= 'z')) return 0;
+    while (((*p | 32) >= 'a' && (*p | 32) <= 'z') || (*p >= '0' && *p <= '9') || *p == '+' || *p == '-' || *p == '.') p++;
+    return p[0] == ':' && p[1] == '/' && p[2] == '/' ? (int)(p + 3 - s) : 0;
+}
+
 /* Where an address's host part starts and ends (after "scheme://", before the path) */
 static const char *authority(const char *url, const char **end)
 {
-    const char *s = strstr(url, "://");
-    s = s ? s + 3 : url;
+    const char *s = url + url_has_scheme(url);
     for (*end = s; **end && **end != '/' && **end != '?' && **end != '#'; (*end)++) {}
     return s;
 }
@@ -121,8 +128,8 @@ int url_parse(const char *s, Url *u)
     while (*s == ' ') s++;
     for (k = 0; k < NSCHEMES && !prefix_ci(s, SCHEMES[k]); k++) {}
     if (k < NSCHEMES) { u->scheme = (char)k; s += strlen(SCHEMES[k]); }
+    else if (url_has_scheme(s)) return -1;  /* gopher://, ftp:// ... */
     if (u->scheme == SCHEME_HTTPS) u->port = 443;
-    else if (strstr(s, "://")) return -1;
     for (end = s; *end && *end != '/' && *end != '?' && *end != '#'; end++) {}
     /* user:password@ before the host (the last @, as a password may hold one) */
     for (p = end; p > s && p[-1] != '@'; p--) {}

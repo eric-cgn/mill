@@ -688,6 +688,40 @@ static void test_urls(void)
     check_resolve("http://www.example.com/", "https://www.example.com:443/", "https://www.example.com/");
     check_resolve("https://www.example.com:8443/a", "b", "https://www.example.com:8443/b");
     check_resolve("https://www.example.com/", "http://www.example.com:80/", "http://www.example.com/");
+    /* "://" after the scheme, in a path, query or fragment, is only text */
+    {
+        const char *q = "http://www.example.com/get?url=http://example.org/a&b=1";
+        Url u;
+        char out[300];
+        CHECK(url_parse(q, &u) == 0 && u.scheme == SCHEME_HTTP && !strcmp(u.host, "www.example.com") &&
+              !strcmp(u.path, "/get?url=http://example.org/a&b=1"));
+        CHECK(url_parse("https://www.example.com/r?to=https://example.org/", &u) == 0 &&
+              u.scheme == SCHEME_HTTPS && !strcmp(u.host, "www.example.com"));
+        CHECK(url_parse("http://www.example.com/a#see:http://example.org/", &u) == 0 &&
+              !strcmp(u.path, "/a") && !strcmp(u.fragment, "see:http://example.org/"));
+        CHECK(url_parse("www.example.com/get?url=http://example.org/", &u) == 0 && u.scheme == SCHEME_HTTP &&
+              !strcmp(u.host, "www.example.com"));
+        CHECK(url_parse("gopher://example.org/?u=http://example.com/", &u) == -1);
+        check_resolve(q, "/get?u=http://example.org/b", "http://www.example.com/get?u=http://example.org/b");
+        check_resolve(q, "page?u=http://example.org/b", "http://www.example.com/page?u=http://example.org/b");
+        check_resolve(q, "?u=http://example.org/b", "http://www.example.com/get?u=http://example.org/b");
+        check_resolve(q, "#http://example.org/", "http://www.example.com/get?url=http://example.org/a&b=1#http://example.org/");
+        check_resolve(b, "a.html#x://y", "http://www.example.com/news/a.html#x://y");
+        check_resolve(b, "//cdn.example.com/x?u=http://example.org/", "http://cdn.example.com/x?u=http://example.org/");
+        check_resolve(b, q, q);
+        /* typed addresses: http:// goes in front unless one is there already */
+        CHECK(url_has_scheme("http://www.example.com/") == 7);
+        CHECK(url_has_scheme("HTTPS://www.example.com/") == 8);
+        CHECK(url_has_scheme("gopher://example.org/") == 9);
+        CHECK(!url_has_scheme("www.example.com/get?url=http://example.org/"));
+        CHECK(!url_has_scheme("www.example.com#http://example.org/"));
+        CHECK(!url_has_scheme("proxy.example:5001"));
+        CHECK(!url_has_scheme("/a?u=http://example.org/"));
+        url_strip_login(strcpy(out, "http://joe@www.example.com/get?url=http://example.org/"));
+        CHECK(!strcmp(out, "http://www.example.com/get?url=http://example.org/"));
+        url_strip_login(strcpy(out, "www.example.com/get?url=http://joe@example.org/"));
+        CHECK(!strcmp(out, "www.example.com/get?url=http://joe@example.org/"));
+    }
     /* domains that skip the proxy */
     CHECK(url_host_in("example.com", "example.com"));
     CHECK(url_host_in("www.Example.COM", "other.org, example.com"));

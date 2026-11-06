@@ -1846,7 +1846,7 @@ static void go_typed(void)
     if (n > 290) n = 290;
     memcpy(url, *(*url_te)->hText, n);
     url[n] = 0;
-    if (!strstr(url, "://")) {
+    if (!url_has_scheme(url)) {
         memmove(url + 7, url, n + 1);
         memcpy(url, "http://", 7);
     }
