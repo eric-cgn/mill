@@ -21,6 +21,9 @@ int url_parse(const char *s, Url *u);
    Mill can't follow (mailto:, ftp:, ...). */
 int url_resolve(const char *base, const char *href, char *out, int out_size);
 void url_format(const Url *u, char *out, int out_size);
+/* If s starts with a scheme and "://" (any scheme, known or not), that prefix's length;
+   0 if not. A "://" later on, in the path, query or fragment, doesn't count. */
+int url_has_scheme(const char *s);
 /* http: or https:, the web's own kinds (as against file: and mill:) */
 int url_is_web(int scheme);
 /* Whether host is in list (separated by spaces or commas): a domain includes its

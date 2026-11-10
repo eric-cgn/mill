@@ -67,3 +67,17 @@ resource 'DITL' (201) {
         {112, 232, 140, 310}, UserItem { disabled }
     }
 };
+
+/* When there isn't the memory for another window; placed for a 512x342 screen, as
+   System 6 doesn't center alerts */
+resource 'ALRT' (202) {
+    {80, 96, 190, 416}, 202, {
+        OK, visible, sound1, OK, visible, sound1, OK, visible, sound1, OK, visible, sound1
+    }, noAutoCenter
+};
+resource 'DITL' (202) {
+    {
+        {76, 236, 96, 306}, Button { enabled, "OK" },
+        {10, 70, 66, 306}, StaticText { disabled, "There isn't enough memory for another window. Close a window and try again." }
+    }
+};
