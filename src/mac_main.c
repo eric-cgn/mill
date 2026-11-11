@@ -94,7 +94,7 @@ static Keyring keyring; /* names and passwords given for sites, while Mill runs 
 static void geometry(void)
 {
     Rect r = br->win->portRect;
-    SetRect(&br->back_r, 3, 3, 3 + TOOL_ICON, 3 + TOOL_ICON);
+    SetRect(&br->back_r, 3, 4, 3 + TOOL_ICON, 4 + TOOL_ICON);  /* level with the address's text */
     br->fwd_r = br->back_r;
     OffsetRect(&br->fwd_r, 13, 0);
     br->reload_r = br->fwd_r;
