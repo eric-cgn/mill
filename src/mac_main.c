@@ -127,18 +127,18 @@ static void draw_bits(const unsigned short *rows, short n, short width, const Re
     BitMap bm;
     Rect src;
     unsigned short buf[16];
+    short i;
     memcpy(buf, rows, n * 2);
+    /* Dimmed: every other pixel cleared, in a checkerboard that starts at the
+       picture's own top left corner, so mirror-image pictures (back and forward)
+       dim to mirror images wherever they sit */
+    if (dim)
+        for (i = 0; i < n; i++) buf[i] &= i % 2 ? 0x5555 : 0xAAAA;
     bm.baseAddr = (Ptr)buf;
     bm.rowBytes = 2;
     SetRect(&bm.bounds, 0, 0, 16, n);
     SetRect(&src, 0, 0, width, n);
     CopyBits(&bm, &br->win->portBits, &src, where, srcCopy, NULL);
-    if (dim) {
-        PenPat(&qd.gray);
-        PenMode(patBic);
-        PaintRect(where);
-        PenNormal();
-    }
 }
 
 static void draw_mill(void)
@@ -2726,8 +2726,9 @@ static Browser *new_browser(WindowPtr behind)
     browsers = x;
     use(x);
     geometry();
-    /* Geneva 9 is 12 high (10 above the baseline, 2 below): rows 3 to 14, under the bar's line */
-    SetRect(&t, x->reload_r.right + 6, 3, x->mill_r.left - 4, BAR - 1);
+    /* Geneva 9 is 12 high (10 above the baseline, 2 below), its top rows kept for
+       accents: rows 2 to 13 put capitals level with the buttons, descenders whole */
+    SetRect(&t, x->reload_r.right + 6, 2, x->mill_r.left - 4, BAR - 2);
     TextFont(kFontIDGeneva);
     TextSize(9);
     x->url_te = TENew(&t, &t);
