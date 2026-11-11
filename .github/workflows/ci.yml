@@ -1,5 +1,6 @@
 # Every push to main and every pull request: the host tests and a build, with the
-# release files kept as an artifact.
+# release files kept as an artifact. A pull request into main fails unless it comes
+# from dev: features go into dev, and main only takes dev, as a release.
 name: CI
 
 on:
@@ -14,6 +15,11 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
+      - name: Into main only from dev
+        if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.head_ref != 'dev'
+        run: |
+          echo "::error::Pull requests into main come from dev. Point this one at dev instead."
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Test
         run: tests/run.sh
