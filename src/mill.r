@@ -81,3 +81,17 @@ resource 'DITL' (202) {
         {10, 70, 66, 306}, StaticText { disabled, "There isn't enough memory for another window. Close a window and try again." }
     }
 };
+
+/* Leaving, closing, or quitting with a form that's changed and not sent; ^0 says which */
+resource 'ALRT' (203) {
+    {80, 96, 196, 416}, 203, {
+        OK, visible, sound1, OK, visible, sound1, OK, visible, sound1, OK, visible, sound1
+    }, noAutoCenter
+};
+resource 'DITL' (203) {
+    {
+        {82, 236, 102, 306}, Button { enabled, "Stay" },
+        {82, 152, 102, 222}, Button { enabled, "Leave" },
+        {10, 70, 70, 306}, StaticText { disabled, "This page has a form you've changed and haven't sent. ^0" }
+    }
+};
