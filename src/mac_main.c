@@ -28,7 +28,7 @@ enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_QUIT = 6 };
 enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_PREFERENCES = 7 };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
-#define BAR 16          /* toolbar height */
+#define BAR 14          /* toolbar height: the address's highlight, and a pixel each side */
 #define STATUS_SECS 5   /* a message shows this long once Mill is idle */
 #define SCROLL 16
 #define MAX_PAGE (192L * 1024)
@@ -94,12 +94,12 @@ static Keyring keyring; /* names and passwords given for sites, while Mill runs 
 static void geometry(void)
 {
     Rect r = br->win->portRect;
-    SetRect(&br->back_r, 3, 3, 3 + TOOL_ICON, 3 + TOOL_ICON);
+    SetRect(&br->back_r, 3, 3, 3 + TOOL_ICON, 3 + TOOL_ICON);  /* level with the address's text */
     br->fwd_r = br->back_r;
     OffsetRect(&br->fwd_r, 13, 0);
     br->reload_r = br->fwd_r;
     OffsetRect(&br->reload_r, 13, 0);
-    SetRect(&br->mill_r, r.right - SCROLL + 1, 0, r.right - SCROLL + 1 + MILL_ICON, MILL_ICON);  /* above the scroll bar */
+    SetRect(&br->mill_r, r.right - SCROLL + 1, 0, r.right - SCROLL + 1 + MILL_ICON, MILL_H);  /* above the scroll bar */
     SetRect(&br->view_r, 0, BAR + 1, r.right - SCROLL + 1, r.bottom - (br->hbar ? SCROLL - 1 : 0));
 }
 
@@ -127,23 +127,23 @@ static void draw_bits(const unsigned short *rows, short n, short width, const Re
     BitMap bm;
     Rect src;
     unsigned short buf[16];
+    short i;
     memcpy(buf, rows, n * 2);
+    /* Dimmed: every other pixel cleared, in a checkerboard that starts at the
+       picture's own top left corner, so mirror-image pictures (back and forward)
+       dim to mirror images wherever they sit */
+    if (dim)
+        for (i = 0; i < n; i++) buf[i] &= i % 2 ? 0x5555 : 0xAAAA;
     bm.baseAddr = (Ptr)buf;
     bm.rowBytes = 2;
     SetRect(&bm.bounds, 0, 0, 16, n);
     SetRect(&src, 0, 0, width, n);
     CopyBits(&bm, &br->win->portBits, &src, where, srcCopy, NULL);
-    if (dim) {
-        PenPat(&qd.gray);
-        PenMode(patBic);
-        PaintRect(where);
-        PenNormal();
-    }
 }
 
 static void draw_mill(void)
 {
-    draw_bits(ICON_MILL[br->mill_frame], 16, 16, &br->mill_r, false);
+    draw_bits(ICON_MILL[br->mill_frame], MILL_H, 16, &br->mill_r, false);
 }
 
 /* Turn the sails a step; called while loading, at most every few ticks */
@@ -2726,7 +2726,9 @@ static Browser *new_browser(WindowPtr behind)
     browsers = x;
     use(x);
     geometry();
-    SetRect(&t, x->reload_r.right + 6, 3, x->mill_r.left - 4, BAR - 2);
+    /* Geneva 9 is 12 high (10 above the baseline, 2 below), its top rows kept for
+       accents: rows 1 to 12 put capitals level with the buttons, descenders whole */
+    SetRect(&t, x->reload_r.right + 6, 1, x->mill_r.left - 4, BAR - 1);
     TextFont(kFontIDGeneva);
     TextSize(9);
     x->url_te = TENew(&t, &t);
