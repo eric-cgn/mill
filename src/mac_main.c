@@ -2726,7 +2726,8 @@ static Browser *new_browser(WindowPtr behind)
     browsers = x;
     use(x);
     geometry();
-    SetRect(&t, x->reload_r.right + 6, 3, x->mill_r.left - 4, BAR - 2);
+    /* Geneva 9 is 12 high (10 above the baseline, 2 below): rows 3 to 14, under the bar's line */
+    SetRect(&t, x->reload_r.right + 6, 3, x->mill_r.left - 4, BAR - 1);
     TextFont(kFontIDGeneva);
     TextSize(9);
     x->url_te = TENew(&t, &t);
