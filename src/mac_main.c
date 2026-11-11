@@ -94,7 +94,7 @@ static Keyring keyring; /* names and passwords given for sites, while Mill runs 
 static void geometry(void)
 {
     Rect r = br->win->portRect;
-    SetRect(&br->back_r, 3, 3, 3 + TOOL_ICON, 3 + TOOL_ICON);
+    SetRect(&br->back_r, 3, 4, 3 + TOOL_ICON, 4 + TOOL_ICON);  /* level with the address's text */
     br->fwd_r = br->back_r;
     OffsetRect(&br->fwd_r, 13, 0);
     br->reload_r = br->fwd_r;
@@ -2726,7 +2726,8 @@ static Browser *new_browser(WindowPtr behind)
     browsers = x;
     use(x);
     geometry();
-    SetRect(&t, x->reload_r.right + 6, 3, x->mill_r.left - 4, BAR - 2);
+    /* Geneva 9 is 12 high (10 above the baseline, 2 below): rows 3 to 14, under the bar's line */
+    SetRect(&t, x->reload_r.right + 6, 3, x->mill_r.left - 4, BAR - 1);
     TextFont(kFontIDGeneva);
     TextSize(9);
     x->url_te = TENew(&t, &t);
