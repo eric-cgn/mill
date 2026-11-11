@@ -30,6 +30,8 @@ int forms_build(Forms *F, const Doc *d);
 void forms_free(Forms *F);
 /* The field for a control node, or -1 */
 long forms_find(const Forms *F, long node);
+/* Whether anything has been typed or chosen since the page came (or was reset) */
+int forms_changed(const Forms *F, const Doc *d);
 /* Back to the page's own values (a Reset button) */
 void forms_reset(Forms *F, const Doc *d, long form);
 int forms_set_value(Field *f, const char *value);

@@ -421,6 +421,16 @@ int decode_macbinary(void)
     return strcmp(setting("decode_macbinary", "yes"), "no") != 0;
 }
 
+int print_headers(void)
+{
+    return strcmp(setting("print_headers", "yes"), "no") != 0;
+}
+
+int print_backgrounds(void)
+{
+    return strcmp(setting("print_backgrounds", "no"), "yes") == 0;
+}
+
 int accept_cookies(void)
 {
     return strcmp(setting("cookies", "yes"), "no") != 0;
@@ -661,6 +671,10 @@ static void config(Out *o, const char *body, long len)
         if (form_value(body, len, "proxy_exclude", skip, sizeof skip)) put_setting("proxy_exclude", 13, skip, strlen(skip));
         if (form_value(body, len, "proxy_https", k, sizeof k)) put_setting("proxy_https", 11, "yes", 3);
         else put_setting("proxy_https", 11, "no", 2);
+        if (form_value(body, len, "print_headers", k, sizeof k)) put_setting("print_headers", 13, "yes", 3);
+        else put_setting("print_headers", 13, "no", 2);
+        if (form_value(body, len, "print_backgrounds", k, sizeof k)) put_setting("print_backgrounds", 17, "yes", 3);
+        else put_setting("print_backgrounds", 17, "no", 2);
         if (form_value(body, len, "file_types", types, sizeof types)) {
             int bad;
             strcpy(typed, types);
@@ -695,7 +709,7 @@ static void config(Out *o, const char *body, long len)
     out_s(o, "<TITLE>Mill Settings</TITLE><H2>Settings</H2>");
     if (note[0]) { out_s(o, "<P><B>"); out_text(o, note); out_s(o, "</B>"); }
     /* each section a table: the setting's name, then its control and what it does */
-    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#proxy\">Proxy</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
+    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#proxy\">Proxy</A> | <A HREF=\"#printing\">Printing</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
              "<FORM METHOD=POST ACTION=\"mill://config\"><H3><A NAME=general>General</A></H3>"
              SETTINGS_TABLE
              "<TR><TD VALIGN=TOP WIDTH=110><B>Home page</B><TD><INPUT NAME=homepage SIZE=36 VALUE=\"");
@@ -736,6 +750,13 @@ static void config(Out *o, const char *body, long len)
              "<TR><TD VALIGN=TOP WIDTH=110><B>Enable https over proxy</B><TD><INPUT TYPE=checkbox NAME=proxy_https VALUE=yes");
     if (proxy_https()) out_s(o, " CHECKED");
     out_s(o, "> Sends https:// addresses to the proxy. The connection from Mill to the proxy is not encrypted."
+             "</TABLE><H3><A NAME=printing>Printing</A></H3>" SETTINGS_TABLE
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Print headers and footers</B><TD><INPUT TYPE=checkbox NAME=print_headers VALUE=yes");
+    if (print_headers()) out_s(o, " CHECKED");
+    out_s(o, "> The page's title at the top of each sheet; its address, the page number, and the date at the bottom."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Print backgrounds</B><TD><INPUT TYPE=checkbox NAME=print_backgrounds VALUE=yes");
+    if (print_backgrounds()) out_s(o, " CHECKED");
+    out_s(o, "> Prints dark table cells black, as on screen. When off, they print white with black text."
              "</TABLE><H3><A NAME=bookmarks>Bookmarks</A></H3>" SETTINGS_TABLE "<TR><TH><TH>Title<TH>Address");
     {
         int n;

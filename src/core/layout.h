@@ -24,6 +24,9 @@ typedef struct {
        (hidden fields); may be NULL */
     int (*control_size)(void *ctx, long node, short *w, short *h, short *ascent);
     void *ctx;
+    /* How far along it is, 0 to 100, each time that changes; returns nonzero to stop.
+       May be NULL. */
+    int (*progress)(void *ctx, int percent);
 } Metrics;
 
 enum { RUN_TEXT, RUN_GEN, RUN_RULE, RUN_IMAGE, RUN_CONTROL };
@@ -63,6 +66,7 @@ typedef struct {
     short width, tallest;                   /* tallest line, for finding the lines near a y */
 } Layout;
 
+/* Returns 0, -1 when out of memory, or -2 when progress said to stop */
 int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width);
 void layout_free(Layout *L);
 /* The run under a point in page coordinates, or NULL */

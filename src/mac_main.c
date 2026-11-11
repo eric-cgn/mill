@@ -24,7 +24,7 @@
 #include "version.h"
 
 enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
-enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_QUIT = 6 };
+enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_PAGE_SETUP = 6, FILE_PRINT, FILE_QUIT = 9 };
 enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_PREFERENCES = 7 };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
@@ -38,6 +38,8 @@ enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the s
 #define FILE_MSG "Web pages can't open this Mac's files or Mill's own pages. Type the address to go there."
 #define FORM_MSG "Forms can only send to the same kind of address as their page."
 #define ALERT_MEMORY 202
+#define ALERT_UNSENT 203
+enum { UNSENT_STAY = 1, UNSENT_LEAVE };
 
 /* One per distinct picture on the page (the same SRC at the same size is fetched once) */
 typedef struct {
@@ -138,7 +140,7 @@ static void draw_bits(const unsigned short *rows, short n, short width, const Re
     bm.rowBytes = 2;
     SetRect(&bm.bounds, 0, 0, 16, n);
     SetRect(&src, 0, 0, width, n);
-    CopyBits(&bm, &br->win->portBits, &src, where, srcCopy, NULL);
+    CopyBits(&bm, &qd.thePort->portBits, &src, where, srcCopy, NULL);
 }
 
 static void draw_mill(void)
@@ -189,6 +191,7 @@ static void set_loading(Boolean on)
    bottom left corner. It stays while something loads or the mouse is on a link, and goes
    STATUS_SECS after it last changed. */
 static Boolean page_limited;            /* draw_page: only page_limit */
+static Boolean plain_cells;             /* draw_page: dark cells white, with black text (printing) */
 static Rect page_limit;
 
 static void draw_page(short only);
@@ -532,7 +535,7 @@ static int qd_control_size(void *ctx, long node, short *w, short *h, short *asc)
     return 1;
 }
 
-static Metrics qd_m = { qd_width, qd_metrics, qd_image_size, qd_control_size, NULL };
+static Metrics qd_m = { qd_width, qd_metrics, qd_image_size, qd_control_size, NULL, NULL };
 
 /* Where a control is in the window right now; false if it isn't laid out */
 static Boolean control_box(long node, Rect *box)
@@ -773,7 +776,7 @@ static void draw_picture(const Run *r, short top)
         bm.baseAddr = (Ptr)p->bm.bits;
         bm.rowBytes = p->bm.row_bytes;
         SetRect(&bm.bounds, 0, 0, p->bm.w, p->bm.h);
-        CopyBits(&bm, &br->win->portBits, &bm.bounds, &in, srcCopy, NULL);
+        CopyBits(&bm, &qd.thePort->portBits, &bm.bounds, &in, srcCopy, NULL);
     } else {
         /* not here (yet): a gray frame, the image icon, and the ALT text if they fit */
         const char *alt = html_attr(&br->doc, &br->doc.nodes[r->text], "alt");
@@ -815,7 +818,7 @@ static void draw_page(short only)
         for (i = br->lay.nboxes - 1; i >= 0 && only < 0; i--) {
             const Box *b = &br->lay.boxes[i];
             Rect r;
-            if (b->thick > 0 || b->y + b->h <= top || b->y >= bottom) continue;
+            if (b->thick > 0 || plain_cells || b->y + b->h <= top || b->y >= bottom) continue;
             SetRect(&r, PAGE_LEFT + b->x, br->view_r.top + (short)(b->y - br->scroll_y),
                     PAGE_LEFT + b->x + b->w, br->view_r.top + (short)(b->y - br->scroll_y) + b->h);
             if (b->thick == 0) PaintRect(&r);
@@ -853,7 +856,7 @@ static void draw_page(short only)
                 TextFont(r->font);
                 TextSize(r->size);
                 TextFace(r->face & ~FACE_INVERSE);
-                if (r->face & FACE_INVERSE) TextMode(srcBic);  /* white, on a dark cell */
+                if ((r->face & FACE_INVERSE) && !plain_cells) TextMode(srcBic);  /* white, on a dark cell */
                 MoveTo(PAGE_LEFT + r->x, base);
                 DrawText(r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text, 0, r->len);
                 TextMode(srcOr);
@@ -937,13 +940,28 @@ static void scroll_x_to(long x)
     draw_view();
 }
 
+static int laying_out(void *ctx, int percent)
+{
+    char msg[32];
+    (void)ctx;
+    sprintf(msg, "Laying out... %d%%", percent);
+    set_status(msg);
+    return 0;
+}
+
 static void relayout(void)
 {
     long i;
+    int err;
     if (!br->have_page) return;
     layout_free(&br->lay);
     set_status("Laying out...");
-    if (layout_doc(&br->lay, &br->doc, &qd_m, br->view_r.right - br->view_r.left)) set_status("Not enough memory for this page.");
+    br->have_page = false;   /* nothing draws the layout while it's being made */
+    qd_m.progress = laying_out;
+    err = layout_doc(&br->lay, &br->doc, &qd_m, br->view_r.right - br->view_r.left);
+    qd_m.progress = NULL;
+    br->have_page = true;
+    if (err) set_status("Not enough memory for this page.");
     /* the page's width: its widest run or frame, and the margin to its right */
     br->page_w = 0;
     for (i = 0; i < br->lay.nruns; i++) if (br->lay.runs[i].x + br->lay.runs[i].width > br->page_w) br->page_w = br->lay.runs[i].x + br->lay.runs[i].width;
@@ -990,6 +1008,8 @@ static Browser *browser_of(WindowPtr w)
     return x;
 }
 
+static WindowPtr print_win;     /* how printing is going, while it is */
+static void draw_print_win(void);
 static Browser *new_browser(WindowPtr behind);
 static void close_browser(Browser *x);
 static Browser *need(void);
@@ -1016,6 +1036,7 @@ static void update_window(WindowPtr w)
     GetPort(&old);
     BeginUpdate(w);
     if (x) { use(x); redraw(); }
+    else if (w == print_win) draw_print_win();
     EndUpdate(w);
     br = was;
     SetPort(old);
@@ -1039,23 +1060,30 @@ static void activate(WindowPtr w, Boolean on)
 
 /* ------------------------------------------------------------ typing in fields */
 
+/* Keep what's been typed in the field being typed in */
+static void keep_typing(void)
+{
+    Field *f;
+    if (br->focus < 0 || (f = &br->forms.fields[br->focus])->type == FIELD_PASSWORD) return;
+    {
+        CharsHandle h = TEGetText(br->field_te);
+        long n = (*br->field_te)->teLength;
+        char *v = malloc(n + 1);
+        if (v) {
+            memcpy(v, *h, n);
+            v[n] = 0;
+            forms_set_value(f, v);
+            free(v);
+        }
+        f->scroll = (*br->field_te)->viewRect.top - (*br->field_te)->destRect.top;
+    }
+}
+
 /* Keep what's been typed, and give the keyboard back to the address */
 static void blur(void)
 {
     if (br->focus >= 0) {
-        Field *f = &br->forms.fields[br->focus];
-        if (f->type != FIELD_PASSWORD) {
-            CharsHandle h = TEGetText(br->field_te);
-            long n = (*br->field_te)->teLength;
-            char *v = malloc(n + 1);
-            if (v) {
-                memcpy(v, *h, n);
-                v[n] = 0;
-                forms_set_value(f, v);
-                free(v);
-            }
-            f->scroll = (*br->field_te)->viewRect.top - (*br->field_te)->destRect.top;
-        }
+        keep_typing();
         TEDeactivate(br->field_te);
         br->focus = -1;
         br->focus_shown = false;
@@ -1902,10 +1930,26 @@ done:
     return shown;
 }
 
+/* A page with a form that's been changed and not sent: ask before what (such as "Leave
+   this page?") happens. True to go ahead. */
+static Boolean may_leave(const char *what)
+{
+    Str255 p;
+    if (!br || !br->have_page || !br->forms.n) return true;
+    keep_typing();
+    if (!forms_changed(&br->forms, &br->doc)) return true;
+    p[0] = (unsigned char)strlen(what);
+    memcpy(p + 1, what, p[0]);
+    ParamText(p, "\p", "\p", "\p");
+    InitCursor();
+    return CautionAlert(ALERT_UNSENT, NULL) == UNSENT_LEAVE;
+}
+
 /* What you type, choose from a menu, or go back to opens anything; pages can't reach
    across kinds of address */
 static Boolean go(const char *url, Boolean record)
 {
+    if (!may_leave("Leave this page?")) return false;
     return load(url, record, NULL, NULL, 0);
 }
 
@@ -1940,9 +1984,9 @@ static void go_typed(void)
 
 static void go_history(short delta)
 {
-    if (br->hist_pos + delta < 0 || br->hist_pos + delta >= br->hist_len) return;
+    if (br->hist_pos + delta < 0 || br->hist_pos + delta >= br->hist_len || !may_leave("Leave this page?")) return;
     br->hist_pos += delta;
-    go(br->history[br->hist_pos], false);
+    load(br->history[br->hist_pos], false, NULL, NULL, 0);
 }
 
 static void reload(void)
@@ -2029,7 +2073,7 @@ static void submit(long form, long by, short x, short y)
         } else {
             if ((q = strchr(target, '?'))) *q = 0;
             if (strlen(target) + s.len + 2 > sizeof target) set_status("This form's data is too long for an address.");
-            else { strcat(target, "?"); strcat(target, s.data); go(target, true); }
+            else { strcat(target, "?"); strcat(target, s.data); load(target, true, NULL, NULL, 0); }
         }
     }
     submission_free(&s);
@@ -2390,6 +2434,271 @@ static void open_file(void)
     if (need()) go(url, true);
 }
 
+/* ------------------------------------------------------------ printing */
+
+static THPrint print_rec;       /* Page Setup's choices, for every window, while Mill runs */
+static char print_what[100], print_step[60];
+static short print_pct;
+#define PRINT_EDGE 16           /* room for the header line, and for the footer's */
+#define PR_PG_MAX 9999          /* the Printing Manager's last page (iPrPgMax) */
+
+/* The window that says how printing is going: what, which step, and a bar */
+static void draw_print_win(void)
+{
+    Rect bar;
+    SetPort(print_win);
+    EraseRect(&print_win->portRect);
+    TextFont(0);
+    TextSize(12);
+    MoveTo(16, 24);
+    DrawText(print_what, 0, strlen(print_what));
+    TextFont(kFontIDGeneva);
+    TextSize(9);
+    MoveTo(16, 42);
+    DrawText(print_step, 0, strlen(print_step));
+    SetRect(&bar, 16, 50, print_win->portRect.right - 16, 62);
+    FrameRect(&bar);
+    InsetRect(&bar, 1, 1);
+    bar.right = bar.left + (short)((long)(bar.right - bar.left) * print_pct / 100);
+    PaintRect(&bar);
+    MoveTo(16, 80);
+    DrawText("Command-period stops printing.", 0, 30);
+}
+
+static void print_progress(const char *step, int percent)
+{
+    GrafPtr old;
+    snprintf(print_step, sizeof print_step, "%s", step);
+    print_pct = (short)percent;
+    if (!print_win) return;
+    GetPort(&old);
+    draw_print_win();
+    SetPort(old);
+}
+
+static int print_laying_out(void *ctx, int percent)
+{
+    char msg[32];
+    (void)ctx;
+    sprintf(msg, "Laying out... %d%%", percent);
+    print_progress(msg, percent);
+    return stop_asked();
+}
+
+/* The Printing Manager's record, made the first time; false if there's no printer
+   driver (none chosen in the Chooser). PrOpen comes first. */
+static Boolean print_ready(void)
+{
+    if (PrError() != noErr) return false;
+    if (!print_rec) {
+        if (!(print_rec = (THPrint)NewHandleClear(sizeof(TPrint)))) return false;
+        PrintDefault(print_rec);
+    } else {
+        PrValidate(print_rec);
+    }
+    return PrError() == noErr;
+}
+
+static void print_trouble(OSErr err)
+{
+    char msg[100];
+    if (err == iPrAbort) strcpy(msg, "Printing stopped.");
+    else if (err == fnfErr || err == resNotFound) strcpy(msg, "Choose a printer in the Chooser first.");
+    else if (err == memFullErr) strcpy(msg, "Out of memory.");
+    else snprintf(msg, sizeof msg, "Mill couldn't print this page (error %d).", err);
+    if (br) set_status(msg);
+    else SysBeep(10);
+}
+
+static void page_setup(void)
+{
+    PrOpen();
+    if (print_ready()) { InitCursor(); PrStlDialog(print_rec); }
+    else print_trouble(PrError());
+    PrClose();
+    if (br) SetPort(br->win);
+}
+
+/* Where each printed page starts, in page pixels, and how many there are: a page ends
+   above the first line that wouldn't fit whole, unless that line is taller than a page */
+static long *paginate(const Layout *L, long body, short *npages)
+{
+    long *starts = NULL, y = 0, bottom = 0, i;
+    short n = 0;
+    for (i = 0; i < L->nlines; i++) if (L->lines[i].y + L->lines[i].height > bottom) bottom = L->lines[i].y + L->lines[i].height;
+    for (i = 0; i < L->nboxes; i++) if (L->boxes[i].y + L->boxes[i].h > bottom) bottom = L->boxes[i].y + L->boxes[i].h;
+    do {
+        long end = y + body, cut = end, *more;
+        if (!(more = realloc(starts, (n + 2) * sizeof(long)))) { free(starts); return NULL; }
+        starts = more;
+        starts[n++] = y;
+        for (i = layout_line_at(L, y); i < L->nlines && L->lines[i].y < end; i++) {
+            const MLine *ln = &L->lines[i];
+            if (ln->y > y && ln->y + ln->height > end && ln->y < cut) cut = ln->y;
+        }
+        y = cut;
+    } while (y < bottom);
+    starts[n] = y;  /* where the last page ends */
+    *npages = n;
+    return starts;
+}
+
+/* Text cut to fit between left and right, with an ellipsis if it had to be */
+static void draw_fit(const char *t, short left, short right, short base)
+{
+    short n = (short)strlen(t), room = right - left;
+    MoveTo(left, base);
+    if (TextWidth((Ptr)t, 0, n) <= room) { DrawText((Ptr)t, 0, n); return; }
+    room -= CharWidth((char)0xC9);
+    while (n > 0 && TextWidth((Ptr)t, 0, n) > room) n--;
+    DrawText((Ptr)t, 0, n);
+    DrawChar((char)0xC9);
+}
+
+/* One printed page, number n of the laid-out page play, on paper: the window's drawing,
+   pointed at the printer's port for a moment */
+static void print_one(Layout *play, const long *starts, short n, short npages, const Rect *paper, short edge)
+{
+    Layout lay = br->lay;
+    Rect view = br->view_r;
+    long sy = br->scroll_y, sx = br->scroll_x;
+    Boolean up = br->status_up;
+    long focus = br->focus;
+    br->lay = *play;
+    br->focus = -1;     /* a field being typed in prints as text, not through TextEdit */
+    SetRect(&br->view_r, paper->left, paper->top + edge, paper->right, paper->top + edge + (short)(starts[n] - starts[n - 1]));
+    br->scroll_y = starts[n - 1];
+    br->scroll_x = 0;
+    br->status_up = false;
+    plain_cells = !print_backgrounds();
+    draw_page(-1);
+    plain_cells = false;
+    br->lay = lay;
+    br->view_r = view;
+    br->scroll_y = sy;
+    br->scroll_x = sx;
+    br->status_up = up;
+    br->focus = focus;
+    if (edge) {
+        char line[60];
+        Str255 date;
+        unsigned long now;
+        short w;
+        TextFont(kFontIDGeneva);
+        TextSize(9);
+        TextFace(0);
+        draw_fit(br->doc.title[0] ? br->doc.title : br->page_url, paper->left, paper->right, paper->top + 9);
+        ReadDateTime(&now);
+        IUDateString(now, abbrevDate, date);
+        snprintf(line, sizeof line, "%.*s   Page %d of %d", date[0], (char *)date + 1, n, npages);
+        w = TextWidth(line, 0, strlen(line));
+        MoveTo(paper->right - w, paper->bottom - 3);
+        DrawText(line, 0, strlen(line));
+        draw_fit(br->page_url, paper->left, paper->right - w - 12, paper->bottom - 3);
+    }
+}
+
+/* Print the front window's page, laid out again for the paper */
+static void print_page(void)
+{
+    TPPrPort port;
+    TPrStatus st;
+    Layout play;
+    long *starts = NULL;
+    short npages = 0, first, last, n, edge;
+    Rect paper, r;
+    int err;
+    if (!br->have_page || br->loading) return;
+    keep_typing();
+    PrOpen();
+    if (!print_ready()) { print_trouble(PrError()); PrClose(); return; }
+    InitCursor();
+    if (!PrJobDialog(print_rec)) { PrClose(); SetPort(br->win); return; }
+    /* Mill prints only the pages asked for, so the Printing Manager shouldn't skip any */
+    first = (**print_rec).prJob.iFstPage;
+    last = (**print_rec).prJob.iLstPage;
+    (**print_rec).prJob.iFstPage = 1;
+    (**print_rec).prJob.iLstPage = PR_PG_MAX;
+    if (first < 1) first = 1;
+    paper = (**print_rec).prInfo.rPage;
+    edge = print_headers() ? PRINT_EDGE : 0;
+
+    r = qd.screenBits.bounds;
+    SetRect(&r, (r.right - 300) / 2, 20 + (r.bottom - 20 - 96) / 3, (r.right - 300) / 2 + 300, 20 + (r.bottom - 20 - 96) / 3 + 96);
+    snprintf(print_what, sizeof print_what, "Printing \"%.60s\"", br->doc.title[0] ? br->doc.title : br->page_url);
+    print_step[0] = 0;
+    print_pct = 0;
+    print_win = NewWindow(NULL, &r, "\p", true, dBoxProc, (WindowPtr)-1, false, 0);
+    set_loading(true);   /* the stop sign stops printing too */
+    stopped = false;
+    SetCursor(*GetCursor(watchCursor));
+
+    /* laid out with the screen's fonts, as the Mac's printer drivers expect */
+    SetPort(br->win);
+    qd_m.progress = print_laying_out;
+    err = layout_doc(&play, &br->doc, &qd_m, paper.right - paper.left);
+    qd_m.progress = NULL;
+    if (!err && !(starts = paginate(&play, paper.bottom - paper.top - 2 * edge, &npages))) err = -1;
+    if (err) {
+        layout_free(&play);
+        PrClose();
+        if (print_win) { DisposeWindow(print_win); print_win = NULL; }
+        set_loading(false);
+        InitCursor();
+        SetPort(br->win);
+        set_status(err == -2 ? "Printing stopped." : "Not enough memory to print this page.");
+        return;
+    }
+    if (last > npages) last = npages;
+
+    port = PrOpenDoc(print_rec, NULL, NULL);
+    if (PrError() == noErr) {
+        for (n = first; n <= last && PrError() == noErr; n++) {
+            char msg[40];
+            sprintf(msg, "Page %d of %d", n, npages);
+            print_progress(msg, (int)((long)(n - first) * 100 / (last - first + 1)));
+            if (stop_asked()) { PrSetError(iPrAbort); break; }
+            PrOpenPage(port, NULL);
+            if (PrError() == noErr) print_one(&play, starts, n, npages, &paper, edge);
+            PrClosePage(port);
+        }
+    }
+    PrCloseDoc(port);
+    if (PrError() == noErr && (**print_rec).prJob.bJDocLoop == bSpoolLoop) {
+        /* a spooled job (the ImageWriter's best quality) prints now */
+        print_progress("Printing...", 100);
+        PrPicFile(print_rec, NULL, NULL, NULL, &st);
+    }
+    err = PrError();
+    PrClose();
+    layout_free(&play);
+    free(starts);
+    if (print_win) DisposeWindow(print_win);
+    print_win = NULL;
+    set_loading(false);
+    InitCursor();
+    SetPort(br->win);
+    if (err == noErr) set_status("Printed.");
+    else print_trouble(err);
+}
+
+/* Before quitting: each window with a changed form asks, in front */
+static Boolean may_quit(void)
+{
+    Browser *x;
+    for (x = browsers; x; x = x->next) {
+        use(x);
+        keep_typing();
+        if (x->have_page && x->forms.n && forms_changed(&x->forms, &x->doc)) {
+            SelectWindow(x->win);
+            redraw();
+            if (!may_leave("Quit Mill?")) { use(front()); return false; }
+        }
+    }
+    use(front());
+    return true;
+}
+
 /* ------------------------------------------------------------ bookmarks */
 
 enum { BD_OK = 1, BD_CANCEL, BD_SLOT_LABEL, BD_SLOT, BD_TITLE_LABEL, BD_TITLE, BD_URL_LABEL, BD_URL, BD_RING, BD_LOGIN };
@@ -2608,6 +2917,7 @@ static void refresh_menus(void)
         MenuHandle file = GetMenuHandle(MENU_FILE), edit = GetMenuHandle(MENU_EDIT), nav = GetMenuHandle(MENU_GO);
         short i;
         if (br || da) EnableItem(file, FILE_CLOSE); else DisableItem(file, FILE_CLOSE);
+        if (br && br->have_page) EnableItem(file, FILE_PRINT); else DisableItem(file, FILE_PRINT);
         for (i = EDIT_CUT; i <= EDIT_PASTE; i++) if (br || da) EnableItem(edit, i); else DisableItem(edit, i);
         for (i = GO_BACK; i <= GO_RELOAD; i++) if (br) EnableItem(nav, i); else DisableItem(nav, i);
     }
@@ -2656,9 +2966,11 @@ static void do_menu(long choice)
         if (item == FILE_OPEN) open_file();
         if (item == FILE_CLOSE) {
             if (w && ((WindowPeek)w)->windowKind < 0) CloseDeskAcc(((WindowPeek)w)->windowKind);
-            else if (br) close_browser(br);
+            else if (br && may_leave("Close this window?")) close_browser(br);
         }
-        if (item == FILE_QUIT) quitting = true;
+        if (item == FILE_PAGE_SETUP) page_setup();
+        if (item == FILE_PRINT && br) print_page();
+        if (item == FILE_QUIT) quitting = may_quit();
     } else if (menu == MENU_EDIT) {
         if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true); }
         else if (br) {
@@ -2770,7 +3082,7 @@ static void do_mouse(EventRecord *ev)
     if (w != FrontWindow()) { SelectWindow(w); return; }  /* a click in a window behind brings it forward */
     use(browser_of(w));
     switch (part) {
-    case inGoAway: if (TrackGoAway(w, ev->where)) close_browser(br); break;
+    case inGoAway: if (TrackGoAway(w, ev->where) && may_leave("Close this window?")) close_browser(br); break;
     case inGrow: {
         Rect limits;
         long size;
@@ -2898,7 +3210,7 @@ static void setup_menus(void)
     AppendResMenu(m, 'DRVR');
     InsertMenu(m, 0);
     m = NewMenu(MENU_FILE, "\pFile");
-    AppendMenu(m, "\pNew Window/N;Open Location.../L;Open File.../O;Close/W;(-;Quit/Q");
+    AppendMenu(m, "\pNew Window/N;Open Location.../L;Open File.../O;Close/W;(-;Page Setup...;Print.../P;(-;Quit/Q");
     InsertMenu(m, 0);
     m = NewMenu(MENU_EDIT, "\pEdit");
     AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;(-;Preferences...");

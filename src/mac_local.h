@@ -37,6 +37,8 @@ int auto_images(void);
 const char *file_type_rules(void);
 /* Whether a MacBinary file is saved as the Mac file it carries */
 int decode_macbinary(void);
+int print_headers(void);
+int print_backgrounds(void);
 /* Whether sites may keep cookies (until Mill quits) */
 int accept_cookies(void);
 /* The User-Agent sent with each request; "" sends none */
