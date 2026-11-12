@@ -62,7 +62,8 @@ void forms_option_label(const Doc *d, long option, char *out, int size)
     free(t);
 }
 
-static void initial(Field *f, const Doc *d)
+/* A field as the page gave it; -1 if there wasn't the memory for its text */
+static int initial(Field *f, const Doc *d)
 {
     const Node *n = &d->nodes[f->node];
     const char *v;
@@ -86,6 +87,8 @@ static void initial(Field *f, const Doc *d)
         }
         if (!any && !f->multiple) f->selected[0] = 1;
     }
+    return !f->value && (f->type == FIELD_TEXTAREA || f->type == FIELD_TEXT || f->type == FIELD_PASSWORD ||
+                         f->type == FIELD_HIDDEN || f->type == FIELD_FILE) ? -1 : 0;
 }
 
 int forms_build(Forms *F, const Doc *d)
@@ -121,7 +124,7 @@ int forms_build(Forms *F, const Doc *d)
             f->noptions = 0;
             for (k = n->first; k >= 0; k = d->nodes[k].next) if (d->nodes[k].tag == TAG_OPTION) f->options[f->noptions++] = k;
         }
-        initial(f, d);
+        if (initial(f, d)) return -1;
     }
     return 0;
 }
@@ -144,29 +147,33 @@ long forms_find(const Forms *F, long node)
     return lo < F->n && F->fields[lo].node == node ? lo : -1;
 }
 
+/* Whether a field differs from what the page gave it */
+static int field_changed(const Field *f, const Doc *d)
+{
+    Field was;
+    int changed;
+    if (f->type == FIELD_HIDDEN || f->type == FIELD_SUBMIT || f->type == FIELD_RESET || f->type == FIELD_IMAGE) return 0;
+    memset(&was, 0, sizeof was);
+    was.node = f->node;
+    was.type = f->type;
+    was.multiple = f->multiple;
+    was.options = f->options;
+    was.noptions = f->noptions;
+    if (f->noptions && !(was.selected = calloc(f->noptions, 1))) return 0;
+    initial(&was, d);
+    if (f->type == FIELD_CHECKBOX || f->type == FIELD_RADIO) changed = f->checked != was.checked;
+    else if (f->type == FIELD_SELECT) changed = f->noptions && memcmp(f->selected, was.selected, f->noptions) != 0;
+    else changed = strcmp(f->value ? f->value : "", was.value ? was.value : "") != 0;
+    free(was.value);
+    free(was.selected);
+    return changed;
+}
+
 int forms_changed(const Forms *F, const Doc *d)
 {
     long i;
-    int changed = 0;
-    for (i = 0; i < F->n && !changed; i++) {
-        const Field *f = &F->fields[i];
-        Field was;
-        if (f->type == FIELD_HIDDEN || f->type == FIELD_SUBMIT || f->type == FIELD_RESET || f->type == FIELD_IMAGE) continue;
-        memset(&was, 0, sizeof was);
-        was.node = f->node;
-        was.type = f->type;
-        was.multiple = f->multiple;
-        was.options = f->options;
-        was.noptions = f->noptions;
-        if (f->noptions && !(was.selected = calloc(f->noptions, 1))) continue;
-        initial(&was, d);
-        if (f->type == FIELD_CHECKBOX || f->type == FIELD_RADIO) changed = f->checked != was.checked;
-        else if (f->type == FIELD_SELECT) changed = f->noptions && memcmp(f->selected, was.selected, f->noptions) != 0;
-        else changed = strcmp(f->value ? f->value : "", was.value ? was.value : "") != 0;
-        free(was.value);
-        free(was.selected);
-    }
-    return changed;
+    for (i = 0; i < F->n; i++) if (field_changed(&F->fields[i], d)) return 1;
+    return 0;
 }
 
 void forms_reset(Forms *F, const Doc *d, long form)
@@ -361,4 +368,126 @@ void submission_free(Submission *s)
 {
     free(s->data);
     s->data = NULL;
+}
+
+/* ------------------------------------------------------------ kept for Back */
+
+/* The fields whose state is the person's to keep */
+static int kept_type(const Field *f)
+{
+    return !f->disabled && (f->type == FIELD_TEXT || f->type == FIELD_TEXTAREA || f->type == FIELD_CHECKBOX ||
+                            f->type == FIELD_RADIO || f->type == FIELD_SELECT);
+}
+
+/* Which of the page's forms (0 for the first FORM) a field's form is; -1 for none */
+static long form_number(const Doc *d, long form)
+{
+    long i, n = 0;
+    if (form < 0) return -1;
+    for (i = 0; i < form; i++) if (d->nodes[i].tag == TAG_FORM) n++;
+    return n;
+}
+
+/* s with the characters that separate entries, and line breaks, as %XX */
+static void put_escaped(Buf *b, const char *s)
+{
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c < ' ' || c == '%' || c == '&' || c == '=' || c == ':') {
+            char hex[4];
+            sprintf(hex, "%%%02X", c);
+            put_s(b, hex);
+        } else {
+            put(b, (const char *)&c, 1);
+        }
+    }
+}
+
+char *forms_save(const Forms *F, const Doc *d)
+{
+    Buf b;
+    long i;
+    memset(&b, 0, sizeof b);
+    for (i = 0; i < F->n && !b.oom; i++) {
+        const Field *f = &F->fields[i];
+        char head[40];
+        if (!kept_type(f) || !field_changed(f, d)) continue;
+        sprintf(head, "%s%ld:%ld:%d:", b.len ? "&" : "", i, form_number(d, f->form), f->type);
+        put_s(&b, head);
+        put_escaped(&b, f->name ? f->name : "");
+        put_s(&b, "=");
+        if (f->type == FIELD_CHECKBOX || f->type == FIELD_RADIO) put_s(&b, f->checked ? "1" : "0");
+        else if (f->type == FIELD_SELECT) {
+            short k;
+            for (k = 0; k < f->noptions; k++) put_s(&b, f->selected[k] ? "1" : "0");
+        } else put_escaped(&b, f->value ? f->value : "");
+        if (b.len > FORMS_STATE_MAX) break;     /* too much: none of it is kept */
+    }
+    if (b.oom || b.len > FORMS_STATE_MAX) { free(b.p); return NULL; }
+    return b.p;
+}
+
+/* n bytes of s with %XX decoded, into a malloc'd string */
+static char *unescape(const char *s, long n)
+{
+    char *out = malloc(n + 1);
+    long i, o = 0;
+    if (!out) return NULL;
+    for (i = 0; i < n; i++) {
+        if (s[i] == '%' && i + 2 < n) {
+            int hi = s[i + 1], lo = s[i + 2];
+            hi = hi >= '0' && hi <= '9' ? hi - '0' : hi >= 'A' && hi <= 'F' ? hi - 'A' + 10 : -1;
+            lo = lo >= '0' && lo <= '9' ? lo - '0' : lo >= 'A' && lo <= 'F' ? lo - 'A' + 10 : -1;
+            if (hi >= 0 && lo >= 0) { out[o++] = (char)(hi * 16 + lo); i += 2; continue; }
+        }
+        out[o++] = s[i];
+    }
+    out[o] = 0;
+    return out;
+}
+
+/* One entry back into its field, if the field still matches */
+static void restore_one(Forms *F, const Doc *d, long i, long form, int type, const char *name, const char *value)
+{
+    Field *f;
+    if (i < 0 || i >= F->n) return;
+    f = &F->fields[i];
+    if (!kept_type(f) || f->type != type || form_number(d, f->form) != form || strcmp(f->name ? f->name : "", name)) return;
+    if (f->type == FIELD_CHECKBOX || f->type == FIELD_RADIO) {
+        if ((value[0] == '0' || value[0] == '1') && !value[1]) f->checked = value[0] == '1';
+    } else if (f->type == FIELD_SELECT) {
+        short k;
+        if ((long)strlen(value) != f->noptions || strspn(value, "01") != strlen(value)) return;
+        for (k = 0; k < f->noptions; k++) f->selected[k] = value[k] == '1';
+    } else if (!forms_set_value(f, value)) {
+        f->scroll = 0;
+    }
+}
+
+void forms_restore(Forms *F, const Doc *d, const char *state)
+{
+    const char *p = state;
+    while (p && *p) {
+        const char *end = strchr(p, '&'), *eq;
+        char *rest, *name, *value;
+        long i, form;
+        int type;
+        if (!end) end = p + strlen(p);
+        /* place:form:type:name=value */
+        i = strtol(p, &rest, 10);
+        if (*rest == ':') {
+            form = strtol(rest + 1, &rest, 10);
+            if (*rest == ':') {
+                type = (int)strtol(rest + 1, &rest, 10);
+                if (*rest == ':' && rest < end && (eq = memchr(rest, '=', end - rest)) != NULL) {
+                    name = unescape(rest + 1, eq - rest - 1);
+                    value = unescape(eq + 1, end - eq - 1);
+                    if (name && value) restore_one(F, d, i, form, type, name, value);
+                    free(name);
+                    free(value);
+                }
+            }
+        }
+        p = *end ? end + 1 : end;
+    }
 }

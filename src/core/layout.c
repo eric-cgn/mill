@@ -978,7 +978,7 @@ static void walk(State *S, long node, Ctx c)
     char save_align = S->align;
     int block = 0;
 
-    if (S->sh->stopped) return;
+    if (S->sh->stopped || S->oom) return;  /* out of memory: the page ends here */
     if (S->m->progress && d->nnodes > 0 && node * 100 / d->nnodes > S->sh->shown) {
         /* nodes are in page order, so how far through them is how far along */
         S->sh->shown = (int)(node * 100 / d->nnodes);
@@ -1010,18 +1010,22 @@ static void walk(State *S, long node, Ctx c)
         if (S->measure) break;  /* measuring: nothing to record */
         if ((v = html_attr(d, n, "name"))) {
             Layout *L = S->L;
-            if (!grow((void **)&L->anchors, &L->cap_anchors, L->nanchors + 1, sizeof(Anchor))) {
-                L->anchors[L->nanchors].name = copy_string(v);
-                L->anchors[L->nanchors].y = S->y + S->pending_gap;
-                L->nanchors++;
+            if (grow((void **)&L->anchors, &L->cap_anchors, L->nanchors + 1, sizeof(Anchor)) ||
+                !(L->anchors[L->nanchors].name = copy_string(v))) {
+                S->oom = 1;
+                return;
             }
+            L->anchors[L->nanchors].y = S->y + S->pending_gap;
+            L->nanchors++;
         }
         if ((v = html_attr(d, n, "href"))) {
             Layout *L = S->L;
-            if (!grow((void **)&L->links, &L->cap_links, L->nlinks + 1, sizeof(char *))) {
-                L->links[L->nlinks++] = copy_string(v);
-                c.link = (short)L->nlinks;
+            if (grow((void **)&L->links, &L->cap_links, L->nlinks + 1, sizeof(char *)) ||
+                !(L->links[L->nlinks] = copy_string(v))) {
+                S->oom = 1;
+                return;
             }
+            c.link = (short)++L->nlinks;
         }
         break;
     case TAG_BR:
@@ -1170,6 +1174,13 @@ static int by_y(const void *a, const void *b)
     return p->first < q->first ? -1 : p->first > q->first;
 }
 
+/* Give back what the lists grew beyond what they hold; shrinking stays in place */
+static void fit(void **p, long *cap, long n, long size)
+{
+    void *q;
+    if (*p && n > 0 && (q = realloc(*p, n * size))) { *p = q; *cap = n; }
+}
+
 int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width)
 {
     State S;
@@ -1194,7 +1205,13 @@ int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width)
     for (i = 0; i < L->nlines; i++)
         if (L->lines[i].y + L->lines[i].height > L->height) L->height = L->lines[i].y + L->lines[i].height;
     L->height += MARGIN;
-    qsort(L->lines, L->nlines, sizeof(MLine), by_y);
+    if (L->nlines) qsort(L->lines, L->nlines, sizeof(MLine), by_y);
+    fit((void **)&L->lines, &L->cap_lines, L->nlines, sizeof(MLine));
+    fit((void **)&L->runs, &L->cap_runs, L->nruns, sizeof(Run));
+    fit((void **)&L->gen, &L->cap_gen, L->gen_len, 1);
+    fit((void **)&L->links, &L->cap_links, L->nlinks, sizeof(char *));
+    fit((void **)&L->anchors, &L->cap_anchors, L->nanchors, sizeof(Anchor));
+    fit((void **)&L->boxes, &L->cap_boxes, L->nboxes, sizeof(Box));
     return sh.stopped ? -2 : S.oom ? -1 : 0;
 }
 

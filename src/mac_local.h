@@ -13,12 +13,15 @@
    through sink. A POST when content_type is given. */
 OSErr local_request(const Url *u, const char *content_type, const char *body, long body_len, net_sink sink, void *ref);
 
-/* An image Mill has built in (mill://splash); returns 0, or -1 */
+/* An image Mill has built in (mill://splash); returns 0, -1 if there is none by that
+   name, or IMAGE_NO_MEMORY */
 int local_image(const char *url, Bitmap1 *out);
 
 #define MILL_DEFAULT_HOME "mill://about"
 #define MILL_DEFAULT_AGENT "Mozilla/1.22 (compatible; Mill/" MILL_VERSION "; Macintosh; 68K)"
 #define MILL_DEFAULT_IMAGE_K 128
+#define MILL_DEFAULT_HISTORY 10
+#define MILL_HISTORY_MAX 32     /* pages kept for Back, at most, in each window */
 
 /* A Mac file's full path ("Macintosh HD:Web:index.html") */
 void spec_to_path(const FSSpec *spec, char *path, int size);
@@ -31,6 +34,8 @@ void settings_load(void);
 const char *setting(const char *name, const char *dflt);
 /* How much memory decoded images may keep, in K */
 long image_memory_k(void);
+/* How many pages each window keeps for Back and Forward, 1 to MILL_HISTORY_MAX */
+int history_size(void);
 /* Whether pages fetch their images as they open (else a click on one does) */
 int auto_images(void);
 /* The rules that give a saved file its type and creator (see core/filetypes.h) */

@@ -18,8 +18,8 @@ On a Mac Plus running System 6.0.8.
 ## System requirements
 
 - Mac Plus or later
-- System 6.0.8 with MacTCP or later
-- 1 MB RAM available
+- System 6.0.3 with MacTCP or later
+- 700K free
 
 ## Capabilities
 

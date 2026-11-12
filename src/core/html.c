@@ -148,7 +148,6 @@ typedef struct {
     Doc *doc;
     long stack[64];
     int depth;
-    char *scratch;
 } Parser;
 
 static long current(Parser *p) { return p->stack[p->depth - 1]; }
@@ -191,10 +190,10 @@ static int isindex(Parser *p, const char *attrs, long attrs_len)
     v = html_attr(p->doc, &p->doc->nodes[form], "prompt");
     snprintf(prompt, sizeof prompt, "%s", v ? v : dflt);
     n = strlen(prompt);
-    if ((node = add_node(p->doc, TAG_TEXT, form)) < 0) return -1;
-    p->doc->nodes[node].text = p->doc->text_len;
+    if ((node = add_node(p->doc, TAG_TEXT, form)) < 0 || add_text(p->doc, prompt, n)) return -1;
+    p->doc->nodes[node].text = p->doc->text_len - n;   /* only once the text is there */
     p->doc->nodes[node].len = n;
-    if (add_text(p->doc, prompt, n) || start_tag(p, TAG_INPUT, "name=isindex", 12)) return -1;
+    if (start_tag(p, TAG_INPUT, "name=isindex", 12)) return -1;
     end_tag(p, TAG_FORM);
     return start_tag(p, TAG_HR, "", 0);
 }
@@ -274,13 +273,26 @@ static void end_tag(Parser *p, int tag)
 
 static int text(Parser *p, const char *s, long len)
 {
+    Doc *d = p->doc;
     long node, n;
     if (len <= 0) return 0;
-    n = decode(s, len, p->scratch);
-    if ((node = add_node(p->doc, TAG_TEXT, current(p))) < 0) return -1;
-    p->doc->nodes[node].text = p->doc->text_len;
-    p->doc->nodes[node].len = n;
-    return add_text(p->doc, p->scratch, n);
+    /* decoded straight onto the end of the page's text, as it never gets longer */
+    if (grow((void **)&d->text, &d->cap_text, d->text_len + len, 1)) return -1;
+    n = decode(s, len, d->text + d->text_len);
+    if ((node = add_node(d, TAG_TEXT, current(p))) < 0) return -1;
+    d->nodes[node].text = d->text_len;
+    d->nodes[node].len = n;
+    d->text_len += n;
+    return 0;
+}
+
+/* Give back what the buffers grew beyond what they hold; shrinking stays in place */
+static void fit(Doc *d)
+{
+    void *q;
+    if (d->nodes && (q = realloc(d->nodes, d->nnodes * sizeof(Node)))) { d->nodes = q; d->cap_nodes = d->nnodes; }
+    if (d->text && (q = realloc(d->text, d->text_len + 1))) { d->text = q; d->cap_text = d->text_len + 1; }
+    if (d->attrs && (q = realloc(d->attrs, d->attrs_len + 1))) { d->attrs = q; d->cap_attrs = d->attrs_len + 1; }
 }
 
 static void set_title(Doc *d, const char *s, long len)
@@ -326,7 +338,9 @@ int html_parse_charset(Doc *doc, const char *src, long len, int charset)
     if (add_node(doc, TAG_HTML, -1) < 0) return -1;
     p.stack[0] = 0;
     p.depth = 1;
-    if (!(p.scratch = malloc(len + 1))) return -1;
+    /* the text is at most as long as the page: room for it at once, rather than room
+       twice over while it doubles (it's trimmed to fit after) */
+    if ((doc->text = malloc(len + 1))) doc->cap_text = len + 1;
 
     while (i < len) {
         long j, name_start;
@@ -391,10 +405,10 @@ int html_parse_charset(Doc *doc, const char *src, long len, int charset)
         }
     }
     if (text(&p, src + text_start, len - text_start)) goto oom;
-    free(p.scratch);
+    fit(doc);
     return 0;
 oom:
-    free(p.scratch);
+    fit(doc);   /* what was read so far is a whole page in itself */
     return -1;
 }
 

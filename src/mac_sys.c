@@ -289,3 +289,47 @@ Boolean sys_next_event(EventRecord *ev, long sleep)
     SystemTask();   /* desk accessories get their time */
     return GetNextEvent(everyEvent, ev);
 }
+
+/* ------------------------------------------------------------ memory */
+
+#define RESERVE (24L * 1024)
+#define MASTERS 4           /* blocks of master pointers made at the start, low in the heap */
+
+static Handle reserve;
+static Boolean restoring;   /* the reserve itself is what the Memory Manager wants room for */
+
+/* Called by the Memory Manager when it can't find room: the reserve goes, once */
+static pascal long grow_zone(Size needed)
+{
+    (void)needed;
+    if (!reserve || !*reserve || restoring) return 0;
+    EmptyHandle(reserve);
+    return RESERVE;
+}
+
+void mem_init(void)
+{
+    short i;
+    for (i = 0; i < MASTERS; i++) MoreMasters();
+    reserve = NewHandle(RESERVE);
+    SetGrowZone(NewGrowZoneUPP(grow_zone));
+}
+
+void mem_report(long *free, long *total)
+{
+    THz z = ApplicationZone();
+    *free = FreeMem();
+    *total = (long)z->bkLim - (long)&z->heapData;
+}
+
+Boolean mem_short(void)
+{
+    if (!reserve || *reserve) return false;
+    /* only when it would leave some over: trying compacts the heap, which takes a while */
+    if (FreeMem() >= RESERVE + RESERVE / 2) {
+        restoring = true;
+        ReallocateHandle(reserve, RESERVE);
+        restoring = false;
+    }
+    return !*reserve;
+}

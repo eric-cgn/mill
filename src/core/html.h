@@ -36,7 +36,8 @@ typedef struct {
     int charset;                     /* what the page was in: CHARSET_MAC, _LATIN1, or _UTF8 */
 } Doc;
 
-/* Parse a whole HTML page. Returns 0, or -1 when out of memory. */
+/* Parse a whole HTML page. Returns 0, or -1 when out of memory, when doc holds the page
+   as far as it got (still to be freed with html_free). */
 int html_parse(Doc *doc, const char *src, long len);
 /* The same, for a page in a known charset (CHARSET_* in charset.h); html_parse and
    CHARSET_GUESS go by the page's META tag, else whether it's valid UTF-8 */

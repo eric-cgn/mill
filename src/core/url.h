@@ -36,5 +36,10 @@ void url_strip_login(char *url);
 /* url with user and password put in as user:password@ (each %-encoded as needed),
    replacing any already there, into out. Returns 0, or -1 if it won't fit. */
 int url_with_login(const char *url, const char *user, const char *pass, char *out, int out_size);
+/* The Referer for a request for target made from the page at page (RFC 1945 10.13): the
+   page's address without any user:password@ or #fragment, into out. Returns 1, or 0 when
+   none should go: page isn't a whole address Mill knows, it won't fit, or page is https:
+   and target isn't (RFC 2616 15.1.3). */
+int url_referer(const char *page, const char *target, char *out, int out_size);
 
 #endif
