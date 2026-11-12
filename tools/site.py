@@ -50,7 +50,7 @@ def site(out):
          '<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, '
          'no-nonsense browser available for the Plus and later.',
          '<P><B>System Requirements:</B>',
-         '<UL><LI>Mac Plus or later<LI>System 6.0.3 with MacTCP or later<LI>700K free</UL>']
+         '<UL><LI>Mac Plus or later<LI>System 6.0.3 with MacTCP or later<LI>700K free RAM</UL>']
     if rel:
         v, files = rel[0]
         p.append('<H2>Download Mill %s</H2>' % v)
