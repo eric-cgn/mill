@@ -19,7 +19,7 @@ On a Mac Plus running System 6.0.8.
 
 - Mac Plus or later
 - System 6.0.3 with MacTCP or later
-- 700K free
+- 700K free RAM
 
 ## Capabilities
 

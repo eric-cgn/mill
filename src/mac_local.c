@@ -552,6 +552,9 @@ long (*local_fetch)(const char *url, char *buf, long size, char *why, int why_si
 
 /* Check for updates, asked for by the About page's button (never by itself): what the
    site says is newest, against this copy */
+#define NOTE_CUT 32     /* characters of each New in line shown on the About page */
+#define NOTES_SHOWN 2   /* New in lines shown there */
+
 static void check_for_updates(Out *o)
 {
     char why[120], site[128], *text = malloc(UPDATE_MAX_BYTES + 1);
@@ -579,17 +582,35 @@ static void check_for_updates(Out *o)
         out_s(o, "<P>Mill couldn't check for updates. ");
         out_text(o, why);
     } else if (update_compare(u->version, MILL_VERSION) > 0) {
-        out_s(o, "<P><B>A new version is available!</B><BR>Mill ");
-        out_text(o, u->version);
-        out_s(o, "<BR><A HREF=\"");
+        out_s(o, "<P><B>A new version is available!</B><BR><A HREF=\"");
         out_text(o, u->link);
-        out_s(o, "\">Click here to download</A>");
+        out_s(o, "\">Download Mill ");
+        out_text(o, u->version);
+        out_s(o, "</A>");
         if (u->nnotes) {
             out_s(o, "<P>New in ");
             out_text(o, u->version);
-            out_s(o, ":<UL>");
-            for (k = 0; k < u->nnotes; k++) { out_s(o, "<LI>"); out_text(o, u->notes[k]); }
-            out_s(o, "</UL>");
+            out_s(o, ":");
+            /* each line cut to 32 characters, so a long one doesn't widen the page; the
+               whole story is on the site */
+            /* at most two lines here; more, and the last bullet says there's more on the site */
+            for (k = 0; k < u->nnotes && k < NOTES_SHOWN; k++) {
+                char cut[NOTE_CUT + 1];
+                size_t len = strlen(u->notes[k]);
+                out_s(o, "<BR>&nbsp;&nbsp;\245&nbsp;");   /* a bullet, without a list's blank line above */
+                if (len <= NOTE_CUT) out_text(o, u->notes[k]);
+                else {
+                    memcpy(cut, u->notes[k], NOTE_CUT);
+                    len = NOTE_CUT;
+                    while (len > 0 && cut[len - 1] == ' ') len--;
+                    cut[len] = 0;
+                    out_text(o, cut);
+                    out_s(o, "\311");
+                }
+            }
+            out_s(o, "<BR>&nbsp;&nbsp;\245&nbsp;<A HREF=\"");
+            out_text(o, site);
+            out_s(o, u->nnotes > NOTES_SHOWN ? "\">See more\311</A>" : "\">Details\311</A>");
         }
     } else {
         out_s(o, "<P>Mill is up to date.");
@@ -602,34 +623,34 @@ static void check_for_updates(Out *o)
    and the button that checks for updates (check: it was pressed) */
 static void about(Out *o, int check)
 {
+    long free, total;
+    char line[64];
     head(o, 200, HTML_MAC);
     out_s(o,
         "<TITLE>About Mill</TITLE>"
-        "<TABLE WIDTH=\"100%\" BORDER=0 CELLPADDING=4><TR><TD VALIGN=TOP>"
-        "A web browser for classic Macs<BR>"
-        "Version " MILL_VERSION " &middot; Freeware<BR>&copy; " MILL_YEAR " " MILL_PUBLISHER);
-    {
-        long free, total;
-        char line[64];
-        mem_report(&free, &total);
-        snprintf(line, sizeof line, "<BR>Memory: %ldK free of %ldK", free / 1024, total / 1024);
-        out_s(o, line);
-    }
-    out_s(o,
+        "<TABLE ALIGN=CENTER BORDER=0 CELLPADDING=4>"
+        "<TR><TD ROWSPAN=3 VALIGN=MIDDLE>"
+        "<IMG SRC=\"mill://splash\" WIDTH=192 HEIGHT=163 ALT=\"Don Quixote and the windmills\">"
+        "<TD VALIGN=TOP><BR><H1>Mill</H1>"
+        "<TR><TD VALIGN=MIDDLE>");
+    mem_report(&free, &total);
+    snprintf(line, sizeof line, "Memory: %ldK free of %ldK", free / 1024, total / 1024);
+    out_s(o, line);
+    /* the button, or once pressed, what it found in its place */
+    if (check) check_for_updates(o);
+    else out_s(o,
         "<FORM METHOD=GET ACTION=\"mill://about\"><INPUT TYPE=hidden NAME=check VALUE=1>"
         "<INPUT TYPE=submit VALUE=\"Check for updates\311\"></FORM>");
-    if (check) check_for_updates(o);
     out_s(o,
-        "<TD ALIGN=CENTER VALIGN=TOP>"
-        "<IMG SRC=\"mill://splash\" WIDTH=192 HEIGHT=163 ALT=\"Don Quixote and the windmills\">"
-        "<H1>Mill</H1></TABLE><HR>"
+        "<TR><TD VALIGN=BOTTOM>Version " MILL_VERSION " &middot; Freeware<BR>&copy; " MILL_YEAR " " MILL_PUBLISHER
+        "</TABLE><HR>"
         "<H3>About Mill</H3>"
         "<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, no-nonsense "
         "browser available for the Plus and later."
         "<P><B>System Requirements:</B><UL>"
         "<LI>Mac Plus or later"
         "<LI>System 6.0.3 with MacTCP or later"
-        "<LI>700K free</UL>"
+        "<LI>700K free RAM</UL>"
         "<H3>What Mill reads</H3><UL>"
         "<LI>HTML 3.2, which included text, lists, tables, images (and maps), and forms, as well as a few extras "
         "like bgcolor and font face. No applets, JavaScript, style sheets, or frames."
@@ -657,7 +678,7 @@ static void about(Out *o, int check)
         "<H3>Credits</H3><UL>"
         "<LI>The drawing is by George A. Harker, from James Baldwin's <I>Stories of Don Quixote</I> (1910), "
         "now in the public domain."
-        "<LI>JPEG decoding by ChaN's <A HREF=\"mill://license#tjpgd\">TJpgDec</A>; GIF decoding is Mill's own."
+        "<LI>JPEG decoding by ChaN's <A HREF=\"mill://license#tjpgd\">TJpgDec</A>."
         "<LI>Built with Wolfgang Thaller's Retro68, including its "
         "<A HREF=\"mill://license#runtime\">runtime</A>, the <A HREF=\"mill://license#newlib\">newlib</A> "
         "C library, and <A HREF=\"mill://license#multiversal\">Multiversal Interfaces</A>."
