@@ -2058,6 +2058,53 @@ static char *pre_page(const char *title, const char *text, long n, long *len)
 }
 
 /* Open url in this window; from is the page that asked for it (a link, a form), or NULL */
+/* What went wrong with a request that failed on the network, as the status line says it */
+static void net_trouble(OSErr err, char *msg, int size)
+{
+    if (net_stage == NET_LOOKUP)
+        snprintf(msg, size, err == commandTimeout ? "Looking up %s took too long." : "Couldn't find %s.", asked);
+    else if (net_stage == NET_CONNECT)
+        snprintf(msg, size, "Couldn't connect to %s.", asked);
+    else
+        snprintf(msg, size, "The connection to %s failed (MacTCP error %d).", asked, err);
+}
+
+/* local_fetch (see mac_local.h), for Check for updates: a GET with no Referer, its status
+   line saying what it's for. Stop stops just this, so the page it's for still shows. */
+static long fetch_for_page(const char *url, char *buf, long size, char *why, int why_size)
+{
+    Response resp;
+    char target[300], was[40];
+    Url u;
+    Head h;
+    OSErr err;
+    long n = -1;
+    memset(&resp, 0, sizeof resp);
+    resp.size = size + 2048;    /* and its headers */
+    if (!(resp.buf = malloc(resp.size))) { snprintf(why, why_size, "Not enough memory."); return -1; }
+    strcpy(was, activity);
+    strcpy(activity, "Checking for updates");
+    set_status("Checking for updates\311");
+    snprintf(target, sizeof target, "%s", url);
+    err = fetch(target, NULL, NULL, NULL, 0, &resp, &u, &h);
+    if (err == memFullErr) out_of_memory();
+    if (stopped || err == userCanceledErr) snprintf(why, why_size, ran_out ? "Not enough memory." : "Stopped.");
+    else if (err == FETCH_BAD_URL || err == FETCH_CROSS) snprintf(why, why_size, "Its address isn't one Mill can open.");
+    else if (err == FETCH_NO_TLS) snprintf(why, why_size, "https:// needs a proxy, in Preferences.");
+    else if (err != noErr) net_trouble(err, why, why_size);
+    else if (h.code != 200) snprintf(why, why_size, "The server didn't send it (error %d).", h.code);
+    else if (resp.cut) snprintf(why, why_size, "Its answer was too long.");
+    else {
+        n = resp.len - h.body;
+        if (n > size) n = size;
+        memcpy(buf, resp.buf + h.body, n);
+    }
+    free(resp.buf);
+    strcpy(activity, was);
+    stopped = false;    /* the check stopped; the page goes on (running out is still said) */
+    return n;
+}
+
 static Boolean coming_back;     /* load: Back or Forward, so the page's forms come back too */
 static Boolean forms_kept;      /* load: the page being left has had its forms kept already */
 
@@ -2131,12 +2178,7 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     if (err == FETCH_CROSS) { set_status("Stopped at a redirect to another kind of address."); goto done; }
     if (err != noErr) {
         char msg[200];
-        if (net_stage == NET_LOOKUP)
-            snprintf(msg, sizeof msg, err == commandTimeout ? "Looking up %s took too long." : "Couldn't find %s.", asked);
-        else if (net_stage == NET_CONNECT)
-            snprintf(msg, sizeof msg, "Couldn't connect to %s.", asked);
-        else
-            snprintf(msg, sizeof msg, "The connection to %s failed (MacTCP error %d).", asked, err);
+        net_trouble(err, msg, sizeof msg);
         set_status(msg);
         goto done;
     }
@@ -3587,6 +3629,7 @@ int mill_run(WindowPtr splash)
 
     sys_init();  /* System 6 or 7: which calls to use */
     mem_init();
+    local_fetch = fetch_for_page;
     InitCursor();
     setup_menus();
     if (!new_browser(splash)) return 1;

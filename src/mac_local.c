@@ -4,6 +4,7 @@
 
 #include "core/charset.h"
 #include "core/filetypes.h"
+#include "core/update.h"
 #include "mac_local.h"
 #include "mac_sys.h"
 #include "version.h"
@@ -547,13 +548,54 @@ static void out_rules(Out *o, const char *rules)
 
 /* ------------------------------------------------------------ mill: pages */
 
-static void about(Out *o)
+long (*local_fetch)(const char *url, char *buf, long size, char *why, int why_size) = NULL;
+
+/* Check for updates, asked for by the About page's button (never by itself): what the
+   site says is newest, against this copy */
+static void check_for_updates(Out *o)
+{
+    char why[120], *text = malloc(UPDATE_MAX_BYTES + 1);
+    Update *u = malloc(sizeof *u);
+    long n = -1;
+    int k;
+    strcpy(why, "Not enough memory.");
+    if (text && u && local_fetch) {
+        n = local_fetch(MILL_UPDATE_URL, text, UPDATE_MAX_BYTES + 1, why, sizeof why);
+        if (n > UPDATE_MAX_BYTES) { n = -1; strcpy(why, "Its answer was too long."); }
+        if (n >= 0 && update_parse(text, n, u)) { n = -1; strcpy(why, "Its answer wasn't a version number."); }
+    }
+    if (n < 0) {
+        out_s(o, "<P>Mill couldn't check for updates. ");
+        out_text(o, why);
+    } else if (update_compare(u->version, MILL_VERSION) > 0) {
+        out_s(o, "<P><B>A new version is available!</B><BR>Mill ");
+        out_text(o, u->version);
+        out_s(o, "<BR><A HREF=\"");
+        out_text(o, u->link);
+        out_s(o, "\">Click here to download</A>");
+        if (u->nnotes) {
+            out_s(o, "<P>New in ");
+            out_text(o, u->version);
+            out_s(o, ":<UL>");
+            for (k = 0; k < u->nnotes; k++) { out_s(o, "<LI>"); out_text(o, u->notes[k]); }
+            out_s(o, "</UL>");
+        }
+    } else {
+        out_s(o, "<P>Mill is up to date.");
+    }
+    free(text);
+    free(u);
+}
+
+/* The picture and name on the right; on the left, what Mill is, how much memory is free,
+   and the button that checks for updates (check: it was pressed) */
+static void about(Out *o, int check)
 {
     head(o, 200, HTML_MAC);
     out_s(o,
-        "<TITLE>About Mill</TITLE><CENTER>"
-        "<IMG SRC=\"mill://splash\" WIDTH=192 HEIGHT=163 ALT=\"Don Quixote and the windmills\">"
-        "<H1>Mill</H1>A web browser for classic Macs<BR>"
+        "<TITLE>About Mill</TITLE>"
+        "<TABLE WIDTH=\"100%\" BORDER=0 CELLPADDING=4><TR><TD VALIGN=TOP>"
+        "A web browser for classic Macs<BR>"
         "Version " MILL_VERSION " &middot; Freeware<BR>&copy; " MILL_YEAR " " MILL_PUBLISHER);
     {
         long free, total;
@@ -563,7 +605,13 @@ static void about(Out *o)
         out_s(o, line);
     }
     out_s(o,
-        "</CENTER><HR>"
+        "<FORM METHOD=GET ACTION=\"mill://about\"><INPUT TYPE=hidden NAME=check VALUE=1>"
+        "<INPUT TYPE=submit VALUE=\"Check for updates\311\"></FORM>");
+    if (check) check_for_updates(o);
+    out_s(o,
+        "<TD ALIGN=CENTER VALIGN=TOP>"
+        "<IMG SRC=\"mill://splash\" WIDTH=192 HEIGHT=163 ALT=\"Don Quixote and the windmills\">"
+        "<H1>Mill</H1></TABLE><HR>"
         "<H3>About Mill</H3>"
         "<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, no-nonsense "
         "browser available for the Plus and later."
@@ -814,7 +862,7 @@ static void config(Out *o, const char *body, long len)
 
 static void mill_request(const Url *u, const char *body, long len, Out *o)
 {
-    if (!strcmp(u->host, "about")) about(o);
+    if (!strcmp(u->host, "about")) about(o, strstr(u->path, "check=1") != NULL);
     else if (!strcmp(u->host, "config")) config(o, body, len);
     else if (!strcmp(u->host, "license")) text_page(o, 128, "mill://license");
     else if (!strcmp(u->host, "change-log")) text_page(o, 129, "mill://change-log");
