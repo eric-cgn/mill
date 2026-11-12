@@ -745,7 +745,7 @@ static void config(Out *o, const char *body, long len)
         if (form_value(body, len, "history", k, sizeof k)) {
             long n = atol(k);
             if (n < 1 || n > MILL_HISTORY_MAX || k[0] < '0' || k[0] > '9')
-                snprintf(note, sizeof note, "Pages kept for Back must be from 1 to %d.", MILL_HISTORY_MAX);
+                snprintf(note, sizeof note, "Window history must be from 1 to %d.", MILL_HISTORY_MAX);
             else { sprintf(k, "%ld", n); put_setting("history", 7, k, strlen(k)); }
         }
         /* a checkbox that isn't checked isn't sent */
@@ -821,11 +821,10 @@ static void config(Out *o, const char *body, long len)
     sprintf(k, "%ld", image_memory_k());
     out_s(o, k);
     out_s(o, "\"> K<BR>Memory for caching images, much faster when images are reused between pages; 0 to turn off."
-             "<TR><TD VALIGN=TOP WIDTH=110><B>Pages kept for Back</B><TD><INPUT NAME=history SIZE=3 VALUE=\"");
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Window history</B><TD><INPUT NAME=history SIZE=3 VALUE=\"");
     sprintf(k, "%d", history_size());
     out_s(o, k);
-    out_s(o, "\"><BR>Each window remembers this many pages, 1 to 32: their addresses and what was typed in their "
-             "forms, not the pages themselves."
+    out_s(o, "\"><BR>Pages remembered for Back, 1 to 32."
              "<TR><TD VALIGN=TOP WIDTH=110><B>Load images automatically</B><TD><INPUT TYPE=checkbox NAME=load_images VALUE=yes");
     if (auto_images()) out_s(o, " CHECKED");
     out_s(o, "> When off, use the context menu to load individually."
