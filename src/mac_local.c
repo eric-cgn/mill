@@ -405,6 +405,13 @@ long image_memory_k(void)
     return v ? atol(v) : MILL_DEFAULT_IMAGE_K;
 }
 
+int history_size(void)
+{
+    const char *v = setting("history", NULL);
+    long n = v ? atol(v) : MILL_DEFAULT_HISTORY;
+    return n < 1 ? 1 : n > MILL_HISTORY_MAX ? MILL_HISTORY_MAX : (int)n;
+}
+
 int auto_images(void)
 {
     return strcmp(setting("load_images", "yes"), "no") != 0;
@@ -547,14 +554,23 @@ static void about(Out *o)
         "<TITLE>About Mill</TITLE><CENTER>"
         "<IMG SRC=\"mill://splash\" WIDTH=192 HEIGHT=163 ALT=\"Don Quixote and the windmills\">"
         "<H1>Mill</H1>A web browser for classic Macs<BR>"
-        "Version " MILL_VERSION " &middot; Freeware<BR>&copy; " MILL_YEAR " " MILL_PUBLISHER "</CENTER><HR>"
+        "Version " MILL_VERSION " &middot; Freeware<BR>&copy; " MILL_YEAR " " MILL_PUBLISHER);
+    {
+        long free, total;
+        char line[64];
+        mem_report(&free, &total);
+        snprintf(line, sizeof line, "<BR>Memory: %ldK free of %ldK", free / 1024, total / 1024);
+        out_s(o, line);
+    }
+    out_s(o,
+        "</CENTER><HR>"
         "<H3>About Mill</H3>"
         "<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, no-nonsense "
         "browser available for the Plus and later."
         "<P><B>System Requirements:</B><UL>"
         "<LI>Mac Plus or later"
-        "<LI>System 6.0.8 with MacTCP or later"
-        "<LI>1 MB RAM available</UL>"
+        "<LI>System 6.0.3 with MacTCP or later"
+        "<LI>700K free</UL>"
         "<H3>What Mill reads</H3><UL>"
         "<LI>HTML 3.2, which included text, lists, tables, images (and maps), and forms, as well as a few extras "
         "like bgcolor and font face. No applets, JavaScript, style sheets, or frames."
@@ -646,6 +662,12 @@ static void config(Out *o, const char *body, long len)
             if (n < 0 || n > 4096 || (k[0] && (k[0] < '0' || k[0] > '9'))) snprintf(note, sizeof note, "Image memory must be from 0 to 4096 K.");
             else { sprintf(k, "%ld", n); put_setting("image_memory", 12, k, strlen(k)); }
         }
+        if (form_value(body, len, "history", k, sizeof k)) {
+            long n = atol(k);
+            if (n < 1 || n > MILL_HISTORY_MAX || k[0] < '0' || k[0] > '9')
+                snprintf(note, sizeof note, "Pages kept for Back must be from 1 to %d.", MILL_HISTORY_MAX);
+            else { sprintf(k, "%ld", n); put_setting("history", 7, k, strlen(k)); }
+        }
         /* a checkbox that isn't checked isn't sent */
         if (form_value(body, len, "load_images", k, sizeof k)) put_setting("load_images", 11, "yes", 3);
         else put_setting("load_images", 11, "no", 2);
@@ -719,6 +741,11 @@ static void config(Out *o, const char *body, long len)
     sprintf(k, "%ld", image_memory_k());
     out_s(o, k);
     out_s(o, "\"> K<BR>Memory for caching images, much faster when images are reused between pages; 0 to turn off."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Pages kept for Back</B><TD><INPUT NAME=history SIZE=3 VALUE=\"");
+    sprintf(k, "%d", history_size());
+    out_s(o, k);
+    out_s(o, "\"><BR>Each window remembers this many pages, 1 to 32: their addresses and what was typed in their "
+             "forms, not the pages themselves."
              "<TR><TD VALIGN=TOP WIDTH=110><B>Load images automatically</B><TD><INPUT TYPE=checkbox NAME=load_images VALUE=yes");
     if (auto_images()) out_s(o, " CHECKED");
     out_s(o, "> When off, use the context menu to load individually."
@@ -813,16 +840,18 @@ int local_image(const char *url, Bitmap1 *bm)
     Handle h;
     short *head_words;
     long size;
-    if (strcmp(url, "mill://splash") || !(h = GetResource('SPLS', 128))) return -1;
+    if (strcmp(url, "mill://splash")) return -1;
+    if (!(h = GetResource('SPLS', 128))) return IMAGE_NO_MEMORY;  /* it's always there */
     HLock(h);
     head_words = (short *)*h;
     bm->w = head_words[0];
     bm->h = head_words[1];
     bm->row_bytes = head_words[2];
+    bm->mask = NULL;
     size = (long)bm->row_bytes * bm->h;
     bm->bits = malloc(size);
     if (bm->bits) memcpy(bm->bits, *h + 6, size);
     HUnlock(h);
     ReleaseResource(h);
-    return bm->bits ? 0 : -1;
+    return bm->bits ? 0 : IMAGE_NO_MEMORY;
 }

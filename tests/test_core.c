@@ -14,6 +14,26 @@
 #include "../src/core/layout.h"
 #include "../src/core/url.h"
 
+/* run.sh builds everything with malloc, calloc, and realloc renamed to these, so a test
+   can make the core run out of memory: allocation number fail_at fails (counting from 0),
+   and with fail_rest every one after it too, as a full heap would */
+#undef malloc
+#undef calloc
+#undef realloc
+void *malloc(size_t n);
+void *calloc(size_t n, size_t size);
+void *realloc(void *p, size_t n);
+static long allocs, fail_at = -1;
+static int fail_rest;
+static int fails(void)
+{
+    long k = allocs++;
+    return fail_at >= 0 && (k == fail_at || (fail_rest && k > fail_at));
+}
+void *t_malloc(size_t n) { return fails() ? NULL : malloc(n); }
+void *t_calloc(size_t n, size_t size) { return fails() ? NULL : calloc(n, size); }
+void *t_realloc(void *p, size_t n) { return fails() ? NULL : realloc(p, n); }
+
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
 
@@ -975,6 +995,313 @@ static void test_logins(void)
     CHECK(url_resolve("http://host/a/b", "http://u:p@other/x", out, sizeof out) == 0 && !strcmp(out, "http://u:p@other/x"));
 }
 
+static void test_referer(void)
+{
+    char out[300];
+    CHECK(url_referer("http://www.example.com/a?q=1", "http://example.org/b", out, sizeof out) == 1 &&
+          !strcmp(out, "http://www.example.com/a?q=1"));
+    /* no name and password, and no fragment */
+    CHECK(url_referer("http://joe:secret@www.example.com:8080/a@b?q#top", "http://example.org/", out, sizeof out) == 1 &&
+          !strcmp(out, "http://www.example.com:8080/a@b?q"));
+    CHECK(url_referer("http://joe@example.com/#x", "http://example.com/i.gif", out, sizeof out) == 1 &&
+          !strcmp(out, "http://example.com/"));
+    /* https: to https: goes, https: to anything else doesn't */
+    CHECK(url_referer("https://example.com/s", "https://example.org/", out, sizeof out) == 1 && !strcmp(out, "https://example.com/s"));
+    CHECK(url_referer("https://example.com/s", "http://example.org/", out, sizeof out) == 0);
+    CHECK(url_referer("https://example.com/s", "mill://about", out, sizeof out) == 0);
+    CHECK(url_referer("http://example.com/s", "https://example.org/", out, sizeof out) == 1);
+    /* Mill's own pages and files may be the referrer */
+    CHECK(url_referer("mill://config", "http://example.org/", out, sizeof out) == 1 && !strcmp(out, "mill://config"));
+    CHECK(url_referer("file:///Disk/page.html", "http://example.org/", out, sizeof out) == 1 && !strcmp(out, "file:///Disk/page.html"));
+    /* not whole addresses Mill knows */
+    CHECK(url_referer("", "http://example.org/", out, sizeof out) == 0);
+    CHECK(url_referer(NULL, "http://example.org/", out, sizeof out) == 0);
+    CHECK(url_referer("example.com/a", "http://example.org/", out, sizeof out) == 0);
+    CHECK(url_referer("view-source:http://example.com/", "http://example.org/", out, sizeof out) == 0);
+    CHECK(url_referer("ftp://example.com/", "http://example.org/", out, sizeof out) == 0);
+    /* too long, or more than one line */
+    CHECK(url_referer("http://example.com/abcdef", "http://example.org/", out, 20) == 0);
+    CHECK(url_referer("http://example.com/a\r\nX: y", "http://example.org/", out, sizeof out) == 0);
+}
+
+/* A GIF made here: 4 colors (white, black, gray, red), red transparent when transparent
+   is set, the picture's index at (x, y) from at(). Its LZW data is a clear code before
+   every two pixels, so the codes stay 3 bits wide. */
+static long make_gif(unsigned char *g, short w, short h, int transparent, int (*at)(int x, int y))
+{
+    static const unsigned char head[] = { 'G', 'I', 'F', '8', '9', 'a' };
+    static const unsigned char pal[] = { 255, 255, 255, 0, 0, 0, 128, 128, 128, 255, 0, 0 };
+    unsigned char data[4096];
+    long n = 0, d = 0, i, bits = 0;
+    int nbits = 0, x, y, k = 0;
+    memcpy(g, head, 6); n = 6;
+    g[n++] = (unsigned char)w; g[n++] = (unsigned char)(w >> 8);
+    g[n++] = (unsigned char)h; g[n++] = (unsigned char)(h >> 8);
+    g[n++] = 0x81; g[n++] = 0; g[n++] = 0;
+    memcpy(g + n, pal, 12); n += 12;
+    if (transparent) {
+        static const unsigned char gce[] = { 0x21, 0xF9, 4, 1, 0, 0, 3, 0 };
+        memcpy(g + n, gce, 8); n += 8;
+    }
+    g[n++] = 0x2C;
+    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = (unsigned char)w; g[n++] = (unsigned char)(w >> 8);
+    g[n++] = (unsigned char)h; g[n++] = (unsigned char)(h >> 8);
+    g[n++] = 0;
+    g[n++] = 2;     /* minimum code size */
+#define CODE(c) do { bits |= (long)(c) << nbits; nbits += 3; while (nbits >= 8) { data[d++] = (unsigned char)bits; bits >>= 8; nbits -= 8; } } while (0)
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++) {
+            if (k++ % 2 == 0) CODE(4);
+            CODE(at(x, y));
+        }
+    CODE(5);
+    if (nbits) data[d++] = (unsigned char)bits;
+#undef CODE
+    for (i = 0; i < d; i += 255) {
+        long c = d - i > 255 ? 255 : d - i;
+        g[n++] = (unsigned char)c;
+        memcpy(g + n, data + i, c); n += c;
+    }
+    g[n++] = 0;
+    g[n++] = 0x3B;
+    return n;
+}
+
+/* 2x2 checks of transparent red and black */
+static int checks(int x, int y) { return (x / 2 + y / 2) % 2 ? 1 : 3; }
+static int all_black(int x, int y) { (void)x; (void)y; return 1; }
+
+static int bit_at(const unsigned char *b, short row_bytes, int x, int y) { return (b[(long)y * row_bytes + x / 8] >> (7 - x % 8)) & 1; }
+
+static void test_transparent(void)
+{
+    unsigned char gif[8192];
+    long len;
+    Bitmap1 b;
+    int x, y, ok;
+    short scale;
+    /* at its own size and twice it, each pixel's mask follows its source pixel */
+    len = make_gif(gif, 8, 4, 1, checks);
+    for (scale = 1; scale <= 2; scale++) {
+        CHECK(image_decode(gif, len, 8 * scale, 4 * scale, &b, NULL, NULL) == 0 && b.mask);
+        if (!b.mask) continue;
+        ok = 1;
+        for (y = 0; y < b.h; y++)
+            for (x = 0; x < b.w; x++) {
+                int covered = checks(x / scale, y / scale) != 3;
+                if (bit_at(b.mask, b.row_bytes, x, y) != covered || bit_at(b.bits, b.row_bytes, x, y) != covered) ok = 0;
+            }
+        CHECK(ok);
+        image_free(&b);
+        CHECK(!b.bits && !b.mask);
+    }
+    /* half size: each target pixel is its nearest source pixel, in the mask and the bits */
+    CHECK(image_decode(gif, len, 4, 2, &b, NULL, NULL) == 0 && b.mask);
+    if (b.mask) {
+        ok = 1;
+        for (y = 0; y < b.h; y++)
+            for (x = 0; x < b.w; x++) {
+                int covered = checks(2 * x, 2 * y) != 3;
+                if (bit_at(b.mask, b.row_bytes, x, y) != covered || (!covered && bit_at(b.bits, b.row_bytes, x, y))) ok = 0;
+            }
+        CHECK(ok);
+    }
+    image_free(&b);
+    /* no transparent color, or one no pixel uses: no mask */
+    len = make_gif(gif, 8, 4, 0, checks);
+    CHECK(image_decode(gif, len, 8, 4, &b, NULL, NULL) == 0 && b.bits && !b.mask);
+    image_free(&b);
+    len = make_gif(gif, 8, 4, 1, all_black);
+    CHECK(image_decode(gif, len, 8, 4, &b, NULL, NULL) == 0 && b.bits && !b.mask);
+    image_free(&b);
+}
+
+/* Every node within the page's text and attributes, and joined up within the page */
+static int doc_whole(const Doc *d)
+{
+    long i;
+    for (i = 0; i < d->nnodes; i++) {
+        const Node *n = &d->nodes[i];
+        if (n->parent >= d->nnodes || n->first >= d->nnodes || n->next >= d->nnodes || n->attrs >= d->attrs_len) return 0;
+        if (n->tag == TAG_TEXT && (n->text < 0 || n->len < 0 || n->text + n->len > d->text_len)) return 0;
+    }
+    return 1;
+}
+
+/* Every line's runs there, every run's text, link, and every link and anchor's name */
+static int layout_whole(const Layout *L, const Doc *d)
+{
+    long i;
+    for (i = 0; i < L->nlines; i++)
+        if (L->lines[i].first < 0 || L->lines[i].first + L->lines[i].count > L->nruns) return 0;
+    for (i = 0; i < L->nruns; i++) {
+        const Run *r = &L->runs[i];
+        if (r->kind == RUN_TEXT && r->text + r->len > d->text_len) return 0;
+        if (r->kind == RUN_GEN && r->text + r->len > L->gen_len) return 0;
+        if (r->link < 0 || r->link > L->nlinks) return 0;
+    }
+    for (i = 0; i < L->nlinks; i++) if (!L->links[i]) return 0;
+    for (i = 0; i < L->nanchors; i++) if (!L->anchors[i].name) return 0;
+    return 1;
+}
+
+/* Out of memory at each allocation in turn, once or from then on: the core says so, and
+   what it has made so far holds together, for Mill to show as far as it got */
+static void test_out_of_memory(void)
+{
+    static const char form[] = "<FORM><SELECT NAME=a><OPTION>x<OPTION SELECTED>y</SELECT><INPUT NAME=b VALUE=c>"
+                               "<TEXTAREA NAME=d>e</TEXTAREA><ISINDEX></FORM>";
+    unsigned char gif[8192];
+    long len, total, k, gif_len;
+    int rest, parsed, laid, all_ok = 1, image_ok = 1, forms_ok = 1;
+    char *src = slurp("tests/fixtures/story.html", &len);
+    Doc d;
+    Layout L;
+    Forms F;
+    Bitmap1 b;
+    if (!src) { printf("skip out of memory\n"); return; }
+    allocs = 0;
+    CHECK(html_parse(&d, src, len) == 0 && layout_doc(&L, &d, &M, 496) == 0);
+    total = allocs;
+    layout_free(&L);
+    html_free(&d);
+    for (rest = 0; rest <= 1; rest++)
+        for (k = 0; k < total; k++) {
+            allocs = 0; fail_at = k; fail_rest = rest;
+            parsed = html_parse(&d, src, len);
+            laid = d.nnodes ? layout_doc(&L, &d, &M, 496) : 0;
+            fail_at = -1;
+            if (parsed && parsed != -1) all_ok = 0;
+            if (laid && laid != -1) all_ok = 0;
+            if (!doc_whole(&d) || (d.nnodes && !layout_whole(&L, &d))) all_ok = 0;
+            if (d.nnodes) { layout_hit(&L, 100, 50); layout_free(&L); }
+            html_free(&d);
+        }
+    CHECK(all_ok);
+    free(src);
+
+    /* forms */
+    allocs = 0;
+    CHECK(html_parse(&d, form, strlen(form)) == 0 && forms_build(&F, &d) == 0);
+    forms_free(&F);
+    html_free(&d);
+    total = allocs;
+    for (k = 0; k < total; k++) {
+        allocs = 0; fail_at = k; fail_rest = 1;
+        memset(&F, 0, sizeof F);
+        if (html_parse(&d, form, strlen(form)) == 0 && forms_build(&F, &d) == 0) forms_ok = 0;
+        fail_at = -1;
+        forms_free(&F);
+        html_free(&d);
+    }
+    CHECK(forms_ok);
+
+    /* pictures: nothing made, and IMAGE_NO_MEMORY rather than bad data */
+    gif_len = make_gif(gif, 8, 4, 1, checks);
+    allocs = 0;
+    CHECK(image_decode(gif, gif_len, 16, 8, &b, NULL, NULL) == 0 && b.mask);
+    image_free(&b);
+    total = allocs;
+    for (k = 0; k < total; k++) {
+        allocs = 0; fail_at = k; fail_rest = 1;
+        if (image_decode(gif, gif_len, 16, 8, &b, NULL, NULL) != IMAGE_NO_MEMORY || b.bits || b.mask) image_ok = 0;
+        fail_at = -1;
+        image_free(&b);
+    }
+    CHECK(image_ok);
+}
+
+/* Form state kept for Back: what's kept, what never is, and putting it back */
+static void test_form_state(void)
+{
+    static const char page[] =
+        "<FORM><INPUT NAME=q VALUE=a><INPUT TYPE=password NAME=p><INPUT TYPE=hidden NAME=h VALUE=x>"
+        "<INPUT TYPE=checkbox NAME=c><INPUT TYPE=radio NAME=r VALUE=1 CHECKED><INPUT TYPE=radio NAME=r VALUE=2>"
+        "<SELECT NAME=s><OPTION>one<OPTION>two<OPTION>three</SELECT>"
+        "<SELECT NAME=m MULTIPLE><OPTION>a<OPTION SELECTED>b</SELECT>"
+        "<TEXTAREA NAME=t>old</TEXTAREA><INPUT TYPE=file NAME=f><INPUT NAME=d DISABLED></FORM>"
+        "<FORM><INPUT NAME=q></FORM>";
+    /* the same page with a field added at the start of the first form, and one renamed */
+    static const char changed[] =
+        "<FORM><INPUT NAME=new><INPUT NAME=q VALUE=a></FORM><FORM><INPUT NAME=query></FORM>";
+    static const char text[] = "hello & = : 100%\r\nline two";
+    Doc d, d2;
+    Forms F, G;
+    char *state, *big;
+    long i;
+    CHECK(html_parse(&d, page, strlen(page)) == 0 && forms_build(&F, &d) == 0 && F.n == 12);
+    CHECK(forms_save(&F, &d) == NULL);  /* nothing changed: nothing kept */
+    forms_set_value(&F.fields[0], text);
+    forms_set_value(&F.fields[1], "secret");
+    forms_set_value(&F.fields[9], "Disk:Folder:file");
+    forms_set_value(&F.fields[10], "can't");
+    forms_click(&F, 3);
+    forms_click(&F, 5);
+    F.fields[6].selected[0] = 0; F.fields[6].selected[2] = 1;
+    F.fields[7].selected[0] = 1;
+    forms_set_value(&F.fields[8], "new\rtext");
+    forms_set_value(&F.fields[11], "two");
+    state = forms_save(&F, &d);
+    CHECK(state && !strstr(state, "secret") && !strstr(state, "Disk") && !strstr(state, "can't") && !strchr(state, '\r'));
+    /* back onto the same page, fresh */
+    CHECK(forms_build(&G, &d) == 0);
+    forms_restore(&G, &d, state);
+    CHECK(!strcmp(G.fields[0].value, text) && !strcmp(G.fields[8].value, "new\rtext") && !strcmp(G.fields[11].value, "two"));
+    CHECK(G.fields[3].checked && !G.fields[4].checked && G.fields[5].checked);
+    CHECK(!G.fields[6].selected[0] && G.fields[6].selected[2] && G.fields[7].selected[0] && G.fields[7].selected[1]);
+    CHECK(!strcmp(G.fields[1].value, "") && !strcmp(G.fields[9].value, "") && !strcmp(G.fields[10].value, ""));
+    CHECK(!strcmp(G.fields[2].value, "x"));
+    CHECK(forms_changed(&G, &d));
+    /* saving what was put back gives the same */
+    {
+        char *again = forms_save(&G, &d);
+        CHECK(again && !strcmp(again, state));
+        free(again);
+    }
+    forms_free(&G);
+    /* a page that changed: nothing lands on the wrong field */
+    CHECK(html_parse(&d2, changed, strlen(changed)) == 0 && forms_build(&G, &d2) == 0 && G.n == 3);
+    forms_restore(&G, &d2, state);
+    CHECK(!strcmp(G.fields[0].value, "") && !strcmp(G.fields[1].value, "a") && !strcmp(G.fields[2].value, ""));
+    forms_free(&G);
+    html_free(&d2);
+    /* the right form: the second form's q only goes to the second form's q */
+    CHECK(html_parse(&d2, "<FORM></FORM><FORM><INPUT NAME=q></FORM>", 39) == 0 && forms_build(&G, &d2) == 0);
+    forms_restore(&G, &d2, "0:1:0:q=yes");
+    CHECK(!strcmp(G.fields[0].value, "yes"));
+    forms_restore(&G, &d2, "0:0:0:q=no");
+    CHECK(!strcmp(G.fields[0].value, "yes"));
+    forms_free(&G);
+    html_free(&d2);
+    /* nonsense is left alone */
+    CHECK(forms_build(&G, &d) == 0);
+    forms_restore(&G, &d, "junk&0:&:0:q&99:0:0:q=x&0:0:3:q=1&3:0:3:c=2&6:0:10:s=01&6:0:10:s=0x1&0:0:0:q=%4");
+    CHECK(!strcmp(G.fields[0].value, "%4") && !G.fields[3].checked && !G.fields[6].selected[2]);
+    forms_free(&G);
+    free(state);
+    /* more than FORMS_STATE_MAX: none of it */
+    big = malloc(FORMS_STATE_MAX + 2);
+    for (i = 0; i < FORMS_STATE_MAX + 1; i++) big[i] = 'x';
+    big[i] = 0;
+    forms_set_value(&F.fields[8], big);
+    CHECK(forms_save(&F, &d) == NULL);
+    big[FORMS_STATE_MAX - 200] = 0;
+    forms_set_value(&F.fields[8], big);
+    CHECK((state = forms_save(&F, &d)) != NULL && strlen(state) <= FORMS_STATE_MAX);
+    free(state);
+    free(big);
+    /* out of memory: nothing, and nothing left over */
+    for (i = 0; i < 40; i++) {
+        allocs = 0; fail_at = i; fail_rest = 1;
+        state = forms_save(&F, &d);
+        fail_at = -1;
+        free(state);
+    }
+    forms_free(&F);
+    html_free(&d);
+}
+
 int main(void)
 {
     test_charset();
@@ -994,6 +1321,10 @@ int main(void)
     test_urls();
     test_auth();
     test_logins();
+    test_referer();
+    test_transparent();
+    test_out_of_memory();
+    test_form_state();
     test_tables();
     test_forms();
     test_image("masthead-s.gif", 318, 57, 318, 57);

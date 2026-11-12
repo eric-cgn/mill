@@ -218,6 +218,22 @@ int url_with_login(const char *url, const char *user, const char *pass, char *ou
     return 0;
 }
 
+int url_referer(const char *page, const char *target, char *out, int out_size)
+{
+    Url p, t;
+    char *c;
+    if (!page || !url_has_scheme(page) || url_parse(page, &p)) return 0;
+    memset(p.pass, 0, sizeof p.pass);
+    /* an https: page's address doesn't go out over plain http: */
+    if (p.scheme == SCHEME_HTTPS && (url_parse(target, &t) || t.scheme != SCHEME_HTTPS)) return 0;
+    if ((int)strlen(page) >= out_size) return 0;
+    strcpy(out, page);
+    url_strip_login(out);
+    if ((c = strchr(out, '#'))) *c = 0;
+    for (c = out; *c; c++) if ((unsigned char)*c < ' ' || *c == 127) return 0;  /* one header line */
+    return 1;
+}
+
 /* Remove "." and ".." segments from an absolute path, in place */
 static void normalize(char *path)
 {
