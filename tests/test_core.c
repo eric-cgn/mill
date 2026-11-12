@@ -12,6 +12,7 @@
 #include "../src/core/imagemap.h"
 #include "../src/core/image.h"
 #include "../src/core/layout.h"
+#include "../src/core/update.h"
 #include "../src/core/url.h"
 
 /* run.sh builds everything with malloc, calloc, and realloc renamed to these, so a test
@@ -1302,6 +1303,78 @@ static void test_form_state(void)
     html_free(&d);
 }
 
+/* Check for updates: reading latest.txt, and which version is newer */
+static void test_update(void)
+{
+    static const char site[] = "http://mill.1in1e6.com/";
+    static const char good[] = "1.10.2\nhttp://mill.1in1e6.com/download/Mill-1.10.2.bin\nFaster tables.\nA <b>bold</b> & new look.\n";
+    static const char crlf[] = "\r\n  1.9.1  \r\n\r\nHTTP://Mill.1in1e6.com/Mill.bin\r\n\r\nOne.\r\n\r\n\r\nTwo.\r\n";
+    static const char cr[] = "2.0\rhttp://mill.1in1e6.com/\r\xE9t\xE9";
+    Update u;
+    char big[UPDATE_MAX_BYTES + 2], out[64];
+    long i;
+#define PARSE(t) update_parse(t, strlen(t), site, &u)
+    /* the site a file's address is on */
+    CHECK(update_site("http://mill.1in1e6.com/latest.txt", out, sizeof out) == 0 && !strcmp(out, site));
+    CHECK(update_site("http://files/Tests/Mill/latest.txt", out, sizeof out) == 0 && !strcmp(out, "http://files/"));
+    CHECK(update_site("http://example.com:8080", out, sizeof out) == 0 && !strcmp(out, "http://example.com:8080/"));
+    CHECK(update_site("example.com/latest.txt", out, sizeof out) == -1);
+    CHECK(update_site("http:///latest.txt", out, sizeof out) == -1);
+    CHECK(update_site("http://example.com/x", out, 10) == -1);
+    /* good files */
+    CHECK(PARSE(good) == 0 && !strcmp(u.version, "1.10.2") && !strcmp(u.link, "http://mill.1in1e6.com/download/Mill-1.10.2.bin") &&
+          u.nnotes == 2 && !strcmp(u.notes[1], "A <b>bold</b> & new look."));
+    CHECK(PARSE(crlf) == 0 && !strcmp(u.version, "1.9.1") && !strcmp(u.link, "HTTP://Mill.1in1e6.com/Mill.bin") &&
+          u.nnotes == 2 && !strcmp(u.notes[0], "One.") && !strcmp(u.notes[1], "Two."));
+    /* any path on the site; Latin-1 shows as Mac Roman */
+    CHECK(PARSE(cr) == 0 && !strcmp(u.link, site) && u.nnotes == 1 && !strcmp(u.notes[0], "\x8Et\x8E"));
+    /* a test copy's own site */
+    CHECK(update_parse("1.9\nhttp://files/Tests/Mill.bin", strlen("1.9\nhttp://files/Tests/Mill.bin"), "http://files/", &u) == 0);
+    CHECK(update_parse("1.9\nhttp://mill.1in1e6.com/Mill.bin", strlen("1.9\nhttp://mill.1in1e6.com/Mill.bin"), "http://files/", &u) == UPDATE_OFF_SITE);
+    /* a link anywhere else, or none, or one that could break out of the page: an error */
+    CHECK(PARSE("1.9") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://example.com/Mill.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttps://mill.1in1e6.com/Mill.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com.example.com/Mill.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com@example.com/\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com/\"><b>.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com/a b.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\njavascript:alert(1)\n") == UPDATE_OFF_SITE);
+    /* not a version */
+    CHECK(PARSE("") == UPDATE_NOT_FILE);
+    CHECK(PARSE("\n\n") == UPDATE_NOT_FILE);
+    CHECK(PARSE("<HTML>Not found") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1\nhttp://mill.1in1e6.com/") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1.2.3.4") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1..2") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1.2a") == UPDATE_NOT_FILE);
+    CHECK(PARSE("12345.1") == UPDATE_NOT_FILE);
+    /* too long; too many change lines, and too long a one */
+    for (i = 0; i < (long)sizeof big; i++) big[i] = i % 10 == 9 ? '\n' : 'x';
+    memcpy(big, "1.9\nhttp://mill.1in1e6.com/\n", 28);
+    CHECK(update_parse(big, UPDATE_MAX_BYTES + 1, site, &u) == UPDATE_NOT_FILE);
+    CHECK(update_parse(big, UPDATE_MAX_BYTES, site, &u) == 0 && u.nnotes == UPDATE_MAX_NOTES);
+    for (i = 28; i < 400; i++) big[i] = 'y';
+    CHECK(update_parse(big, 404, site, &u) == 0 && u.nnotes == 1 && strlen(u.notes[0]) == UPDATE_MAX_NOTE);
+    /* a link too long to keep whole isn't cut short */
+    for (i = 27; i < 400; i++) big[i] = 'y';
+    CHECK(update_parse(big, 404, site, &u) == UPDATE_OFF_SITE);
+#undef PARSE
+    /* comparing */
+    CHECK(update_compare("1.10", "1.9") > 0);
+    CHECK(update_compare("1.9", "1.10") < 0);
+    CHECK(update_compare("1.9.1", "1.9") > 0);
+    CHECK(update_compare("1.9", "1.9.0") == 0);
+    CHECK(update_compare("1.9.1", "1.9.1") == 0);
+    CHECK(update_compare("2.0", "1.99.99") > 0);
+    CHECK(update_compare("1.10b2", "1.10") < 0);   /* a pre-release comes before its release */
+    CHECK(update_compare("1.10b2", "1.9.5") > 0);
+    CHECK(update_compare("1.10b2", "1.10b3") < 0);
+    /* the decisions the About page makes: newer, the same, older */
+    CHECK(update_compare("1.9.2", "1.9.1") > 0 && update_compare("1.9.1", "1.9.1") == 0 && update_compare("1.9", "1.9.1") < 0);
+}
+
 int main(void)
 {
     test_charset();
@@ -1325,6 +1398,7 @@ int main(void)
     test_transparent();
     test_out_of_memory();
     test_form_state();
+    test_update();
     test_tables();
     test_forms();
     test_image("masthead-s.gif", 318, 57, 318, 57);

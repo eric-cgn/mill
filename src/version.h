@@ -4,3 +4,9 @@
 #define MILL_VERS_MINOR 0x91  /* 9.1: minor 9, fix 1 */
 #define MILL_PUBLISHER "OneInAMillion Software"
 #define MILL_YEAR "2026"
+
+/* Where Check for updates looks (see core/update.h). A test copy can look elsewhere:
+   MILL_UPDATE_URL=http://... ./build.sh */
+#ifndef MILL_UPDATE_URL
+#define MILL_UPDATE_URL "http://mill.1in1e6.com/latest.txt"
+#endif
