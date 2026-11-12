@@ -26,7 +26,11 @@ typedef struct {
 } Ctx;
 
 typedef struct { long node; short min, max; } Measured;
-typedef struct { Measured *tables; long n, cap; } Shared;
+typedef struct {
+    Measured *tables; long n, cap;
+    int shown;              /* the progress last reported */
+    int stopped;            /* progress said to stop */
+} Shared;
 
 /* A floating image (ALIGN=LEFT or RIGHT): text keeps to the side of edge until y reaches bottom */
 #define MAX_FLOATS 8
@@ -974,6 +978,12 @@ static void walk(State *S, long node, Ctx c)
     char save_align = S->align;
     int block = 0;
 
+    if (S->sh->stopped) return;
+    if (S->m->progress && d->nnodes > 0 && node * 100 / d->nnodes > S->sh->shown) {
+        /* nodes are in page order, so how far through them is how far along */
+        S->sh->shown = (int)(node * 100 / d->nnodes);
+        if (S->m->progress(S->m->ctx, S->sh->shown)) { S->sh->stopped = 1; return; }
+    }
     if (n->tag == TAG_TEXT) { if (!c.hidden) flow_text(S, &c, n->text, n->len); return; }
 
     switch (n->tag) {
@@ -1185,7 +1195,7 @@ int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width)
         if (L->lines[i].y + L->lines[i].height > L->height) L->height = L->lines[i].y + L->lines[i].height;
     L->height += MARGIN;
     qsort(L->lines, L->nlines, sizeof(MLine), by_y);
-    return S.oom ? -1 : 0;
+    return sh.stopped ? -2 : S.oom ? -1 : 0;
 }
 
 void layout_free(Layout *L)

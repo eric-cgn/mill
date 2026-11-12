@@ -19,7 +19,7 @@ static int failures = 0;
 
 static long fake_width(void *ctx, const MStyle *s, const char *t, long len) { (void)ctx; (void)t; return len * s->size / 2; }
 static void fake_metrics(void *ctx, const MStyle *s, short *a, short *d, short *l) { (void)ctx; *a = s->size * 3 / 4; *d = s->size / 4; *l = 1; }
-static Metrics M = { fake_width, fake_metrics, NULL, NULL, NULL };
+static Metrics M = { fake_width, fake_metrics, NULL, NULL, NULL, NULL };
 
 static char *slurp(const char *path, long *len)
 {
@@ -171,6 +171,38 @@ static long run_y(const Layout *L, const Run *r)
 }
 
 /* A list right after a heading: every item's text starts at the list's margin */
+static int progress_seen[3];   /* calls, last percent, out of order */
+static int note_progress(void *ctx, int percent)
+{
+    (void)ctx;
+    if (percent <= progress_seen[1] && progress_seen[0]) progress_seen[2]++;
+    progress_seen[0]++;
+    progress_seen[1] = percent;
+    return 0;
+}
+static int stop_at_half(void *ctx, int percent) { (void)ctx; return percent >= 50; }
+
+/* Progress goes up to near 100 in order; a nonzero return stops the layout */
+static void test_progress(void)
+{
+    Doc d;
+    Layout L;
+    Metrics m = M;
+    char html[4000];
+    int i;
+    html[0] = 0;
+    for (i = 0; i < 100; i++) strcat(html, "<P>Lorem ipsum dolor sit amet.");
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    m.progress = note_progress;
+    CHECK(layout_doc(&L, &d, &m, 200) == 0);
+    CHECK(progress_seen[0] > 10 && progress_seen[1] >= 90 && !progress_seen[2]);
+    layout_free(&L);
+    m.progress = stop_at_half;
+    CHECK(layout_doc(&L, &d, &m, 200) == -2);
+    layout_free(&L);
+    html_free(&d);
+}
+
 static void test_lists(void)
 {
     Doc d;
@@ -400,6 +432,7 @@ static void test_forms(void)
     CHECK(html_parse(&d, html, strlen(html)) == 0);
     CHECK(forms_build(&F, &d) == 0);
     CHECK(F.n == 11);
+    CHECK(!forms_changed(&F, &d));
     q = r1 = r2 = text = area = sel = go = -1;
     for (i = 0; i < F.n; i++) {
         Field *f = &F.fields[i];
@@ -417,6 +450,7 @@ static void test_forms(void)
     /* radio buttons switch within their name only */
     forms_click(&F, r2);
     CHECK(!F.fields[r1].checked && F.fields[r2].checked && F.fields[4].checked);
+    CHECK(forms_changed(&F, &d));
     forms_set_value(&F.fields[text], "M\x8Ell\xD5s & co\rnext");  /* Mac Roman, a curly quote, a CR */
     CHECK(forms_submit(&F, &d, F.fields[text].form, go, 0, 0, NULL, NULL, &sub) == 0);
     CHECK(!sub.post && !strcmp(sub.action, "/search"));
@@ -425,6 +459,21 @@ static void test_forms(void)
     submission_free(&sub);
     forms_reset(&F, &d, F.fields[text].form);
     CHECK(F.fields[r1].checked && !F.fields[r2].checked && !strcmp(F.fields[text].value, "caf\x8E au lait"));
+    CHECK(!forms_changed(&F, &d));
+    /* what counts as a change: typing, a choice, a checkbox; not a value typed back */
+    forms_set_value(&F.fields[area], "line <B>one</B>\nline two");
+    CHECK(!forms_changed(&F, &d));
+    forms_set_value(&F.fields[area], "other");
+    CHECK(forms_changed(&F, &d));
+    forms_reset(&F, &d, F.fields[area].form);
+    F.fields[sel].selected[0] = 1;
+    F.fields[sel].selected[1] = 0;
+    CHECK(forms_changed(&F, &d));
+    forms_reset(&F, &d, F.fields[sel].form);
+    forms_click(&F, 5);   /* the checkbox */
+    CHECK(forms_changed(&F, &d));
+    forms_reset(&F, &d, F.fields[5].form);
+    CHECK(!forms_changed(&F, &d));
 
     /* a file upload */
     forms_set_value(&F.fields[9], "Macintosh HD:Notes");
@@ -935,6 +984,7 @@ int main(void)
     test_parse();
     test_layout();
     test_lists();
+    test_progress();
     test_floats();
     test_bgcolor();
     test_filetypes();

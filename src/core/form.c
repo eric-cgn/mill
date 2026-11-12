@@ -144,6 +144,31 @@ long forms_find(const Forms *F, long node)
     return lo < F->n && F->fields[lo].node == node ? lo : -1;
 }
 
+int forms_changed(const Forms *F, const Doc *d)
+{
+    long i;
+    int changed = 0;
+    for (i = 0; i < F->n && !changed; i++) {
+        const Field *f = &F->fields[i];
+        Field was;
+        if (f->type == FIELD_HIDDEN || f->type == FIELD_SUBMIT || f->type == FIELD_RESET || f->type == FIELD_IMAGE) continue;
+        memset(&was, 0, sizeof was);
+        was.node = f->node;
+        was.type = f->type;
+        was.multiple = f->multiple;
+        was.options = f->options;
+        was.noptions = f->noptions;
+        if (f->noptions && !(was.selected = calloc(f->noptions, 1))) continue;
+        initial(&was, d);
+        if (f->type == FIELD_CHECKBOX || f->type == FIELD_RADIO) changed = f->checked != was.checked;
+        else if (f->type == FIELD_SELECT) changed = f->noptions && memcmp(f->selected, was.selected, f->noptions) != 0;
+        else changed = strcmp(f->value ? f->value : "", was.value ? was.value : "") != 0;
+        free(was.value);
+        free(was.selected);
+    }
+    return changed;
+}
+
 void forms_reset(Forms *F, const Doc *d, long form)
 {
     long i;
