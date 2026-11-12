@@ -554,15 +554,26 @@ long (*local_fetch)(const char *url, char *buf, long size, char *why, int why_si
    site says is newest, against this copy */
 static void check_for_updates(Out *o)
 {
-    char why[120], *text = malloc(UPDATE_MAX_BYTES + 1);
+    char why[120], site[128], *text = malloc(UPDATE_MAX_BYTES + 1);
     Update *u = malloc(sizeof *u);
     long n = -1;
-    int k;
+    int k, err;
     strcpy(why, "Not enough memory.");
-    if (text && u && local_fetch) {
+    /* the download link must be on the site the file came from: this copy's own */
+    if (update_site(MILL_UPDATE_URL, site, sizeof site)) strcpy(why, "Its address isn't one Mill can open.");
+    else if (text && u && local_fetch) {
         n = local_fetch(MILL_UPDATE_URL, text, UPDATE_MAX_BYTES + 1, why, sizeof why);
         if (n > UPDATE_MAX_BYTES) { n = -1; strcpy(why, "Its answer was too long."); }
-        if (n >= 0 && update_parse(text, n, u)) { n = -1; strcpy(why, "Its answer wasn't a version number."); }
+        if (n >= 0 && (err = update_parse(text, n, site, u)) != 0) {
+            n = -1;
+            if (err == UPDATE_OFF_SITE) {
+                /* site without its scheme and last slash: mill.1in1e6.com */
+                const char *host = strstr(site, "://") + 3;
+                snprintf(why, sizeof why, "Its download link isn't on %.*s.", (int)(strlen(host) - 1), host);
+            } else {
+                strcpy(why, "Its answer wasn't a version number.");
+            }
+        }
     }
     if (n < 0) {
         out_s(o, "<P>Mill couldn't check for updates. ");

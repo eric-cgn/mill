@@ -1306,45 +1306,61 @@ static void test_form_state(void)
 /* Check for updates: reading latest.txt, and which version is newer */
 static void test_update(void)
 {
-    static const char good[] = "1.10.2\nhttp://example.com/download/Mill-1.10.2.bin\nFaster tables.\nA <b>bold</b> & new look.\n";
-    static const char crlf[] = "\r\n  1.9.1  \r\n\r\nhttps://example.org/Mill.BIN\r\n\r\nOne.\r\n\r\n\r\nTwo.\r\n";
-    static const char cr[] = "2.0\rhttp://example.com/\r\xE9t\xE9";
+    static const char site[] = "http://mill.1in1e6.com/";
+    static const char good[] = "1.10.2\nhttp://mill.1in1e6.com/download/Mill-1.10.2.bin\nFaster tables.\nA <b>bold</b> & new look.\n";
+    static const char crlf[] = "\r\n  1.9.1  \r\n\r\nHTTP://Mill.1in1e6.com/Mill.bin\r\n\r\nOne.\r\n\r\n\r\nTwo.\r\n";
+    static const char cr[] = "2.0\rhttp://mill.1in1e6.com/\r\xE9t\xE9";
     Update u;
-    char big[UPDATE_MAX_BYTES + 2];
+    char big[UPDATE_MAX_BYTES + 2], out[64];
     long i;
-    CHECK(update_parse(good, strlen(good), &u) == 0 && !strcmp(u.version, "1.10.2") &&
-          !strcmp(u.link, "http://example.com/download/Mill-1.10.2.bin") && u.nnotes == 2 && !strcmp(u.notes[1], "A <b>bold</b> & new look."));
-    CHECK(update_parse(crlf, strlen(crlf), &u) == 0 && !strcmp(u.version, "1.9.1") && !strcmp(u.link, "https://example.org/Mill.BIN") &&
+#define PARSE(t) update_parse(t, strlen(t), site, &u)
+    /* the site a file's address is on */
+    CHECK(update_site("http://mill.1in1e6.com/latest.txt", out, sizeof out) == 0 && !strcmp(out, site));
+    CHECK(update_site("http://files/Tests/Mill/latest.txt", out, sizeof out) == 0 && !strcmp(out, "http://files/"));
+    CHECK(update_site("http://example.com:8080", out, sizeof out) == 0 && !strcmp(out, "http://example.com:8080/"));
+    CHECK(update_site("example.com/latest.txt", out, sizeof out) == -1);
+    CHECK(update_site("http:///latest.txt", out, sizeof out) == -1);
+    CHECK(update_site("http://example.com/x", out, 10) == -1);
+    /* good files */
+    CHECK(PARSE(good) == 0 && !strcmp(u.version, "1.10.2") && !strcmp(u.link, "http://mill.1in1e6.com/download/Mill-1.10.2.bin") &&
+          u.nnotes == 2 && !strcmp(u.notes[1], "A <b>bold</b> & new look."));
+    CHECK(PARSE(crlf) == 0 && !strcmp(u.version, "1.9.1") && !strcmp(u.link, "HTTP://Mill.1in1e6.com/Mill.bin") &&
           u.nnotes == 2 && !strcmp(u.notes[0], "One.") && !strcmp(u.notes[1], "Two."));
-    /* Latin-1 shows as Mac Roman */
-    CHECK(update_parse(cr, strlen(cr), &u) == 0 && u.nnotes == 1 && !strcmp(u.notes[0], "\x8Et\x8E"));
-    /* just a version: the site, and nothing new listed */
-    CHECK(update_parse("1.9", strlen("1.9"), &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK) && u.nnotes == 0);
-    /* a link that isn't a .bin, isn't http, or could break out of the page: the site instead */
-    CHECK(update_parse("1.9\nhttp://example.com/\n", strlen("1.9\nhttp://example.com/\n"), &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK));
-    CHECK(update_parse("1.9\nhttp://example.com/Mill.bin.hqx\n", strlen("1.9\nhttp://example.com/Mill.bin.hqx\n"), &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK));
-    CHECK(update_parse("1.9\nftp://example.com/Mill.bin\n", strlen("1.9\nftp://example.com/Mill.bin\n"), &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK));
-    CHECK(update_parse("1.9\nftp://example.com/\nx", strlen("1.9\nftp://example.com/\nx"), &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK) && u.nnotes == 1);
-    CHECK(update_parse("1.9\nhttp://example.com/\"><b>.bin\n", strlen("1.9\nhttp://example.com/\"><b>.bin\n"), &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK));
-    CHECK(update_parse("1.9\njavascript:alert(1)\n", strlen("1.9\njavascript:alert(1)\n"), &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK));
+    /* any path on the site; Latin-1 shows as Mac Roman */
+    CHECK(PARSE(cr) == 0 && !strcmp(u.link, site) && u.nnotes == 1 && !strcmp(u.notes[0], "\x8Et\x8E"));
+    /* a test copy's own site */
+    CHECK(update_parse("1.9\nhttp://files/Tests/Mill.bin", strlen("1.9\nhttp://files/Tests/Mill.bin"), "http://files/", &u) == 0);
+    CHECK(update_parse("1.9\nhttp://mill.1in1e6.com/Mill.bin", strlen("1.9\nhttp://mill.1in1e6.com/Mill.bin"), "http://files/", &u) == UPDATE_OFF_SITE);
+    /* a link anywhere else, or none, or one that could break out of the page: an error */
+    CHECK(PARSE("1.9") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://example.com/Mill.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttps://mill.1in1e6.com/Mill.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com.example.com/Mill.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com@example.com/\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com/\"><b>.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\nhttp://mill.1in1e6.com/a b.bin\n") == UPDATE_OFF_SITE);
+    CHECK(PARSE("1.9\njavascript:alert(1)\n") == UPDATE_OFF_SITE);
     /* not a version */
-    CHECK(update_parse("", strlen(""), &u) == -1);
-    CHECK(update_parse("\n\n", strlen("\n\n"), &u) == -1);
-    CHECK(update_parse("<HTML>Not found", strlen("<HTML>Not found"), &u) == -1);
-    CHECK(update_parse("1\nhttp://example.com/", strlen("1\nhttp://example.com/"), &u) == -1);
-    CHECK(update_parse("1.2.3.4", strlen("1.2.3.4"), &u) == -1);
-    CHECK(update_parse("1..2", strlen("1..2"), &u) == -1);
-    CHECK(update_parse("1.2a", strlen("1.2a"), &u) == -1);
-    CHECK(update_parse("12345.1", strlen("12345.1"), &u) == -1);
-    /* too long, and too many lines */
+    CHECK(PARSE("") == UPDATE_NOT_FILE);
+    CHECK(PARSE("\n\n") == UPDATE_NOT_FILE);
+    CHECK(PARSE("<HTML>Not found") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1\nhttp://mill.1in1e6.com/") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1.2.3.4") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1..2") == UPDATE_NOT_FILE);
+    CHECK(PARSE("1.2a") == UPDATE_NOT_FILE);
+    CHECK(PARSE("12345.1") == UPDATE_NOT_FILE);
+    /* too long; too many change lines, and too long a one */
     for (i = 0; i < (long)sizeof big; i++) big[i] = i % 10 == 9 ? '\n' : 'x';
-    memcpy(big, "1.9\n", 4);
-    CHECK(update_parse(big, UPDATE_MAX_BYTES + 1, &u) == -1);
-    CHECK(update_parse(big, UPDATE_MAX_BYTES, &u) == 0 && u.nnotes == UPDATE_MAX_NOTES);
-    for (i = 4; i < 400; i++) big[i] = 'y';
-    CHECK(update_parse(big, 404, &u) == 0 && !strcmp(u.link, UPDATE_DEFAULT_LINK));
-    memcpy(big + 4, "http://e.com/M.bin\n", 19);
-    CHECK(update_parse(big, 404, &u) == 0 && u.nnotes == 1 && strlen(u.notes[0]) == UPDATE_MAX_NOTE);
+    memcpy(big, "1.9\nhttp://mill.1in1e6.com/\n", 28);
+    CHECK(update_parse(big, UPDATE_MAX_BYTES + 1, site, &u) == UPDATE_NOT_FILE);
+    CHECK(update_parse(big, UPDATE_MAX_BYTES, site, &u) == 0 && u.nnotes == UPDATE_MAX_NOTES);
+    for (i = 28; i < 400; i++) big[i] = 'y';
+    CHECK(update_parse(big, 404, site, &u) == 0 && u.nnotes == 1 && strlen(u.notes[0]) == UPDATE_MAX_NOTE);
+    /* a link too long to keep whole isn't cut short */
+    for (i = 27; i < 400; i++) big[i] = 'y';
+    CHECK(update_parse(big, 404, site, &u) == UPDATE_OFF_SITE);
+#undef PARSE
     /* comparing */
     CHECK(update_compare("1.10", "1.9") > 0);
     CHECK(update_compare("1.9", "1.10") < 0);
