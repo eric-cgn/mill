@@ -4,6 +4,7 @@
 
 #include "core/charset.h"
 #include "core/filetypes.h"
+#include "core/update.h"
 #include "mac_local.h"
 #include "mac_sys.h"
 #include "version.h"
@@ -405,6 +406,13 @@ long image_memory_k(void)
     return v ? atol(v) : MILL_DEFAULT_IMAGE_K;
 }
 
+int history_size(void)
+{
+    const char *v = setting("history", NULL);
+    long n = v ? atol(v) : MILL_DEFAULT_HISTORY;
+    return n < 1 ? 1 : n > MILL_HISTORY_MAX ? MILL_HISTORY_MAX : (int)n;
+}
+
 int auto_images(void)
 {
     return strcmp(setting("load_images", "yes"), "no") != 0;
@@ -540,21 +548,109 @@ static void out_rules(Out *o, const char *rules)
 
 /* ------------------------------------------------------------ mill: pages */
 
-static void about(Out *o)
+long (*local_fetch)(const char *url, char *buf, long size, char *why, int why_size) = NULL;
+
+/* Check for updates, asked for by the About page's button (never by itself): what the
+   site says is newest, against this copy */
+#define NOTE_CUT 32     /* characters of each New in line shown on the About page */
+#define NOTES_SHOWN 2   /* New in lines shown there */
+
+static void check_for_updates(Out *o)
 {
+    char why[120], site[128], *text = malloc(UPDATE_MAX_BYTES + 1);
+    Update *u = malloc(sizeof *u);
+    long n = -1;
+    int k, err;
+    strcpy(why, "Not enough memory.");
+    /* the download link must be on the site the file came from: this copy's own */
+    if (update_site(MILL_UPDATE_URL, site, sizeof site)) strcpy(why, "Its address isn't one Mill can open.");
+    else if (text && u && local_fetch) {
+        n = local_fetch(MILL_UPDATE_URL, text, UPDATE_MAX_BYTES + 1, why, sizeof why);
+        if (n > UPDATE_MAX_BYTES) { n = -1; strcpy(why, "Its answer was too long."); }
+        if (n >= 0 && (err = update_parse(text, n, site, u)) != 0) {
+            n = -1;
+            if (err == UPDATE_OFF_SITE) {
+                /* site without its scheme and last slash: mill.1in1e6.com */
+                const char *host = strstr(site, "://") + 3;
+                snprintf(why, sizeof why, "Its download link isn't on %.*s.", (int)(strlen(host) - 1), host);
+            } else {
+                strcpy(why, "Its answer wasn't a version number.");
+            }
+        }
+    }
+    if (n < 0) {
+        out_s(o, "<P>Mill couldn't check for updates. ");
+        out_text(o, why);
+    } else if (update_compare(u->version, MILL_VERSION) > 0) {
+        out_s(o, "<P><B>A new version is available!</B><BR><A HREF=\"");
+        out_text(o, u->link);
+        out_s(o, "\">Download Mill ");
+        out_text(o, u->version);
+        out_s(o, "</A>");
+        if (u->nnotes) {
+            out_s(o, "<P>New in ");
+            out_text(o, u->version);
+            out_s(o, ":");
+            /* each line cut to 32 characters, so a long one doesn't widen the page; the
+               whole story is on the site */
+            /* at most two lines here; more, and the last bullet says there's more on the site */
+            for (k = 0; k < u->nnotes && k < NOTES_SHOWN; k++) {
+                char cut[NOTE_CUT + 1];
+                size_t len = strlen(u->notes[k]);
+                out_s(o, "<BR>&nbsp;&nbsp;\245&nbsp;");   /* a bullet, without a list's blank line above */
+                if (len <= NOTE_CUT) out_text(o, u->notes[k]);
+                else {
+                    memcpy(cut, u->notes[k], NOTE_CUT);
+                    len = NOTE_CUT;
+                    while (len > 0 && cut[len - 1] == ' ') len--;
+                    cut[len] = 0;
+                    out_text(o, cut);
+                    out_s(o, "\311");
+                }
+            }
+            out_s(o, "<BR>&nbsp;&nbsp;\245&nbsp;<A HREF=\"");
+            out_text(o, site);
+            out_s(o, u->nnotes > NOTES_SHOWN ? "\">See more\311</A>" : "\">Details\311</A>");
+        }
+    } else {
+        out_s(o, "<P>Mill is up to date.");
+    }
+    free(text);
+    free(u);
+}
+
+/* The picture and name on the right; on the left, what Mill is, how much memory is free,
+   and the button that checks for updates (check: it was pressed) */
+static void about(Out *o, int check)
+{
+    long free, total;
+    char line[64];
     head(o, 200, HTML_MAC);
     out_s(o,
-        "<TITLE>About Mill</TITLE><CENTER>"
+        "<TITLE>About Mill</TITLE>"
+        "<TABLE ALIGN=CENTER BORDER=0 CELLPADDING=4>"
+        "<TR><TD ROWSPAN=3 VALIGN=MIDDLE>"
         "<IMG SRC=\"mill://splash\" WIDTH=192 HEIGHT=163 ALT=\"Don Quixote and the windmills\">"
-        "<H1>Mill</H1>A web browser for classic Macs<BR>"
-        "Version " MILL_VERSION " &middot; Freeware<BR>&copy; " MILL_YEAR " " MILL_PUBLISHER "</CENTER><HR>"
+        "<TD VALIGN=TOP><BR><H1>Mill</H1>"
+        "<TR><TD VALIGN=MIDDLE>");
+    mem_report(&free, &total);
+    snprintf(line, sizeof line, "Memory: %ldK free of %ldK", free / 1024, total / 1024);
+    out_s(o, line);
+    /* the button, or once pressed, what it found in its place */
+    if (check) check_for_updates(o);
+    else out_s(o,
+        "<FORM METHOD=GET ACTION=\"mill://about\"><INPUT TYPE=hidden NAME=check VALUE=1>"
+        "<INPUT TYPE=submit VALUE=\"Check for updates\311\"></FORM>");
+    out_s(o,
+        "<TR><TD VALIGN=BOTTOM>Version " MILL_VERSION " &middot; Freeware<BR>&copy; " MILL_YEAR " " MILL_PUBLISHER
+        "</TABLE><HR>"
         "<H3>About Mill</H3>"
         "<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, no-nonsense "
         "browser available for the Plus and later."
         "<P><B>System Requirements:</B><UL>"
         "<LI>Mac Plus or later"
-        "<LI>System 6.0.8 with MacTCP or later"
-        "<LI>1 MB RAM available</UL>"
+        "<LI>System 6.0.3 with MacTCP or later"
+        "<LI>700K free RAM</UL>"
         "<H3>What Mill reads</H3><UL>"
         "<LI>HTML 3.2, which included text, lists, tables, images (and maps), and forms, as well as a few extras "
         "like bgcolor and font face. No applets, JavaScript, style sheets, or frames."
@@ -582,7 +678,7 @@ static void about(Out *o)
         "<H3>Credits</H3><UL>"
         "<LI>The drawing is by George A. Harker, from James Baldwin's <I>Stories of Don Quixote</I> (1910), "
         "now in the public domain."
-        "<LI>JPEG decoding by ChaN's <A HREF=\"mill://license#tjpgd\">TJpgDec</A>; GIF decoding is Mill's own."
+        "<LI>JPEG decoding by ChaN's <A HREF=\"mill://license#tjpgd\">TJpgDec</A>."
         "<LI>Built with Wolfgang Thaller's Retro68, including its "
         "<A HREF=\"mill://license#runtime\">runtime</A>, the <A HREF=\"mill://license#newlib\">newlib</A> "
         "C library, and <A HREF=\"mill://license#multiversal\">Multiversal Interfaces</A>."
@@ -645,6 +741,12 @@ static void config(Out *o, const char *body, long len)
             long n = atol(k);
             if (n < 0 || n > 4096 || (k[0] && (k[0] < '0' || k[0] > '9'))) snprintf(note, sizeof note, "Image memory must be from 0 to 4096 K.");
             else { sprintf(k, "%ld", n); put_setting("image_memory", 12, k, strlen(k)); }
+        }
+        if (form_value(body, len, "history", k, sizeof k)) {
+            long n = atol(k);
+            if (n < 1 || n > MILL_HISTORY_MAX || k[0] < '0' || k[0] > '9')
+                snprintf(note, sizeof note, "Pages kept for Back must be from 1 to %d.", MILL_HISTORY_MAX);
+            else { sprintf(k, "%ld", n); put_setting("history", 7, k, strlen(k)); }
         }
         /* a checkbox that isn't checked isn't sent */
         if (form_value(body, len, "load_images", k, sizeof k)) put_setting("load_images", 11, "yes", 3);
@@ -719,6 +821,11 @@ static void config(Out *o, const char *body, long len)
     sprintf(k, "%ld", image_memory_k());
     out_s(o, k);
     out_s(o, "\"> K<BR>Memory for caching images, much faster when images are reused between pages; 0 to turn off."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Pages kept for Back</B><TD><INPUT NAME=history SIZE=3 VALUE=\"");
+    sprintf(k, "%d", history_size());
+    out_s(o, k);
+    out_s(o, "\"><BR>Each window remembers this many pages, 1 to 32: their addresses and what was typed in their "
+             "forms, not the pages themselves."
              "<TR><TD VALIGN=TOP WIDTH=110><B>Load images automatically</B><TD><INPUT TYPE=checkbox NAME=load_images VALUE=yes");
     if (auto_images()) out_s(o, " CHECKED");
     out_s(o, "> When off, use the context menu to load individually."
@@ -787,7 +894,7 @@ static void config(Out *o, const char *body, long len)
 
 static void mill_request(const Url *u, const char *body, long len, Out *o)
 {
-    if (!strcmp(u->host, "about")) about(o);
+    if (!strcmp(u->host, "about")) about(o, strstr(u->path, "check=1") != NULL);
     else if (!strcmp(u->host, "config")) config(o, body, len);
     else if (!strcmp(u->host, "license")) text_page(o, 128, "mill://license");
     else if (!strcmp(u->host, "change-log")) text_page(o, 129, "mill://change-log");
@@ -813,16 +920,18 @@ int local_image(const char *url, Bitmap1 *bm)
     Handle h;
     short *head_words;
     long size;
-    if (strcmp(url, "mill://splash") || !(h = GetResource('SPLS', 128))) return -1;
+    if (strcmp(url, "mill://splash")) return -1;
+    if (!(h = GetResource('SPLS', 128))) return IMAGE_NO_MEMORY;  /* it's always there */
     HLock(h);
     head_words = (short *)*h;
     bm->w = head_words[0];
     bm->h = head_words[1];
     bm->row_bytes = head_words[2];
+    bm->mask = NULL;
     size = (long)bm->row_bytes * bm->h;
     bm->bits = malloc(size);
     if (bm->bits) memcpy(bm->bits, *h + 6, size);
     HUnlock(h);
     ReleaseResource(h);
-    return bm->bits ? 0 : -1;
+    return bm->bits ? 0 : IMAGE_NO_MEMORY;
 }

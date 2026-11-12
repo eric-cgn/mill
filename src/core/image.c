@@ -15,8 +15,10 @@ typedef struct {
     unsigned char *px;
     short w, h, sw, sh;
     short *xs, *ys;     /* source column/row -> first target column/row; sw+1 and sh+1 long */
+    unsigned char *mask;    /* a Bitmap1 mask at the target size, or NULL; see put_mask */
 } Gray;
 
+/* 0, -1 for a size Mill won't make, or IMAGE_NO_MEMORY */
 static int gray_init(Gray *g, short w, short h, short sw, short sh)
 {
     long i;
@@ -26,7 +28,7 @@ static int gray_init(Gray *g, short w, short h, short sw, short sh)
     g->px = malloc((long)w * h);
     g->xs = malloc((sw + 1) * sizeof(short));
     g->ys = malloc((sh + 1) * sizeof(short));
-    if (!g->px || !g->xs || !g->ys) return -1;
+    if (!g->px || !g->xs || !g->ys) return IMAGE_NO_MEMORY;
     memset(g->px, 255, (long)w * h);
     for (i = 0; i <= sw; i++) g->xs[i] = (short)((i * w * 2 + sw) / (2L * sw) > w ? w : (i * w * 2 + sw) / (2L * sw));
     for (i = 0; i <= sh; i++) g->ys[i] = (short)((i * h * 2 + sh) / (2L * sh) > h ? h : (i * h * 2 + sh) / (2L * sh));
@@ -37,7 +39,43 @@ static int gray_init(Gray *g, short w, short h, short sw, short sh)
 
 static void gray_free(Gray *g)
 {
-    free(g->px); free(g->xs); free(g->ys);
+    free(g->px); free(g->xs); free(g->ys); free(g->mask);
+}
+
+static short row_bytes(short w) { return (short)((w + 15) / 16 * 2); }
+
+/* Start a mask, covering nothing: a GIF's frame may not fill its whole picture */
+static int mask_init(Gray *g)
+{
+    g->mask = calloc((long)row_bytes(g->w) * g->h, 1);
+    return g->mask ? 0 : -1;
+}
+
+/* Mark the target pixels of source pixel (sx, sy) covered, as put fills them */
+static void put_mask(Gray *g, long sx, long sy)
+{
+    short x, y, rb = row_bytes(g->w);
+    if (sx < 0 || sy < 0 || sx >= g->sw || sy >= g->sh) return;
+    for (y = g->ys[sy]; y < g->ys[sy + 1]; y++)
+        for (x = g->xs[sx]; x < g->xs[sx + 1]; x++) g->mask[(long)y * rb + (x >> 3)] |= 0x80 >> (x & 7);
+}
+
+/* Hand g's mask to out, with out's bits cleared where it's 0; none if it covers it all */
+static void take_mask(Gray *g, Bitmap1 *out)
+{
+    long i, n = (long)out->row_bytes * out->h, all = 1;
+    short x, y;
+    if (!g->mask) return;
+    /* the padding at the end of each row counts as covered, so a full mask is all ones */
+    for (y = 0; y < out->h; y++)
+        for (x = out->w; x < out->row_bytes * 8; x++) g->mask[(long)y * out->row_bytes + (x >> 3)] |= 0x80 >> (x & 7);
+    for (i = 0; i < n; i++) {
+        out->bits[i] &= g->mask[i];
+        if (g->mask[i] != 0xFF) all = 0;
+    }
+    if (all) return;
+    out->mask = g->mask;
+    g->mask = NULL;
 }
 
 static void put(Gray *g, long sx, long sy, unsigned char v)
@@ -75,9 +113,9 @@ static int dither(const Gray *g, Bitmap1 *out)
     short *e0, *e1, *e2, *t;
     out->w = w;
     out->h = h;
-    out->row_bytes = (short)((w + 15) / 16 * 2);
+    out->row_bytes = row_bytes(w);
     out->bits = calloc((long)out->row_bytes * h, 1);
-    if (!rows || !out->bits) { free(rows); free(out->bits); out->bits = NULL; return -1; }
+    if (!rows || !out->bits) { free(rows); free(out->bits); out->bits = NULL; return IMAGE_NO_MEMORY; }
     e0 = rows + 1; e1 = e0 + w + 3; e2 = e1 + w + 3;
     for (y = 0; y < h; y++) {
         const unsigned char *src = g->px + (long)y * w;
@@ -169,7 +207,8 @@ static int gif_decode(const unsigned char *d, long len, short w, short h, Bitmap
         global = d + 13;
         p += 3L * global_n;
     }
-    if (gray_init(&g, w, h, sw, sh)) { gray_free(&g); return -1; }
+    if ((result = gray_init(&g, w, h, sw, sh)) != 0) { gray_free(&g); return result; }
+    result = -1;
 
     while (p < len) {
         if (d[p] == 0x21 && p + 1 < len) {
@@ -193,8 +232,10 @@ static int gif_decode(const unsigned char *d, long len, short w, short h, Bitmap
                 if (pal && k < pal_n) lum[k] = (unsigned char)((pal[3 * k] * 77 + pal[3 * k + 1] * 151 + pal[3 * k + 2] * 28) >> 8);
                 else lum[k] = 0;
             }
+            /* the transparent color dithers as white, and is left out of the mask */
             if (transparent >= 0) lum[transparent] = 255;
-            if (!prefix || !suffix || !stack || p >= len) goto gif_done;
+            if (!prefix || !suffix || !stack || (transparent >= 0 && mask_init(&g))) { result = IMAGE_NO_MEMORY; goto gif_done; }
+            if (p >= len) goto gif_done;
             min = d[p++];
             if (min < 2 || min > 8) goto gif_done;
             clear = 1 << min; eoi = clear + 1;
@@ -227,7 +268,9 @@ static int gif_decode(const unsigned char *d, long len, short w, short h, Bitmap
                     old = in;
                 }
                 while (sp > 0) {
-                    put(&g, left + x, top + y, lum[stack[--sp]]);
+                    k = stack[--sp];
+                    put(&g, left + x, top + y, lum[k]);
+                    if (g.mask && k != transparent) put_mask(&g, left + x, top + y);
                     if (++x == fw) {
                         x = 0;
                         if (!interlaced) y++;
@@ -240,7 +283,7 @@ static int gif_decode(const unsigned char *d, long len, short w, short h, Bitmap
                 if (y >= fh) break;
                 if (report(pr, r.pos)) goto gif_done;
             }
-            result = dither(&g, out);
+            if ((result = dither(&g, out)) == 0) take_mask(&g, out);
         gif_done:
             free(prefix); free(suffix); free(stack);
             break;
@@ -289,10 +332,12 @@ static int jpeg_decode(const unsigned char *d, long len, short w, short h, Bitma
     int scale = 0, result = -1;
     memset(&g, 0, sizeof g);
     s.d = d; s.len = len; s.pos = 0; s.g = &g; s.pr = pr;
-    if (!pool || jd_prepare(&jd, jpeg_in, pool, 4096, &s) != JDR_OK) goto done;
+    if (!pool) return IMAGE_NO_MEMORY;
+    if (jd_prepare(&jd, jpeg_in, pool, 4096, &s) != JDR_OK) goto done;
     /* let the decoder shrink by 2, 4 or 8 while the result is still at least the target */
     while (scale < 3 && (jd.width >> (scale + 1)) >= w && (jd.height >> (scale + 1)) >= h) scale++;
-    if (gray_init(&g, w, h, (short)((jd.width + (1 << scale) - 1) >> scale), (short)((jd.height + (1 << scale) - 1) >> scale))) goto done;
+    if ((result = gray_init(&g, w, h, (short)((jd.width + (1 << scale) - 1) >> scale), (short)((jd.height + (1 << scale) - 1) >> scale))) != 0) goto done;
+    result = -1;
     if (jd_decomp(&jd, jpeg_out, (uint8_t)scale) != JDR_OK) goto done;
     levels(&g);
     result = dither(&g, out);
@@ -344,5 +389,6 @@ int image_decode(const unsigned char *d, long len, short w, short h, Bitmap1 *ou
 void image_free(Bitmap1 *b)
 {
     free(b->bits);
-    b->bits = NULL;
+    free(b->mask);
+    b->bits = b->mask = NULL;
 }

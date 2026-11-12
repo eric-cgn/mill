@@ -32,13 +32,14 @@ enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the s
 #define STATUS_SECS 5   /* a message shows this long once Mill is idle */
 #define SCROLL 16
 #define MAX_PAGE (192L * 1024)
-#define PAGE_K "192"
+#define MIN_PAGE (24L * 1024)   /* when memory's short, pages are cut shorter, down to this */
 #define MAX_UPLOAD (256L * 1024)
-#define HISTORY 32
+#define HISTORY MILL_HISTORY_MAX    /* history_size() says how many are kept */
 #define FILE_MSG "Web pages can't open this Mac's files or Mill's own pages. Type the address to go there."
 #define FORM_MSG "Forms can only send to the same kind of address as their page."
 #define ALERT_MEMORY 202
 #define ALERT_UNSENT 203
+#define ALERT_NO_MEMORY 204
 enum { UNSENT_STAY = 1, UNSENT_LEAVE };
 
 /* One per distinct picture on the page (the same SRC at the same size is fetched once) */
@@ -74,8 +75,9 @@ typedef struct Browser {
     short page_w;               /* how wide the laid-out page is */
     short scroll_scale;         /* page pixels per scroll bar unit (control values are 16-bit) */
     char page_url[300];
-    char *history[HISTORY];
+    char *history[HISTORY];     /* see remember */
     short hist_len, hist_pos;
+    char *form_base;            /* form state brought back that had been sent, or NULL */
     Pic *pics;
     short npics;
     short *pic_of;              /* IMG node -> index in pics + 1, or 0 */
@@ -105,21 +107,38 @@ static void geometry(void)
     SetRect(&br->view_r, 0, BAR + 1, r.right - SCROLL + 1, r.bottom - (br->hbar ? SCROLL - 1 : 0));
 }
 
-/* Drawing limited to r, within the page view; returns the clip to put back */
-static RgnHandle clip_to(const Rect *r)
+/* The clip as it is, to put back with unclip. NULL if there wasn't the memory for a
+   region (drawing on a NULL region would write over low memory); unclip then sets the
+   clip to the whole window. */
+static RgnHandle keep_clip(void)
 {
     RgnHandle save = NewRgn();
-    Rect c;
-    GetClip(save);
-    SectRect(r, &br->view_r, &c);
-    ClipRect(&c);
+    if (save) GetClip(save);
     return save;
 }
 
 static void unclip(RgnHandle save)
 {
+    if (!save) { ClipRect(&qd.thePort->portRect); return; }
     SetClip(save);
     DisposeRgn(save);
+}
+
+/* The watch, while Mill is busy */
+static void watch_cursor(void)
+{
+    CursHandle c = GetCursor(watchCursor);
+    if (c) SetCursor(*c);
+}
+
+/* Drawing limited to r, within the page view; returns the clip to put back */
+static RgnHandle clip_to(const Rect *r)
+{
+    RgnHandle save = keep_clip();
+    Rect c;
+    SectRect(r, &br->view_r, &c);
+    ClipRect(&c);
+    return save;
 }
 
 /* ------------------------------------------------------------ icons */
@@ -317,7 +336,7 @@ static Kept *kept;
 static short nkept;
 static long kept_bytes, page_number;
 
-static long bitmap_bytes(const Bitmap1 *b) { return (long)b->row_bytes * b->h; }
+static long bitmap_bytes(const Bitmap1 *b) { return (long)b->row_bytes * b->h * (b->mask ? 2 : 1); }
 
 static Kept *kept_find(const char *url, short aw, short ah)
 {
@@ -341,6 +360,14 @@ static Boolean kept_trim(long need, long limit)
         kept[oldest] = kept[--nkept];
     }
     return true;
+}
+
+/* Let go of every kept picture no window is showing; whether any went */
+static Boolean kept_release(void)
+{
+    long was = kept_bytes;
+    kept_trim(0, 0);
+    return kept_bytes < was;
 }
 
 /* Keep a picture; on success the memory owns its bits */
@@ -402,12 +429,13 @@ static int kind_of(const char *url)
     return s == SCHEME_HTTPS ? SCHEME_HTTP : s;
 }
 
-static void pics_collect(void)
+/* The page's pictures, and which IMG shows which; false if memory ran out */
+static Boolean pics_collect(void)
 {
     long i;
     int kind = kind_of(br->page_url);
     br->pic_of = calloc(br->doc.nnodes, sizeof(short));
-    if (!br->pic_of) return;
+    if (!br->pic_of) return false;
     for (i = 0; i < br->doc.nnodes; i++) {
         const Node *n = &br->doc.nodes[i];
         const char *src;
@@ -421,11 +449,11 @@ static void pics_collect(void)
         for (k = 0; k < br->npics; k++) if (br->pics[k].aw == aw && br->pics[k].ah == ah && !strcmp(br->pics[k].url, url)) break;
         if (k == br->npics) {
             Kept *keep;
-            if (!(p = realloc(br->pics, (br->npics + 1) * sizeof(Pic)))) break;
+            if (!(p = realloc(br->pics, (br->npics + 1) * sizeof(Pic)))) return false;
             br->pics = p;
             p = &br->pics[br->npics];
             memset(p, 0, sizeof *p);
-            if (!(p->url = malloc(strlen(url) + 1))) break;
+            if (!(p->url = malloc(strlen(url) + 1))) return false;
             strcpy(p->url, url);
             p->aw = aw;
             p->ah = ah;
@@ -440,6 +468,7 @@ static void pics_collect(void)
         }
         br->pic_of[i] = k + 1;
     }
+    return true;
 }
 
 static int qd_image_size(void *ctx, long node, short *w, short *h)
@@ -773,10 +802,19 @@ static void draw_picture(const Run *r, short top)
     }
     if (p && p->state == PIC_SHOWN) {
         BitMap bm;
-        bm.baseAddr = (Ptr)p->bm.bits;
         bm.rowBytes = p->bm.row_bytes;
         SetRect(&bm.bounds, 0, 0, p->bm.w, p->bm.h);
-        CopyBits(&bm, &qd.thePort->portBits, &bm.bounds, &in, srcCopy, NULL);
+        if (p->bm.mask) {
+            /* transparent parts: clear where the picture covers, then add its black,
+               so the page (a dark cell too) shows through the rest */
+            bm.baseAddr = (Ptr)p->bm.mask;
+            CopyBits(&bm, &qd.thePort->portBits, &bm.bounds, &in, srcBic, NULL);
+            bm.baseAddr = (Ptr)p->bm.bits;
+            CopyBits(&bm, &qd.thePort->portBits, &bm.bounds, &in, srcOr, NULL);
+        } else {
+            bm.baseAddr = (Ptr)p->bm.bits;
+            CopyBits(&bm, &qd.thePort->portBits, &bm.bounds, &in, srcCopy, NULL);
+        }
     } else {
         /* not here (yet): a gray frame, the image icon, and the ALT text if they fit */
         const char *alt = html_attr(&br->doc, &br->doc.nodes[r->text], "alt");
@@ -803,16 +841,46 @@ static void draw_picture(const Run *r, short top)
     }
 }
 
+/* Where pics[which] shows in the view, all its places together; false if nowhere */
+static Boolean pic_area(short which, Rect *area)
+{
+    long i, k, top = br->scroll_y, bottom = br->scroll_y + (br->view_r.bottom - br->view_r.top);
+    Boolean any = false;
+    SetRect(area, 0, 0, 0, 0);
+    for (i = layout_line_at(&br->lay, top); i < br->lay.nlines && br->lay.lines[i].y < bottom; i++) {
+        const MLine *ln = &br->lay.lines[i];
+        short base = br->view_r.top + (short)(ln->y - br->scroll_y) + ln->ascent;
+        for (k = ln->first; k < ln->first + ln->count; k++) {
+            const Run *r = &br->lay.runs[k];
+            Rect box;
+            if (r->kind != RUN_IMAGE || !br->pic_of || br->pic_of[r->text] != which + 1) continue;
+            SetRect(&box, PAGE_LEFT + r->x, base - r->font, PAGE_LEFT + r->x + r->width, base - r->font + r->size);
+            if (any) UnionRect(area, &box, area);
+            else *area = box;
+            any = true;
+        }
+    }
+    return any;
+}
+
 /* Draw the page's visible part; with only >= 0, just the runs showing that picture */
 static void draw_page(short only)
 {
     long i, top = br->scroll_y, bottom = br->scroll_y + (br->view_r.bottom - br->view_r.top);
-    RgnHandle save = NewRgn();
-    Rect area = br->view_r;
+    RgnHandle save;
+    Rect area = br->view_r, under;
+    Boolean part = page_limited;
     if (page_limited) SectRect(&br->view_r, &page_limit, &area);
-    GetClip(save);
+    if (only >= 0 && br->have_page && br->pics[only].bm.mask) {
+        /* a picture the page shows through: the page under it is drawn again first,
+           over what stood in for it while it loaded */
+        if (!pic_area(only, &under) || !SectRect(&area, &under, &area)) return;
+        only = -1;
+        part = true;
+    }
+    save = keep_clip();
     ClipRect(&area);
-    if (only < 0) { EraseRect(&area); if (!page_limited) br->focus_shown = false; }
+    if (only < 0) { EraseRect(&area); if (!part) br->focus_shown = false; }
     if (br->have_page) {
         /* fills first, last to first so outer cells go under inner ones; then frames */
         for (i = br->lay.nboxes - 1; i >= 0 && only < 0; i--) {
@@ -863,8 +931,7 @@ static void draw_page(short only)
             }
         }
     }
-    SetClip(save);
-    DisposeRgn(save);
+    unclip(save);
     draw_status();  /* the message stays over the page */
 }
 
@@ -940,28 +1007,43 @@ static void scroll_x_to(long x)
     draw_view();
 }
 
+/* While a page loads, Stop (or running out of memory) stops laying it out too; once
+   loading has stopped, what's there is laid out whole */
+static Boolean stop_asked(void);
+static Boolean stopped;     /* loading was stopped (see below) */
+static Boolean layout_stops;
+
 static int laying_out(void *ctx, int percent)
 {
     char msg[32];
     (void)ctx;
     sprintf(msg, "Laying out... %d%%", percent);
     set_status(msg);
-    return 0;
+    return layout_stops && stop_asked();
 }
 
-static void relayout(void)
+static Boolean make_room(void);
+
+/* Lay the page out again, for the window's width. Returns 0, -1 when memory ran out, or
+   -2 when stopped; either way the page shows as far as it got. */
+static int relayout(void)
 {
     long i;
     int err;
-    if (!br->have_page) return;
+    if (!br->have_page) return 0;
     layout_free(&br->lay);
     set_status("Laying out...");
     br->have_page = false;   /* nothing draws the layout while it's being made */
+    layout_stops = br->loading && !stopped;
     qd_m.progress = laying_out;
     err = layout_doc(&br->lay, &br->doc, &qd_m, br->view_r.right - br->view_r.left);
+    while (err == -1 && make_room()) {
+        /* room made: try again */
+        layout_free(&br->lay);
+        err = layout_doc(&br->lay, &br->doc, &qd_m, br->view_r.right - br->view_r.left);
+    }
     qd_m.progress = NULL;
     br->have_page = true;
-    if (err) set_status("Not enough memory for this page.");
     /* the page's width: its widest run or frame, and the margin to its right */
     br->page_w = 0;
     for (i = 0; i < br->lay.nruns; i++) if (br->lay.runs[i].x + br->lay.runs[i].width > br->page_w) br->page_w = br->lay.runs[i].x + br->lay.runs[i].width;
@@ -969,6 +1051,7 @@ static void relayout(void)
     br->page_w += 8;
     SetPort(br->win);
     fit_hbar();
+    return err;
 }
 
 /* Just the grow box: DrawGrowIcon also outlines a horizontal scroll bar that's often
@@ -976,14 +1059,12 @@ static void relayout(void)
 static void draw_grow(void)
 {
     Rect g = br->win->portRect;
-    RgnHandle save = NewRgn();
+    RgnHandle save = keep_clip();
     g.left = g.right - SCROLL + 1;
     g.top = g.bottom - SCROLL + 1;
-    GetClip(save);
     ClipRect(&g);
     DrawGrowIcon(br->win);
-    SetClip(save);
-    DisposeRgn(save);
+    unclip(save);
 }
 
 /* The whole window, now rather than at the next update event */
@@ -1266,7 +1347,8 @@ static void type_in_field(char c, EventRecord *ev)
 
 typedef struct {
     char *buf;
-    long len;           /* bytes received; only the first MAX_PAGE are kept in buf */
+    long size;          /* how much buf holds: MAX_PAGE, unless memory was short */
+    long len;           /* bytes received; only the first size are kept in buf */
     long total;         /* the whole response's size when the server says, else 0 */
     Boolean headed;     /* its headers have been looked at */
     int code;
@@ -1274,7 +1356,7 @@ typedef struct {
     char mime[64];
     const char *url;    /* what's being fetched */
     const Url *req;     /* the same, parsed: Set-Cookie headers are for its host and path */
-    Boolean cut;        /* longer than MAX_PAGE: only the start is kept */
+    Boolean cut;        /* longer than size: only the start is kept */
     Boolean may_save;   /* a page Mill can't show is saved */
     Boolean save_all;   /* saved whatever it is (Save ... As) */
     Boolean have_spec;  /* where to save it is already chosen */
@@ -1286,12 +1368,106 @@ typedef struct {
 static void response_init(Response *r)
 {
     char *buf = r->buf;
+    long size = r->size;
     memset(r, 0, sizeof *r);
     r->buf = buf;
+    r->size = size;
+}
+
+static Boolean leaving;      /* a new page is loading, and the one shown can go */
+
+/* The pictures of the page being left go back to waiting, letting go of their bits
+   (or their hold on the picture memory's); whether any were showing */
+static Boolean pics_unshow(void)
+{
+    short i;
+    Boolean any = false;
+    for (i = 0; i < br->npics; i++) {
+        Pic *p = &br->pics[i];
+        Kept *k;
+        if (p->state != PIC_SHOWN) continue;
+        if (p->owned) image_free(&p->bm);
+        else if ((k = kept_find(p->url, p->aw, p->ah))) k->users--;
+        memset(&p->bm, 0, sizeof p->bm);
+        p->owned = false;
+        p->state = PIC_WAITING;
+        any = true;
+    }
+    return any;
+}
+
+/* Memory is short: let go of kept pictures no window shows; then, while a new page
+   loads, the pictures of the page being left, and then that page itself (Back loads it
+   again). The person asked to go somewhere else, so the new page comes first. True if
+   anything went, so it's worth trying again. */
+static Boolean make_room(void)
+{
+    GrafPtr old;
+    if (kept_release()) return true;
+    if (!leaving || !br->have_page) return false;
+    GetPort(&old);
+    SetPort(br->win);
+    if (pics_unshow()) kept_release();
+    else {
+        layout_free(&br->lay);
+        pics_free();
+        forms_free(&br->forms);
+        html_free(&br->doc);
+        free(br->form_base);
+        br->form_base = NULL;
+        br->have_page = false;
+        br->scroll_x = br->scroll_y = 0;
+        update_scroll();
+    }
+    InvalRect(&br->view_r);
+    SetPort(old);
+    return true;
+}
+
+/* Whether memory has run out, after making what room there is */
+static Boolean memory_short(void)
+{
+    while (mem_short()) if (!make_room()) return true;
+    return false;
+}
+
+/* A buffer to read into: MAX_PAGE, or when memory is short (even after making room)
+   half that and so on down to MIN_PAGE, so a page still loads, cut shorter. False if
+   there isn't even that. */
+static Boolean response_buffer(Response *r)
+{
+    long size = MAX_PAGE;
+    while (!(r->buf = malloc(size))) {
+        if (make_room()) continue;
+        if (size <= MIN_PAGE) break;
+        size /= 2;
+    }
+    r->size = r->buf ? size : 0;
+    return r->buf != NULL;
 }
 
 static char activity[40];   /* what's loading, ahead of the network's progress */
 static Boolean stopped;
+static Boolean ran_out;     /* memory ran out while loading, which stopped it */
+
+/* Out of memory: loading stops, as if the person had pressed Stop, and what's loaded
+   so far stays; out_of_memory_alert says so once it's over */
+static void out_of_memory(void)
+{
+    stopped = ran_out = true;
+}
+
+/* "Mill ran out of memory, so " and then what happened */
+static void out_of_memory_alert(const char *what)
+{
+    Str255 p;
+    p[0] = (unsigned char)strlen(what);
+    memcpy(p + 1, what, p[0]);
+    ParamText(p, "\p", "\p", "\p");
+    set_status("Out of memory.");
+    InitCursor();
+    StopAlert(ALERT_NO_MEMORY, NULL);
+}
 
 static void progress(const char *msg)
 {
@@ -1301,12 +1477,13 @@ static void progress(const char *msg)
 }
 
 /* Command-period or Escape (Clear, on the Plus's keypad) stops loading, and so does a
-   click on the stop sign */
+   click on the stop sign, and running out of memory */
 static Boolean stop_asked(void)
 {
     EventRecord e;
     /* other windows uncovered meanwhile are drawn; only this one loads */
     while (GetNextEvent(updateMask, &e)) update_window((WindowPtr)e.message);
+    if (!stopped && memory_short()) out_of_memory();
     if (!stopped && EventAvail(mDownMask, &e)) {
         WindowPtr w;
         if (FindWindow(e.where, &w) == inContent && w == br->win) {
@@ -1386,7 +1563,7 @@ static Boolean ask_where(const char *url, FSSpec *spec)
     memcpy(p + 1, name, p[0]);
     InitCursor();
     chosen = sys_choose_save("\pSave as:", p, spec);
-    SetCursor(*GetCursor(watchCursor));
+    watch_cursor();
     return chosen;
 }
 
@@ -1416,10 +1593,10 @@ static Boolean collect(const char *data, long len, void *ref)
         if (saver_write(&r->saver, data, len) != noErr) return false;
         r->len += len;
     } else {
-        if (r->len + len > MAX_PAGE) {
+        if (r->len + len > r->size) {
             /* too long to show whole: keep what fits */
-            memcpy(r->buf + r->len, data, MAX_PAGE - r->len);
-            r->len = MAX_PAGE;
+            memcpy(r->buf + r->len, data, r->size - r->len);
+            r->len = r->size;
             r->cut = true;
             return false;
         }
@@ -1469,19 +1646,59 @@ static void show_url(const char *url)
     InvalRect(&(*br->url_te)->viewRect);
 }
 
-static void remember(const char *url)
+/* A history entry is three strings, one after the other, and nothing else (no page,
+   layout, or pictures; Back loads the page again): the address; the page it came from
+   ("" for none), so Reload can say the same again; and what was typed in its forms when
+   it was left ("" for nothing), 'S' if that was sent or 'K' if not, then forms_save's
+   text. At most history_size() are kept, oldest going first. */
+static void remember(const char *url, const char *from)
 {
-    short i;
+    short i, keep = history_size();
+    char *e;
     if (br->hist_pos >= 0 && !strcmp(br->history[br->hist_pos], url)) return;
     for (i = br->hist_pos + 1; i < br->hist_len; i++) free(br->history[i]);
     br->hist_len = br->hist_pos + 1;
-    if (br->hist_len == HISTORY) {
+    while (br->hist_len >= keep) {
+        /* the oldest goes (and more, if the setting was made smaller) */
         free(br->history[0]);
-        memmove(br->history, br->history + 1, (HISTORY - 1) * sizeof(char *));
+        memmove(br->history, br->history + 1, (br->hist_len - 1) * sizeof(char *));
         br->hist_len--;
     }
-    br->history[br->hist_len] = malloc(strlen(url) + 1);
-    if (br->history[br->hist_len]) { strcpy(br->history[br->hist_len], url); br->hist_pos = br->hist_len++; }
+    br->hist_pos = br->hist_len - 1;
+    if (!(e = malloc(strlen(url) + strlen(from) + 3))) return;
+    strcpy(e, url);
+    strcpy(e + strlen(url) + 1, from);
+    e[strlen(url) + 1 + strlen(from) + 1] = 0;
+    br->history[br->hist_len] = e;
+    br->hist_pos = br->hist_len++;
+}
+
+/* A history entry's form state: "" for none */
+static const char *entry_forms(const char *e)
+{
+    e += strlen(e) + 1;
+    return e + strlen(e) + 1;
+}
+
+/* Keep what's typed in the page being left with its history entry, for Back and
+   Forward to bring back; sent says the form is being submitted */
+static void keep_form_state(Boolean sent)
+{
+    char *e, *state = NULL;
+    long head;
+    if (!br->have_page || br->hist_pos < 0 || strcmp(br->history[br->hist_pos], br->page_url)) return;
+    keep_typing();
+    if (br->forms.n) state = forms_save(&br->forms, &br->doc);
+    e = br->history[br->hist_pos];
+    head = entry_forms(e) - e;
+    if (!state && !e[head]) return;     /* nothing then, nothing now */
+    if (!(e = malloc(head + (state ? strlen(state) + 2 : 1)))) { free(state); return; }
+    memcpy(e, br->history[br->hist_pos], head);
+    if (state) { e[head] = sent ? 'S' : 'K'; strcpy(e + head + 1, state); }
+    else e[head] = 0;
+    free(state);
+    free(br->history[br->hist_pos]);
+    br->history[br->hist_pos] = e;
 }
 
 static int prefix_ci(const char *s, const char *p, long n)
@@ -1566,26 +1783,28 @@ static Boolean answer(const Url *u, const Challenge *ch, Cred *sent, char *login
     else snprintf(place, sizeof place, "%.80s", u->host);
     if (!login_ask(place, sent != NULL, user, sizeof user, pass, sizeof pass)) {
         if (sent) auth_forget(&keyring, sent);  /* they didn't work: don't send them again */
-        SetCursor(*GetCursor(watchCursor));
+        watch_cursor();
         return false;
     }
-    SetCursor(*GetCursor(watchCursor));
+    watch_cursor();
     auth_keep(&keyring, u->host, u->port, u->path, ch, user, pass);
     memset(pass, 0, sizeof pass);
     return true;
 }
 
-/* The extra header lines for an HTTP request: the User-Agent, cookies, and a name and
-   password kept for where it goes (which *sent says, or NULL) */
-static const char *request_headers(const Url *u, const char *method, Cred **sent)
+/* The extra header lines for an HTTP request: the User-Agent, the page it came from
+   (referer, or NULL), cookies, and a name and password kept for where it goes (which
+   *sent says, or NULL) */
+static const char *request_headers(const Url *u, const char *method, const char *referer, Cred **sent)
 {
-    static char headers[1900], value[600];
+    static char headers[2300], value[600];
     static unsigned long count;
     unsigned long now;
     int n = 0;
     ReadDateTime(&now);  /* the trap: GetDateTime is a low-memory read GCC flags */
     headers[0] = 0;
     if (user_agent()[0]) n = snprintf(headers, 160, "User-Agent: %.140s", user_agent());
+    if (referer) n += snprintf(headers + n, 320, "%sReferer: %.300s", n ? "\r\n" : "", referer);
     if (accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + n + (n ? 10 : 8), 1024) > 0) {
         memcpy(headers + n, n ? "\r\nCookie: " : "Cookie: ", n ? 10 : 8);
         n = strlen(headers);
@@ -1625,9 +1844,10 @@ static OSErr web_request(const Url *u, const char *headers, const char *content_
 
 /* Fetch a URL into resp (a POST when content_type is given), following up to five
    redirects of the same kind and answering a site's request for a name and password;
-   target becomes where it ended up, without any user:password@. Returns noErr, a MacTCP
+   target becomes where it ended up, without any user:password@. from is the page that
+   asked for it, sent as the Referer (redirects too), or NULL. Returns noErr, a MacTCP
    error, FETCH_BAD_URL, FETCH_CROSS, or FETCH_NO_TLS. */
-static OSErr fetch(char *target, const char *content_type, const char *body, long body_len,
+static OSErr fetch(char *target, const char *from, const char *content_type, const char *body, long body_len,
                    Response *resp, Url *u, Head *h)
 {
     int redirects = 0, answers = 0;
@@ -1655,7 +1875,9 @@ static OSErr fetch(char *target, const char *content_type, const char *body, lon
         resp->url = target;
         resp->req = u;
         if (url_is_web(u->scheme)) {
-            const char *headers = request_headers(u, content_type ? "POST" : "GET", &sent);
+            char referer[300];
+            Boolean refer = from && url_referer(from, target, referer, sizeof referer);
+            const char *headers = request_headers(u, content_type ? "POST" : "GET", refer ? referer : NULL, &sent);
             err = web_request(u, headers, content_type, body, body_len, resp);
         } else {
             err = local_request(u, content_type, body, body_len, collect, resp);
@@ -1692,22 +1914,27 @@ static int decoding(void *ref, int percent)
     return stop_asked();
 }
 
-static Boolean decode_image(Pic *p, Response *resp, long body)
+/* 0, -1 (not a picture Mill can show, or stopped), or IMAGE_NO_MEMORY */
+static int decode_image(Pic *p, Response *resp, long body)
 {
     short nw, nh, w, h;
     const unsigned char *data = (unsigned char *)resp->buf + body;
     long len = resp->len - body;
-    if (image_dims(data, len, &nw, &nh) || nw < 1 || nh < 1) return false;
+    int err;
+    if (image_dims(data, len, &nw, &nh) || nw < 1 || nh < 1) return -1;
     w = p->aw > 0 ? p->aw : p->ah > 0 ? (short)((long)nw * p->ah / nh) : nw;
     h = p->ah > 0 ? p->ah : p->aw > 0 ? (short)((long)nh * p->aw / nw) : nh;
-    if (!image_decode(data, len, w, h, &p->bm, decoding, NULL)) return true;
-    if (stopped) return false;
-    /* short of memory: let go of kept images this page isn't showing, and try again */
-    kept_trim(0, 0);
-    return !image_decode(data, len, w, h, &p->bm, decoding, NULL);
+    if ((err = image_decode(data, len, w, h, &p->bm, decoding, NULL)) != IMAGE_NO_MEMORY) return err;
+    /* short of memory: make room, and try again */
+    while (err == IMAGE_NO_MEMORY && make_room()) err = image_decode(data, len, w, h, &p->bm, decoding, NULL);
+    if (err == IMAGE_NO_MEMORY) out_of_memory();
+    return err;
 }
 
 #define IMAGES_AUTO (-1)    /* load_images: as the settings say */
+/* A page's pictures stop loading by themselves while this much is left, for laying the
+   page out again, dialogs, and menus; a picture asked for by itself may use it */
+#define PICTURE_ROOM (32L * 1024)
 
 static Boolean wanted(const Pic *p, short which, short i)
 {
@@ -1717,7 +1944,8 @@ static Boolean wanted(const Pic *p, short which, short i)
 }
 
 /* Fetch and show the page's images, one at a time, after its text: those the settings
-   say to (IMAGES_AUTO), or just pics[which] */
+   say to (IMAGES_AUTO), or just pics[which]. Each is read into a buffer of its own,
+   trimmed to fit before it's decoded and let go of after, so pictures have the most room. */
 static void load_images(Response *resp, short which)
 {
     short i, waiting = 0, n = 0;
@@ -1742,16 +1970,33 @@ static void load_images(Response *resp, short which)
         }
         if (waiting > 1) sprintf(activity, "Image %d of %d", ++n, waiting);
         else strcpy(activity, "Image");
+        if (which == IMAGES_AUTO) {
+            while (FreeMem() < PICTURE_ROOM && make_room()) {}
+            if (FreeMem() < PICTURE_ROOM) { out_of_memory(); break; }
+        }
         p->state = PIC_FAILED;
         if (!strncmp(p->url, "mill:", 5)) {
-            if (local_image(p->url, &p->bm)) continue;
+            int got;
+            while ((got = local_image(p->url, &p->bm)) == IMAGE_NO_MEMORY && make_room()) {}
+            if (got == IMAGE_NO_MEMORY) out_of_memory();
+            if (got) continue;
         } else {
+            OSErr err;
+            int got = -1;
+            if (!response_buffer(resp)) { out_of_memory(); p->state = PIC_WAITING; break; }
             strcpy(target, p->url);
-            if (fetch(target, NULL, NULL, 0, resp, &u, &h) != noErr || h.code >= 300) {
-                if (stopped) p->state = PIC_WAITING;
-                continue;
+            /* a picture alone on a page is that page: no page asked for it */
+            err = fetch(target, strcmp(p->url, br->page_url) ? br->page_url : NULL, NULL, NULL, 0, resp, &u, &h);
+            if (err == memFullErr) out_of_memory();
+            if (err == noErr && h.code < 300) {
+                char *fits = realloc(resp->buf, resp->len + 1);  /* shrinks where it is */
+                if (fits) resp->buf = fits;
+                got = decode_image(p, resp, h.body);
             }
-            if (!decode_image(p, resp, h.body)) {
+            free(resp->buf);
+            resp->buf = NULL;
+            if (got == IMAGE_NO_MEMORY) continue;  /* it shows as a picture that didn't load */
+            if (got) {
                 if (stopped) p->state = PIC_WAITING;  /* it can still be loaded */
                 continue;
             }
@@ -1763,7 +2008,7 @@ static void load_images(Response *resp, short which)
     }
     activity[0] = 0;
     if (resized) {
-        relayout();
+        if (relayout() == -1) out_of_memory();
         if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
         update_scroll();
         SetPort(br->win);
@@ -1812,33 +2057,98 @@ static char *pre_page(const char *title, const char *text, long n, long *len)
     return page;
 }
 
-static Boolean load(const char *url, Boolean record, const char *content_type, const char *body, long body_len)
+/* Open url in this window; from is the page that asked for it (a link, a form), or NULL */
+/* What went wrong with a request that failed on the network, as the status line says it */
+static void net_trouble(OSErr err, char *msg, int size)
+{
+    if (net_stage == NET_LOOKUP)
+        snprintf(msg, size, err == commandTimeout ? "Looking up %s took too long." : "Couldn't find %s.", asked);
+    else if (net_stage == NET_CONNECT)
+        snprintf(msg, size, "Couldn't connect to %s.", asked);
+    else
+        snprintf(msg, size, "The connection to %s failed (MacTCP error %d).", asked, err);
+}
+
+/* local_fetch (see mac_local.h), for Check for updates: a GET with no Referer, its status
+   line saying what it's for. Stop stops just this, so the page it's for still shows. */
+static long fetch_for_page(const char *url, char *buf, long size, char *why, int why_size)
+{
+    Response resp;
+    char target[300], was[40];
+    Url u;
+    Head h;
+    OSErr err;
+    long n = -1;
+    memset(&resp, 0, sizeof resp);
+    resp.size = size + 2048;    /* and its headers */
+    if (!(resp.buf = malloc(resp.size))) { snprintf(why, why_size, "Not enough memory."); return -1; }
+    strcpy(was, activity);
+    strcpy(activity, "Checking for updates");
+    set_status("Checking for updates\311");
+    snprintf(target, sizeof target, "%s", url);
+    err = fetch(target, NULL, NULL, NULL, 0, &resp, &u, &h);
+    if (err == memFullErr) out_of_memory();
+    if (stopped || err == userCanceledErr) snprintf(why, why_size, ran_out ? "Not enough memory." : "Stopped.");
+    else if (err == FETCH_BAD_URL || err == FETCH_CROSS) snprintf(why, why_size, "Its address isn't one Mill can open.");
+    else if (err == FETCH_NO_TLS) snprintf(why, why_size, "https:// needs a proxy, in Preferences.");
+    else if (err != noErr) net_trouble(err, why, why_size);
+    else if (h.code != 200) snprintf(why, why_size, "The server didn't send it (error %d).", h.code);
+    else if (resp.cut) snprintf(why, why_size, "Its answer was too long.");
+    else {
+        n = resp.len - h.body;
+        if (n > size) n = size;
+        memcpy(buf, resp.buf + h.body, n);
+    }
+    free(resp.buf);
+    strcpy(activity, was);
+    stopped = false;    /* the check stopped; the page goes on (running out is still said) */
+    return n;
+}
+
+static Boolean coming_back;     /* load: Back or Forward, so the page's forms come back too */
+static Boolean forms_kept;      /* load: the page being left has had its forms kept already */
+
+static Boolean load(const char *url, Boolean record, const char *from, const char *content_type, const char *body, long body_len)
 {
     /* view-source:address shows what address sends, as text */
     Boolean source = !strncmp(url, VIEW_SOURCE, strlen(VIEW_SOURCE));
     char shown_url[320];
-    char target[300];
+    char target[300], referrer[300];
     Response resp;
     Url u;
     Head h;
     OSErr err;
     Boolean shown = false, cut;
+    int parsed = -1;
+    long page_k;
+    Boolean back = coming_back;
 
+    coming_back = false;
     blur();
+    snprintf(referrer, sizeof referrer, "%s", from ? from : "");  /* from may be this window's page_url */
     strncpy(target, source ? url + strlen(VIEW_SOURCE) : url, sizeof target - 1);
     target[sizeof target - 1] = 0;
-    resp.buf = malloc(MAX_PAGE);
-    if (!resp.buf) { set_status("Not enough memory."); return false; }
+    /* (url and from may be in a history entry, which this replaces) */
+    if (!forms_kept) keep_form_state(false);
+    forms_kept = false;
+    stopped = ran_out = false;
+    leaving = true;     /* until the new page takes this one's place */
+    if (!response_buffer(&resp)) {
+        leaving = false;
+        InvalRect(&br->win->portRect);
+        out_of_memory_alert("it couldn't load this page.");
+        return false;
+    }
     response_init(&resp);
+    page_k = resp.size / 1024;
     resp.may_save = !source;
     set_loading(true);
-    stopped = false;
     activity[0] = 0;
     memset(&u, 0, sizeof u);
-    SetCursor(*GetCursor(watchCursor));
+    watch_cursor();
     snprintf(shown_url, sizeof shown_url, "%s%s", source ? VIEW_SOURCE : "", target);
     show_url(shown_url);
-    err = fetch(target, content_type, body, body_len, &resp, &u, &h);
+    err = fetch(target, referrer[0] ? referrer : NULL, content_type, body, body_len, &resp, &u, &h);
     snprintf(shown_url, sizeof shown_url, "%s%s", source ? VIEW_SOURCE : "", target);  /* where it ended up */
     if (resp.saving || resp.declined) {
         /* a file Mill can't show: saved, and the page stays */
@@ -1847,7 +2157,14 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
         goto done;
     }
     show_url(shown_url);
-    if (stopped || err == userCanceledErr) { set_status("Stopped."); goto done; }
+    if (err == memFullErr) out_of_memory();
+    if (stopped || err == userCanceledErr) {
+        /* the page being left stays; but if it went to make room, what came of the new
+           one shows instead */
+        if (br->have_page || !resp.headed || resp.code < 200 || resp.code >= 300) { set_status("Stopped."); goto done; }
+        split_response(resp.buf, resp.len, &h);
+        err = noErr;
+    }
     if (err == FETCH_NO_TLS) {
         /* https: without a proxy: a page that says so, at the address asked for */
         static const char no_tls[] = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n"
@@ -1861,18 +2178,21 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
     if (err == FETCH_CROSS) { set_status("Stopped at a redirect to another kind of address."); goto done; }
     if (err != noErr) {
         char msg[200];
-        if (net_stage == NET_LOOKUP)
-            snprintf(msg, sizeof msg, err == commandTimeout ? "Looking up %s took too long." : "Couldn't find %s.", asked);
-        else if (net_stage == NET_CONNECT)
-            snprintf(msg, sizeof msg, "Couldn't connect to %s.", asked);
-        else
-            snprintf(msg, sizeof msg, "The connection to %s failed (MacTCP error %d).", asked, err);
+        net_trouble(err, msg, sizeof msg);
         set_status(msg);
         goto done;
     }
 
     set_status("Formatting...");
+    {
+        /* the end of the buffer the page didn't use is room for the page itself */
+        char *fits = realloc(resp.buf, resp.len + 1);  /* shrinks where it is */
+        if (fits) resp.buf = fits;
+    }
     if (br->have_page) { layout_free(&br->lay); pics_free(); forms_free(&br->forms); html_free(&br->doc); br->have_page = false; }
+    free(br->form_base);
+    br->form_base = NULL;
+    leaving = false;    /* what's loading now is this page */
     page_number++;
     if (source || h.kind != BODY_HTML) {
         /* source and plain text show preformatted, and a picture by itself on a page */
@@ -1893,20 +2213,38 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
             page = pre_page("", text, n, &len);
         }
         if (page) {
-            br->have_page = html_parse_charset(&br->doc, page, len, cs) == 0;
+            parsed = html_parse_charset(&br->doc, page, len, cs);
             free(page);
         }
     } else {
-        br->have_page = html_parse_charset(&br->doc, resp.buf + h.body, resp.len - h.body, h.charset) == 0;
+        parsed = html_parse_charset(&br->doc, resp.buf + h.body, resp.len - h.body, h.charset);
+        while (parsed && make_room()) {
+            /* room made: try again */
+            html_free(&br->doc);
+            parsed = html_parse_charset(&br->doc, resp.buf + h.body, resp.len - h.body, h.charset);
+        }
     }
-    if (br->have_page && forms_build(&br->forms, &br->doc)) forms_free(&br->forms);
-    if (!br->have_page) { set_status("Not enough memory for this page."); goto done; }
+    /* the source is in the page now; pictures get buffers of their own */
+    free(resp.buf);
+    resp.buf = NULL;
+    if (parsed) out_of_memory();
+    /* out of memory partway, the page is what was read so far */
+    br->have_page = br->doc.nnodes > 0;
+    if (!br->have_page) { html_free(&br->doc); set_status("Stopped."); goto done; }
+    if (forms_build(&br->forms, &br->doc)) { forms_free(&br->forms); out_of_memory(); }
+    else if (back && br->forms.n && br->hist_pos >= 0 && *entry_forms(br->history[br->hist_pos])) {
+        /* back to a page left with things typed in it: they come back. If they'd been
+           sent, they aren't changes to warn about until something else is changed. */
+        const char *state = entry_forms(br->history[br->hist_pos]);
+        forms_restore(&br->forms, &br->doc, state + 1);
+        if (state[0] == 'S') br->form_base = forms_save(&br->forms, &br->doc);
+    }
     strcpy(br->page_url, shown_url);
-    if (record) remember(shown_url);
+    if (record) remember(shown_url, referrer);
     set_title(br->doc.title[0] ? br->doc.title : shown_url);
-    pics_collect();
+    if (!pics_collect()) out_of_memory();
     br->scroll_x = 0;
-    relayout();
+    if (relayout() == -1) out_of_memory();
     br->scroll_y = 0;
     if (u.fragment[0]) {
         long i;
@@ -1919,14 +2257,19 @@ static Boolean load(const char *url, Boolean record, const char *content_type, c
     cut = resp.cut;
     response_init(&resp);   /* images are never saved */
     load_images(&resp, IMAGES_AUTO);
-    if (!stopped) set_status(h.code >= 400 ? "The server sent an error page." :
-                             cut ? "Showed the first " PAGE_K "K of this page." : "Done.");
+    if (!stopped) {
+        char msg[48];
+        sprintf(msg, "Showed the first %ldK of this page.", page_k);
+        set_status(h.code >= 400 ? "The server sent an error page." : cut ? msg : "Done.");
+    }
     shown = true;
 done:
+    leaving = false;
     free(resp.buf);
     set_loading(false);
     InitCursor();
     InvalRect(&br->win->portRect);
+    if (ran_out) out_of_memory_alert("it stopped loading this page.");
     return shown;
 }
 
@@ -1938,6 +2281,13 @@ static Boolean may_leave(const char *what)
     if (!br || !br->have_page || !br->forms.n) return true;
     keep_typing();
     if (!forms_changed(&br->forms, &br->doc)) return true;
+    if (br->form_base) {
+        /* brought back by Back as it was sent, and not changed since */
+        char *now = forms_save(&br->forms, &br->doc);
+        Boolean same = now && !strcmp(now, br->form_base);
+        free(now);
+        if (same) return true;
+    }
     p[0] = (unsigned char)strlen(what);
     memcpy(p + 1, what, p[0]);
     ParamText(p, "\p", "\p", "\p");
@@ -1946,11 +2296,11 @@ static Boolean may_leave(const char *what)
 }
 
 /* What you type, choose from a menu, or go back to opens anything; pages can't reach
-   across kinds of address */
-static Boolean go(const char *url, Boolean record)
+   across kinds of address. from is the page a link was on, or NULL. */
+static Boolean go(const char *url, Boolean record, const char *from)
 {
     if (!may_leave("Leave this page?")) return false;
-    return load(url, record, NULL, NULL, 0);
+    return load(url, record, from, NULL, NULL, 0);
 }
 
 static Boolean same_kind(const char *url)
@@ -1979,24 +2329,32 @@ static void go_typed(void)
         memmove(url + 7, url, n + 1);
         memcpy(url, "http://", 7);
     }
-    go(url, true);
+    go(url, true, NULL);
 }
 
 static void go_history(short delta)
 {
     if (br->hist_pos + delta < 0 || br->hist_pos + delta >= br->hist_len || !may_leave("Leave this page?")) return;
+    keep_form_state(false);     /* while hist_pos is still this page's */
+    forms_kept = true;
     br->hist_pos += delta;
-    load(br->history[br->hist_pos], false, NULL, NULL, 0);
+    coming_back = true;
+    /* always a GET: a page that came from a POST is asked for again without its body */
+    load(br->history[br->hist_pos], false, NULL, NULL, NULL, 0);
 }
 
+/* Reload sends the Referer the page first had; Back and Forward send none */
 static void reload(void)
 {
-    if (br->hist_pos >= 0) go(br->history[br->hist_pos], false);
+    const char *h;
+    if (br->hist_pos < 0) return;
+    h = br->history[br->hist_pos];
+    go(h, false, h + strlen(h) + 1);
 }
 
 static void go_home(void)
 {
-    go(setting("homepage", MILL_DEFAULT_HOME), true);
+    go(setting("homepage", MILL_DEFAULT_HOME), true, NULL);
 }
 
 /* Fetch one image a page opened without */
@@ -2004,21 +2362,23 @@ static void load_image(short which)
 {
     Response resp;
     if (!br->have_page || br->loading) return;
-    if (!(resp.buf = malloc(MAX_PAGE))) { set_status("Not enough memory."); return; }
+    resp.buf = NULL;    /* load_images makes its own */
+    resp.size = 0;
     response_init(&resp);
     blur();
     set_loading(true);
-    stopped = false;
-    SetCursor(*GetCursor(watchCursor));
+    stopped = ran_out = false;
+    watch_cursor();
     load_images(&resp, which);
     if (!stopped) set_status(br->pics[which].state == PIC_SHOWN ? "Done." : "Mill couldn't load that image.");
-    free(resp.buf);
     set_loading(false);
     InitCursor();
+    if (ran_out) out_of_memory_alert("it couldn't load that image.");
 }
 
-/* Save Image, Link, or Page Source As: fetch url into a file, whatever it is */
-static void save_url(const char *url)
+/* Save Image, Link, or Page Source As: fetch url into a file, whatever it is; from is
+   the page it's on (the Referer), or NULL */
+static void save_url(const char *url, const char *from)
 {
     Response resp;
     char target[300];
@@ -2026,7 +2386,8 @@ static void save_url(const char *url)
     Head h;
     OSErr err;
     if (br->loading) return;
-    if (!(resp.buf = malloc(MAX_PAGE))) { set_status("Not enough memory."); return; }
+    stopped = ran_out = false;
+    if (!response_buffer(&resp)) { out_of_memory_alert("it couldn't save that."); return; }
     response_init(&resp);
     if (!ask_where(url, &resp.spec)) { free(resp.buf); InitCursor(); return; }
     resp.have_spec = resp.save_all = true;
@@ -2034,9 +2395,10 @@ static void save_url(const char *url)
     set_loading(true);
     stopped = false;
     activity[0] = 0;
-    SetCursor(*GetCursor(watchCursor));
+    watch_cursor();
     snprintf(target, sizeof target, "%s", url);
-    err = fetch(target, NULL, NULL, 0, &resp, &u, &h);
+    err = fetch(target, from, NULL, NULL, 0, &resp, &u, &h);
+    if (err == memFullErr) out_of_memory();
     if (resp.saving) finish_save(&resp, err);
     else if (stopped) set_status("Stopped.");
     else if (err == noErr && h.code >= 300) set_status("The server didn't send it.");
@@ -2044,6 +2406,7 @@ static void save_url(const char *url)
     free(resp.buf);
     set_loading(false);
     InitCursor();
+    if (ran_out) out_of_memory_alert("it couldn't save that.");
 }
 
 static long read_upload(void *ctx, const char *path, char **data)
@@ -2059,7 +2422,7 @@ static void submit(long form, long by, short x, short y)
     char target[300], content_type[80];
     char *q;
     blur();
-    if (forms_submit(&br->forms, &br->doc, form, by, x, y, read_upload, NULL, &s)) { set_status("Not enough memory to send the form."); return; }
+    if (forms_submit(&br->forms, &br->doc, form, by, x, y, read_upload, NULL, &s)) { out_of_memory_alert("it couldn't send the form."); return; }
     if (url_resolve(br->page_url, s.action[0] ? s.action : br->page_url, target, sizeof target)) {
         set_status("Mill can't send this form to that address.");
     } else if (!same_kind(target)) {
@@ -2069,11 +2432,19 @@ static void submit(long form, long by, short x, short y)
         if (s.post) {
             if (s.multipart) sprintf(content_type, "multipart/form-data; boundary=%s", s.boundary);
             else strcpy(content_type, "application/x-www-form-urlencoded");
-            load(target, true, content_type, s.data, s.len);
+            keep_form_state(true);
+            forms_kept = true;
+            load(target, true, br->page_url, content_type, s.data, s.len);
         } else {
             if ((q = strchr(target, '?'))) *q = 0;
             if (strlen(target) + s.len + 2 > sizeof target) set_status("This form's data is too long for an address.");
-            else { strcat(target, "?"); strcat(target, s.data); load(target, true, NULL, NULL, 0); }
+            else {
+                strcat(target, "?");
+                strcat(target, s.data);
+                keep_form_state(true);
+                forms_kept = true;
+                load(target, true, br->page_url, NULL, NULL, 0);
+            }
         }
     }
     submission_free(&s);
@@ -2118,7 +2489,7 @@ static void follow(const Run *r)
         return;
     }
     if (!may_follow(target)) { set_status(FILE_MSG); return; }
-    go(target, true);
+    go(target, true, br->page_url);
 }
 
 /* A run's box in the window */
@@ -2164,7 +2535,7 @@ static int map_target(Point p, const Run *r, char *out, int size)
 static void go_map(const char *target)
 {
     if (!may_follow(target)) set_status(FILE_MSG);
-    else go(target, true);
+    else go(target, true, br->page_url);
 }
 
 enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE };
@@ -2215,23 +2586,27 @@ static void context_menu(Point p, const Run *r)
         load_image(pic);
         break;
     case CM_VIEW_IMAGE:
-        go(br->pics[pic].url, true);  /* on a page of its own */
+        go(br->pics[pic].url, true, br->page_url);  /* on a page of its own */
         break;
     case CM_SAVE_IMAGE:
-        save_url(br->pics[pic].url);
+        save_url(br->pics[pic].url, br->page_url);
         break;
     case CM_NEW_WINDOW: case CM_SAVE_LINK:
         if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill opens http:, file:, and mill: addresses.");
         else if (!may_follow(target)) set_status(FILE_MSG);
-        else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target);
-        else if (new_browser((WindowPtr)-1)) go(target, true);
+        else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target, br->page_url);
+        else {
+            char from[300];
+            strcpy(from, br->page_url);     /* the new window becomes br */
+            if (new_browser((WindowPtr)-1)) go(target, true, from);
+        }
         break;
     case CM_VIEW_SOURCE:
         snprintf(target, sizeof target, "%s%s", VIEW_SOURCE, page);
-        go(target, true);
+        go(target, true, NULL);
         break;
     case CM_SAVE_SOURCE:
-        save_url(page);
+        save_url(page, NULL);
         break;
     }
 }
@@ -2431,7 +2806,7 @@ static void open_file(void)
     char url[400];
     if (!sys_choose_file(&spec)) return;
     spec_to_url(&spec, url, sizeof url);
-    if (need()) go(url, true);
+    if (need()) go(url, true, NULL);
 }
 
 /* ------------------------------------------------------------ printing */
@@ -2631,7 +3006,7 @@ static void print_page(void)
     print_win = NewWindow(NULL, &r, "\p", true, dBoxProc, (WindowPtr)-1, false, 0);
     set_loading(true);   /* the stop sign stops printing too */
     stopped = false;
-    SetCursor(*GetCursor(watchCursor));
+    watch_cursor();
 
     /* laid out with the screen's fonts, as the Mac's printer drivers expect */
     SetPort(br->win);
@@ -2887,7 +3262,7 @@ static void bookmark_dialog(short slot)
 static void open_bookmark(short n)
 {
     char url[300], title[100];
-    if (bookmark(n, url, sizeof url, title, sizeof title) && need()) go(url, true);
+    if (bookmark(n, url, sizeof url, title, sizeof title) && need()) go(url, true, NULL);
 }
 
 /* The menus as they are now: the bookmark slots, and what needs a window */
@@ -2954,7 +3329,7 @@ static void do_menu(long choice)
     if (menu == MENU_EDIT && item <= EDIT_PASTE && SystemEdit(item - 1)) { HiliteMenu(0); return; }  /* a desk accessory's */
     if (menu == MENU_APPLE) {
         if (item == 1) {
-            if (need()) go("mill://about", true);
+            if (need()) go("mill://about", true, NULL);
         } else {
             Str255 name;
             GetMenuItemText(GetMenuHandle(MENU_APPLE), item, name);
@@ -2972,7 +3347,7 @@ static void do_menu(long choice)
         if (item == FILE_PRINT && br) print_page();
         if (item == FILE_QUIT) quitting = may_quit();
     } else if (menu == MENU_EDIT) {
-        if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true); }
+        if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true, NULL); }
         else if (br) {
             if (item == EDIT_CUT) TECut(typing_te());
             if (item == EDIT_COPY) TECopy(typing_te());
@@ -2980,7 +3355,7 @@ static void do_menu(long choice)
         }
     } else if (menu == MENU_BOOKMARKS) {
         if (item == BM_ADD) { if (br) bookmark_dialog(-1); }
-        else if (item == BM_EDIT) { if (need()) go("mill://config#bookmarks", true); }
+        else if (item == BM_EDIT) { if (need()) go("mill://config#bookmarks", true, NULL); }
         else if (item >= BM_FIRST && item < BM_FIRST + BOOKMARKS) open_bookmark(item - BM_FIRST);
     } else if (menu == MENU_GO) {
         if (item == GO_HOME) { if (need()) go_home(); }
@@ -3003,7 +3378,10 @@ static void resized(void)
     MoveControl(br->vscroll, br->win->portRect.right - SCROLL + 1, BAR);
     SizeControl(br->vscroll, SCROLL, br->win->portRect.bottom - BAR - SCROLL + 2);
     place_hbar();
-    relayout();
+    if (relayout() == -1) {
+        InvalRect(&br->win->portRect);
+        out_of_memory_alert("it shows only part of this page.");
+    }
     if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
     update_scroll();
     InvalRect(&br->win->portRect);
@@ -3061,6 +3439,7 @@ static void close_browser(Browser *x)
     short i;
     use(x);
     if (x->have_page) { layout_free(&x->lay); pics_free(); forms_free(&x->forms); html_free(&x->doc); }
+    free(x->form_base);
     for (i = 0; i < x->hist_len; i++) free(x->history[i]);
     TEDispose(x->url_te);
     TEDispose(x->field_te);
@@ -3249,6 +3628,8 @@ int mill_run(WindowPtr splash)
     Boolean net_ok;
 
     sys_init();  /* System 6 or 7: which calls to use */
+    mem_init();
+    local_fetch = fetch_for_page;
     InitCursor();
     setup_menus();
     if (!new_browser(splash)) return 1;
@@ -3261,10 +3642,10 @@ int mill_run(WindowPtr splash)
     SetPort(br->win);
 
     /* the home page, or Mill's own page when the network isn't there */
-    if (!net_ok || !go(setting("homepage", MILL_DEFAULT_HOME), true)) {
+    if (!net_ok || !go(setting("homepage", MILL_DEFAULT_HOME), true, NULL)) {
         char why[128];
         strcpy(why, net_ok ? br->status_text : "MacTCP isn't available.");
-        go("mill://about", true);
+        go("mill://about", true, NULL);
         set_status(why);  /* why it isn't the home page */
     }
 
@@ -3277,7 +3658,7 @@ int mill_run(WindowPtr splash)
         } else if (br && br->focus < 0) {
             TEIdle(br->url_te);
         }
-        if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); } continue; }
+        if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); } mem_short(); continue; }
         switch (ev.what) {
         case mouseDown: do_mouse(&ev); break;
         case keyDown: case autoKey: do_key(&ev); break;

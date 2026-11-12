@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 '''Mill's download site (mill.1in1e6.com), plain HTML 3.2 for classic Macs, built from
 the release files in <site>/download (Mill-VERSION.hqx, .bin, .dsk) and src/changes.html.
-python3 tools/site.py site <site dir>     writes <site dir>/index.html and icon.gif
+Only the newest few releases are listed (SHOWN).
+python3 tools/site.py site <site dir>     writes <site dir>/index.html, latest.txt, and icon.gif
 python3 tools/site.py notes VERSION       prints a version's change log entries as text'''
 
 import html, os, re, shutil, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
 KINDS = [('hqx', 'BinHex'), ('bin', 'MacBinary'), ('dsk', 'disk image')]
+SHOWN = 3   # releases on the page: the newest, and the two before it
+SITE = 'http://mill.1in1e6.com/'
 
 
 def changes(version):
@@ -39,7 +42,7 @@ def links(v, files):
 
 
 def site(out):
-    rel = releases(os.path.join(out, 'download'))
+    rel = releases(os.path.join(out, 'download'))[:SHOWN]
     p = ['<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">',
          '<HTML><HEAD><TITLE>Mill</TITLE></HEAD><BODY>',
          '<H1><IMG SRC="icon.gif" WIDTH=32 HEIGHT=32 ALT=""> Mill</H1>',
@@ -47,7 +50,7 @@ def site(out):
          '<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, '
          'no-nonsense browser available for the Plus and later.',
          '<P><B>System Requirements:</B>',
-         '<UL><LI>Mac Plus or later<LI>System 6.0.8 with MacTCP or later<LI>1 MB RAM available</UL>']
+         '<UL><LI>Mac Plus or later<LI>System 6.0.3 with MacTCP or later<LI>700K free RAM</UL>']
     if rel:
         v, files = rel[0]
         p.append('<H2>Download Mill %s</H2>' % v)
@@ -62,7 +65,17 @@ def site(out):
     p.append('<HR><P>Source code: github.com/eric-cgn/mill')
     p.append('</BODY></HTML>')
     open(os.path.join(out, 'index.html'), 'w', encoding='latin-1').write('\n'.join(p) + '\n')
+    if rel:
+        latest(out, rel[0][0])
     shutil.copy(os.path.join(here, '..', 'art', 'icon.gif'), out)
+
+
+def latest(out, v):
+    '''latest.txt, which Mill's Check for updates reads (src/core/update.h): the newest
+    version, the address of its MacBinary file, and what's new in it, a line each'''
+    lines = [v, SITE + 'download/Mill-%s.bin' % v]
+    lines += [' '.join(c.split()) for c in changes(v)]
+    open(os.path.join(out, 'latest.txt'), 'w', encoding='latin-1', errors='replace', newline='\n').write('\n'.join(lines) + '\n')
 
 
 if __name__ == '__main__':

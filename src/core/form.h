@@ -40,6 +40,19 @@ void forms_click(Forms *F, long index);
 /* What an OPTION shows */
 void forms_option_label(const Doc *d, long option, char *out, int size);
 
+/* What's been typed and chosen on a page, kept with its history entry so Back and
+   Forward can bring it back: compact text, one entry per changed field (its place among
+   the page's fields, its form's place among the page's forms, its type, name, and
+   value). Text fields, text areas, checkboxes, radio buttons, and menus are kept;
+   passwords, files, hidden fields, and disabled fields never are. malloc'd, or NULL when
+   nothing has changed, it would be longer than FORMS_STATE_MAX (then nothing is kept),
+   or memory ran out. */
+#define FORMS_STATE_MAX 4096
+char *forms_save(const Forms *F, const Doc *d);
+/* Put kept state back. A field takes its entry only if its place, form, type, and name
+   all still match (the page may have changed since); others are left as they are. */
+void forms_restore(Forms *F, const Doc *d, const char *state);
+
 typedef struct {
     char *data;         /* the query string (GET) or the request body (POST) */
     long len;

@@ -1,13 +1,16 @@
 #include "Processes.r"
 
-/* About 1.5 MB is what a 4 MB Mac Plus on System 7.5.5 can give an application */
+/* Preferred 1200K: room for a page with many pictures (The Old Net's 77 run out in 700K).
+   Minimum 700K: what a 1 MB Mac Plus on System 6 has for an application (about 750K),
+   less a little. In the minimum, pages still load: a page's source is let go of once it's
+   read, and running out of memory stops loading and keeps what's there. */
 resource 'SIZE' (-1) {
     reserved, acceptSuspendResumeEvents, reserved, canBackground, doesActivateOnFGSwitch,
     backgroundAndForeground, dontGetFrontClicks, ignoreChildDiedEvents, is32BitCompatible,
     notHighLevelEventAware, onlyLocalHLEvents, notStationeryAware, dontUseTextEditServices,
     reserved, reserved, reserved,
-    1536 * 1024,
-    1024 * 1024
+    1200 * 1024,   /* preferred */
+    700 * 1024     /* minimum */
 };
 
 #include "Finder.r"
@@ -93,5 +96,18 @@ resource 'DITL' (203) {
         {82, 236, 102, 306}, Button { enabled, "Stay" },
         {82, 152, 102, 222}, Button { enabled, "Leave" },
         {10, 70, 70, 306}, StaticText { disabled, "This page has a form you've changed and haven't sent. ^0" }
+    }
+};
+
+/* Memory ran out while loading, saving, or laying out; ^0 says what happened */
+resource 'ALRT' (204) {
+    {80, 96, 180, 416}, 204, {
+        OK, visible, sound1, OK, visible, sound1, OK, visible, sound1, OK, visible, sound1
+    }, noAutoCenter
+};
+resource 'DITL' (204) {
+    {
+        {66, 236, 86, 306}, Button { enabled, "OK" },
+        {10, 70, 56, 306}, StaticText { disabled, "Mill ran out of memory, so ^0" }
     }
 };
