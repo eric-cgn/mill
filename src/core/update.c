@@ -22,29 +22,41 @@ static int is_version(const char *s)
     return parts == 2 || parts == 3;
 }
 
-/* A MacBinary file to download: http:// or https://, ending in .bin, and nothing that
-   could end an attribute or a line */
-static int is_link(const char *s)
+int update_site(const char *url, char *out, int size)
+{
+    const char *host = strstr(url, "://"), *end;
+    if (!host || host == url || !host[3] || host[3] == '/') return -1;
+    end = strchr(host + 3, '/');
+    if (!end) end = host + strlen(host);
+    if (end - url + 2 > size) return -1;
+    memcpy(out, url, end - url);
+    out[end - url] = '/';
+    out[end - url + 1] = 0;
+    return 0;
+}
+
+/* An address on site (scheme and host in any case), with nothing that could end an
+   attribute or a line */
+static int is_link(const char *s, const char *site)
 {
     const char *p;
-    long n = strlen(s);
-    if (strncmp(s, "http://", 7) && strncmp(s, "https://", 8)) return 0;
-    if (n < 5 || s[n - 4] != '.' || (s[n - 3] | 32) != 'b' || (s[n - 2] | 32) != 'i' || (s[n - 1] | 32) != 'n') return 0;
-    for (p = s; *p; p++) if ((unsigned char)*p <= ' ' || *p == '"' || *p == '<' || *p == '>' || (unsigned char)*p >= 127) return 0;
+    long n = strlen(site);
+    if (!n || (long)strlen(s) < n) return 0;
+    for (p = site; *p; p++, s++) if ((*s | 32) != (*p | 32)) return 0;
+    for (s -= n; *s; s++) if ((unsigned char)*s <= ' ' || *s == '"' || *s == '<' || *s == '>' || (unsigned char)*s >= 127) return 0;
     return 1;
 }
 
-int update_parse(const char *text, long len, Update *u)
+int update_parse(const char *text, long len, const char *site, Update *u)
 {
     long i = 0;
     int line = 0;
     memset(u, 0, sizeof *u);
-    strcpy(u->link, UPDATE_DEFAULT_LINK);
-    if (len > UPDATE_MAX_BYTES) return -1;
+    if (len > UPDATE_MAX_BYTES) return UPDATE_NOT_FILE;
     while (i < len) {
         long start = i, end, n;
         char buf[UPDATE_MAX_NOTE + 1];
-        int k = 0;
+        int k = 0, cut = 0;
         while (i < len && text[i] != '\r' && text[i] != '\n') i++;
         end = i;
         if (i < len && text[i] == '\r' && i + 1 < len && text[i + 1] == '\n') i++;
@@ -53,23 +65,26 @@ int update_parse(const char *text, long len, Update *u)
         while (start < end && (text[start] == ' ' || text[start] == '\t')) start++;
         while (end > start && (text[end - 1] == ' ' || text[end - 1] == '\t')) end--;
         if (start == end) continue;     /* blank */
-        for (n = start; n < end && k < UPDATE_MAX_NOTE; n++) {
+        for (n = start; n < end; n++) {
             unsigned char c = (unsigned char)text[n];
             if (c < ' ' || c == 127) continue;
+            if (k == UPDATE_MAX_NOTE) { cut = 1; break; }
             buf[k++] = (char)(c >= 0x80 ? latin1_to_mac(c) : c);
         }
         buf[k] = 0;
         if (line == 0) {
-            if (strlen(buf) >= sizeof u->version || !is_version(buf)) return -1;
+            if (cut || strlen(buf) >= sizeof u->version || !is_version(buf)) return UPDATE_NOT_FILE;
             strcpy(u->version, buf);
         } else if (line == 1) {
-            if (strlen(buf) < sizeof u->link && is_link(buf)) strcpy(u->link, buf);
+            /* the whole address, as it was sent, or none */
+            if (cut || strlen(buf) >= sizeof u->link || !is_link(buf, site)) return UPDATE_OFF_SITE;
+            strcpy(u->link, buf);
         } else if (u->nnotes < UPDATE_MAX_NOTES) {
             strcpy(u->notes[u->nnotes++], buf);
         }
         line++;
     }
-    return line > 0 ? 0 : -1;
+    return line == 0 ? UPDATE_NOT_FILE : line == 1 ? UPDATE_OFF_SITE : 0;
 }
 
 /* The next number in a version, past its dot; -1 when there are no more */
