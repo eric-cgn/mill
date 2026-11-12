@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 '''Mill's download site (mill.1in1e6.com), plain HTML 3.2 for classic Macs, built from
 the release files in <site>/download (Mill-VERSION.hqx, .bin, .dsk) and src/changes.html.
+Only the newest few releases are listed (SHOWN).
 python3 tools/site.py site <site dir>     writes <site dir>/index.html and icon.gif
 python3 tools/site.py notes VERSION       prints a version's change log entries as text'''
 
@@ -8,6 +9,7 @@ import html, os, re, shutil, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
 KINDS = [('hqx', 'BinHex'), ('bin', 'MacBinary'), ('dsk', 'disk image')]
+SHOWN = 3   # releases on the page: the newest, and the two before it
 
 
 def changes(version):
@@ -39,7 +41,7 @@ def links(v, files):
 
 
 def site(out):
-    rel = releases(os.path.join(out, 'download'))
+    rel = releases(os.path.join(out, 'download'))[:SHOWN]
     p = ['<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">',
          '<HTML><HEAD><TITLE>Mill</TITLE></HEAD><BODY>',
          '<H1><IMG SRC="icon.gif" WIDTH=32 HEIGHT=32 ALT=""> Mill</H1>',
