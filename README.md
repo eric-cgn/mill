@@ -9,8 +9,8 @@ and inline images, which is achievable for them.
 
 Freeware from OneInAMillion Software.
 
-![The splash screen while Mill starts](screenshots/splash.png)
-![The Millionth's front page](screenshots/front.png)
+![Mill's About page](screenshots/about.png)
+![The Millionth's front page](screenshots/millionth.png)
 ![Mill's settings page](screenshots/settings.png)
 
 On a Mac Plus running System 6.0.8.
