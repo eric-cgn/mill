@@ -17,6 +17,11 @@ OSErr local_request(const Url *u, const char *content_type, const char *body, lo
    name, or IMAGE_NO_MEMORY */
 int local_image(const char *url, Bitmap1 *out);
 
+/* Fetches url as any page is fetched (proxy, User-Agent, redirects, Stop) into buf: the
+   body's length, at most size, or -1 with why it couldn't in Mill's usual words. mac_main
+   sets it; mill://about?check=1 uses it to check for updates. */
+extern long (*local_fetch)(const char *url, char *buf, long size, char *why, int why_size);
+
 #define MILL_DEFAULT_HOME "mill://about"
 #define MILL_DEFAULT_AGENT "Mozilla/1.22 (compatible; Mill/" MILL_VERSION "; Macintosh; 68K)"
 #define MILL_DEFAULT_IMAGE_K 128
