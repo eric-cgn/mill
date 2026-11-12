@@ -13,7 +13,7 @@ Freeware from OneInAMillion Software.
 ![The Millionth's front page](screenshots/millionth.png)
 ![Mill's settings page](screenshots/settings.png)
 
-On a Mac Plus running System 6.0.8.
+On a Mac Plus running System 6.0.5.
 
 ## System requirements
 
