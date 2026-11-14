@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Mill's distribution disk: dist/Mill-VERSION.image, a Disk Copy 4.2 image of an 800K HFS disk named "Mill" with Mill,
 its Plug-Ins folder (Web Fonts, Internet Services), and the Plug-In SDK folder (the
-kit's own disk contents, made by tools/kit.py's code). Nothing of Apple's. Needs what
+kit's own disk contents, made by tools/kit.py's code), and the Desktop file System 6 needs on a
+locked disk (Mini vMac mounts the image locked). Nothing of Apple's. Needs what
 ./build.sh makes first: build/Mill.bin, build/fonts/ (tools/extras/build.py --styles --out
 build/fonts), and plugins/internet/build/Internet Services.bin. ./build.sh disk does all of it."""
 import os, re, struct, subprocess, sys, tempfile
@@ -84,6 +85,60 @@ def icon_file(path):
     open(path, 'wb').write(bytes(h) + pad(fork))
 
 
+def read_resources(fork):
+    """{(type, id): data} from a resource fork"""
+    dat, mp, dlen, mlen = struct.unpack('>IIII', fork[:16])
+    tl = struct.unpack('>H', fork[mp + 24:mp + 26])[0]
+    found = {}
+    for i in range(struct.unpack('>H', fork[mp + tl:mp + tl + 2])[0] + 1):
+        t, n, off = struct.unpack('>4sHH', fork[mp + tl + 2 + 8 * i:mp + tl + 10 + 8 * i])
+        for j in range(n + 1):
+            r = mp + tl + off + 12 * j
+            rid = struct.unpack('>h', fork[r:r + 2])[0]
+            d = dat + int.from_bytes(fork[r + 5:r + 8], 'big')
+            found[(t, rid)] = fork[d + 4:d + 4 + struct.unpack('>I', fork[d:d + 4])[0]]
+    return found
+
+
+def desktop_file(path, app, parent=2):
+    """MacBinary of the invisible "Desktop" file ('FNDR', 'ERIK') that System 6's Finder writes
+    on every disk, and that a locked disk must already have: without it the Finder can't make one
+    and ejects the disk. The icons come from the application's bundle (Mill's ICN#, FREF, and
+    BNDL, here for the application at the top of the disk), as Finder 6.1.5 copies them: the
+    local IDs run from 1 instead of 0, there is no ics#, and every copy has a new ID. The IDs and
+    the 4-byte stamp are the ones it wrote for Mill on a disk of its own. The creator's resource
+    ('MiLL', 0) is that stamp and the BNDL's ID, and 'APPL' says where the application is: its
+    creator, the ID of its folder, and its name."""
+    mb = open(app, 'rb').read()
+    dlen, rlen = struct.unpack('>II', mb[83:91])
+    r0 = 128 + (dlen + 127) // 128 * 128
+    res = read_resources(mb[r0:r0 + rlen])
+    sig, name = mb[69:73], mb[2:2 + mb[1]]
+    bndl_id = 23395
+    # (file type, ICN# in the application, new ICN# ID, new FREF ID), in the order of the bundle
+    files = ((b'APPL', 128, 21677, 20798), (b'MPlg', 129, 18069, 29828), (b'FFIL', 130, 9702, 10388))
+    bndl = sig + struct.pack('>HH', 0, 1)
+    bndl += b'ICN#' + struct.pack('>H', len(files) - 1) + b''.join(struct.pack('>HH', i + 1, f[2]) for i, f in enumerate(files))
+    bndl += b'FREF' + struct.pack('>H', len(files) - 1) + b''.join(struct.pack('>HH', i + 1, f[3]) for i, f in enumerate(files))
+    resources = [(b'STR ', 0, b'\x0aFinder 1.0'), (b'BNDL', bndl_id, bndl)]
+    resources += [(b'ICN#', f[2], res[(b'ICN#', f[1])]) for f in files]
+    resources += [(b'FREF', f[3], f[0] + struct.pack('>H', i + 1) + b'\x00') for i, f in enumerate(files)]
+    pstring = bytes([len(name)]) + name
+    resources += [(sig, 0, bytes.fromhex('77231199') + struct.pack('>H', bndl_id)),
+                  (b'APPL', 0, sig + struct.pack('>I', parent) + pstring + bytes(len(pstring) % 2))]
+    fork = resource_fork(resources)
+    h = bytearray(128)
+    h[1] = 7
+    h[2:9] = b'Desktop'
+    h[65:69] = b'FNDR'
+    h[69:73] = b'ERIK'
+    h[73] = 0x40                    # invisible
+    h[87:91] = struct.pack('>I', len(fork))
+    h[122] = h[123] = 129
+    h[124:126] = crc16(h[:124]).to_bytes(2, 'big')
+    open(path, 'wb').write(bytes(h) + fork + bytes(-len(fork) % 128))
+
+
 def custom_icon_flag(image):
     """Set the root folder's "has a custom icon" Finder flag (0x0400) in the disk image: its record
     is in the catalog, which hfsutils can't write that flag to"""
@@ -164,6 +219,9 @@ def main():
         icon = os.path.join(tmp, 'Icon.bin')
         icon_file(icon)
         kit.hfs('hcopy', '-m', icon, ':')
+        desktop = os.path.join(tmp, 'Desktop.bin')
+        desktop_file(desktop, bundled)
+        kit.hfs('hcopy', '-m', desktop, ':')
         before = free_bytes()
         kit.copy_kit(':Mill Plug-In SDK')
         items.append(('Mill Plug-In SDK (the SDK disk\'s files)', before - free_bytes()))
