@@ -794,7 +794,7 @@ static void prog_text(const char *t)
     GrafPtr save;
     GetPort(&save);
     SetPort(prog_dlg);
-    SetRect(&r, 12, 12, 288, 46);
+    SetRect(&r, 12, 12, 288, prog_over ? 46 : 42);    /* above the bar, which starts at 44 */
     EraseRect(&r);
     big_font();
     pascalize(str, t);
