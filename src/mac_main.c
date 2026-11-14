@@ -2332,6 +2332,8 @@ static OSErr fetch(char *target, const char *from, const char *content_type, Bod
                         "<TITLE>Forbidden</TITLE><H2>Forbidden</H2><P>Only the Plug-In's own pages can use this address.";
                     collect(no, sizeof no - 1, resp);
                     err = noErr;
+                } else if (u->scheme == SCHEME_OTHER && !strcmp(u->name, "plugin") && font_file_request(u, collect, resp)) {
+                    err = noErr;        /* a font file's About: Mill answers for it */
                 } else {
                     Url with = *u;
                     char key[AUTH_KEYS];

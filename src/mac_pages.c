@@ -564,7 +564,7 @@ static void plugins_page(Out *o)
     for (i = 0; i < npack_files; i++) {
         char anchor[40], about[60];
         license_anchor(pack_files[i].file, anchor, sizeof anchor);
-        snprintf(about, sizeof about, "mill://fonts#%s", anchor);
+        snprintf(about, sizeof about, "plugin://%s/about", anchor);
         char version[32] = "", path[256];
         short n = 0;
         Handle h;
@@ -607,48 +607,65 @@ static void plugins_page(Out *o)
     }
 }
 
-/* mill://fonts: each font file's own About text ('TEXT' 128), under the file's name */
-static void fonts_page(Out *o)
+/* plugin://NAME/about for a font file, NAME its name as an anchor ("web-fonts"): it has no code
+   to answer, so Mill shows the file's own About text ('TEXT' 128), its lines joined into
+   paragraphs (a blank line between) and its indented lines kept as lines, to wrap to the window */
+static void font_about(Out *o, short k)
 {
-    short i, was = CurResFile();
+    short was = CurResFile();
+    Handle h;
     head(o, 200, HTML_MAC);
-    out_s(o, "<TITLE>Fonts</TITLE><H2>Fonts</H2>");
-    for (i = 0; i < npack_files && !o->stopped; i++) {
-        char anchor[40];
-        Handle h;
-        license_anchor(pack_files[i].file, anchor, sizeof anchor);
-        out_s(o, "<HR><H3><A NAME=\"");
-        out_s(o, anchor);
-        out_s(o, "\">");
-        out_text(o, pack_files[i].file);
-        out_s(o, "</A></H3>");
-        UseResFile(pack_files[i].ref);
-        if ((h = Get1Resource('TEXT', 128))) {
-            /* the text's own lines are joined into paragraphs (a blank line between), and its
-               indented lines kept as lines, so it wraps to the window */
-            long n = GetHandleSize(h), at = 0, end;
-            Boolean indented = false;
-            HLock(h);
-            out_s(o, "<P>");
-            while (at < n) {
-                const char *t = *h;
-                for (end = at; end < n && t[end] != '\r' && t[end] != '\n'; end++) ;
-                if (end == at) { out_s(o, "<P>"); indented = false; }
-                else {
-                    if (t[at] == ' ') out_s(o, "<BR>&nbsp;&nbsp;");
-                    else if (indented) out_s(o, "<BR>");
-                    indented = t[at] == ' ';
-                    out_text_n(o, t + at, end - at);
-                    out_s(o, " ");
-                }
-                at = end + 1;
+    out_s(o, "<TITLE>");
+    out_text(o, pack_files[k].file);
+    out_s(o, "</TITLE><H2>");
+    out_text(o, pack_files[k].file);
+    out_s(o, "</H2>");
+    UseResFile(pack_files[k].ref);
+    if ((h = Get1Resource('TEXT', 128))) {
+        long n = GetHandleSize(h), at = 0, end;
+        Boolean indented = false;
+        HLock(h);
+        out_s(o, "<P>");
+        while (at < n) {
+            const char *t = *h;
+            for (end = at; end < n && t[end] != '\r' && t[end] != '\n'; end++) ;
+            if (end == at) { out_s(o, "<P>"); indented = false; }
+            else {
+                if (t[at] == ' ') out_s(o, "<BR>&nbsp;&nbsp;");
+                else if (indented) out_s(o, "<BR>");
+                indented = t[at] == ' ';
+                out_text_n(o, t + at, end - at);
+                out_s(o, " ");
             }
-            HUnlock(h);
-            ReleaseResource(h);
-        } else out_s(o, "<P>This file has no About text.");
-        UseResFile(was);
+            at = end + 1;
+        }
+        HUnlock(h);
+        ReleaseResource(h);
+    } else out_s(o, "<P>This file has no About text.");
+    UseResFile(was);
+}
+
+/* A plugin:// address for a font file: true if it's one (and answered) */
+Boolean font_file_request(const Url *u, net_sink sink, void *ref)
+{
+    short k;
+    for (k = 0; k < npack_files; k++) {
+        char anchor[40];
+        license_anchor(pack_files[k].file, anchor, sizeof anchor);
+        if (!strcmp(u->host, anchor)) {
+            Out o;
+            o.sink = sink;
+            o.ref = ref;
+            o.stopped = 0;
+            if (!strcmp(u->path, "/about") || !strcmp(u->path, "/") || !u->path[0]) font_about(&o, k);
+            else {
+                head(&o, 404, HTML_MAC);
+                out_s(&o, "<TITLE>Not Found</TITLE><H2>Not Found</H2><P>A font file has only an About page.");
+            }
+            return true;
+        }
     }
-    if (!npack_files) out_s(o, "<P>None.");
+    return false;
 }
 
 /* A font setting's row: a list of the fonts to choose from */
@@ -863,7 +880,6 @@ static void mill_request(const Url *u, const char *body, long len, Out *o)
     if (!strcmp(u->host, "about")) about(o, strstr(u->path, "check=1") != NULL);
     else if (!strcmp(u->host, "config")) config(o, body, len);
     else if (!strcmp(u->host, "plugins")) plugins_page(o);
-    else if (!strcmp(u->host, "fonts")) fonts_page(o);
     else if (!strcmp(u->host, "license")) license_page(o);
     else {
         head(o, 404, HTML_MAC);

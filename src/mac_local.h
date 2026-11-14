@@ -12,6 +12,7 @@
 /* Answer a mill: URL the way a web server would: a whole HTTP response, through
    sink. A POST when content_type is given. (file: is a Plug-In.) */
 OSErr local_request(const Url *u, const char *content_type, const char *body, long body_len, net_sink sink, void *ref);
+Boolean font_file_request(const Url *u, net_sink sink, void *ref);
 
 /* An image Mill has built in (mill://splash); returns 0, -1 if there is none by that
    name, or IMAGE_NO_MEMORY */
