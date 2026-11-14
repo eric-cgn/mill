@@ -5,13 +5,19 @@
 
 #include "html.h"
 
-/* Mac font numbers and QuickDraw face bits */
-enum { FONT_TIMES = 20, FONT_HELVETICA = 21, FONT_COURIER = 22, FONT_GENEVA = 3, FONT_MONACO = 4,
-       FONT_NEW_YORK = 2, FONT_CHICAGO = 0, FONT_PALATINO = 16 };
+/* A style's font is a Mac font number, or one of these two for the platform to resolve: the
+   proportional font (most text) and the fixed font (PRE, TT, CODE, KBD, SAMP); the settings
+   choose them. QuickDraw face bits follow. */
+enum { FONT_PROP = 0x7FF0, FONT_FIXED = 0x7FF1 };
 enum { FACE_BOLD = 1, FACE_ITALIC = 2, FACE_UNDERLINE = 4 };
-/* Text on a dark background (a BGCOLOR under half bright), drawn white; a bit QuickDraw
-   doesn't use, to take off before TextFace */
+/* Bits QuickDraw doesn't use, to take off before TextFace (FACE_QD keeps what it does):
+   text on a dark background (a BGCOLOR under half bright), drawn white; struck through
+   (STRIKE); and raised or lowered (SUP, SUB), by layout_shift */
 #define FACE_INVERSE 0x80
+#define FACE_STRIKE 0x40
+#define FACE_SUP 0x20
+#define FACE_SUB 0x10
+#define FACE_QD 0x0F
 
 typedef struct { short font, size; unsigned char face; } MStyle;
 
@@ -27,9 +33,20 @@ typedef struct {
     /* How far along it is, 0 to 100, each time that changes; returns nonzero to stop.
        May be NULL. */
     int (*progress)(void *ctx, int percent);
+    /* The font number of an installed font by name (FACE=), or -1 if there isn't one; may be NULL */
+    int (*font_by_name)(void *ctx, const char *name);
+    /* Page zoom: every size and distance is this over 9 (9 or 0 is normal; 36 is 4 times), rounded.
+       The platform sets it from HTML 3.2's size ladder, 9, 10, 12, 14, 18, 24, 36. */
+    short zoom;
+    /* with zoom, scale only the text's sizes: distances and pictures stay at normal size */
+    char text_only;
 } Metrics;
 
-enum { RUN_TEXT, RUN_GEN, RUN_RULE, RUN_IMAGE, RUN_CONTROL };
+enum { RUN_TEXT, RUN_GEN, RUN_RULE, RUN_IMAGE, RUN_CONTROL, RUN_MARK };
+
+/* RUN_MARK: a bullet drawn as a shape in a box width wide (x, width), on the line's baseline:
+   face is MARK_DISC, MARK_CIRCLE, or MARK_SQUARE (UL TYPE); font and size are the item's text style */
+enum { MARK_DISC, MARK_CIRCLE, MARK_SQUARE };
 
 /* RUN_IMAGE and RUN_CONTROL: text is the IMG (or INPUT, SELECT, TEXTAREA) node, size its
    height, font its height above the baseline, and face an image's border width */
@@ -69,6 +86,9 @@ typedef struct {
 /* Returns 0, -1 when out of memory, or -2 when progress said to stop */
 int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width);
 void layout_free(Layout *L);
+/* How many pixels up a run of this size and face is drawn off the baseline: raised for SUP,
+   negative for SUB, else 0 */
+short layout_shift(short size, unsigned char face);
 /* The run under a point in page coordinates, or NULL */
 const Run *layout_hit(const Layout *L, long y, short x);
 /* The first line that could reach y; draw from here while lines start above the bottom */

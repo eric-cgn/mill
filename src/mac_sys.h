@@ -9,6 +9,23 @@
 #include <Multiverse.h>
 
 void sys_init(void);
+/* Font packs (mac_init.c): font suitcases ('FFIL') in the Plug-In folder, opened read-only and
+   kept open for the session. Every family in them that checks out (each FOND and the FONTs it
+   names) is offered in the font settings with the System's. sizes has a bit for each size a
+   family has a plain strike for, the Nth bit for the Nth of 9, 10, 12, 14, 18, 24, and 36 point.
+   fixed is 1 or 0 once known, -1 before (every letter one width: measured when first needed,
+   with the file current). */
+typedef struct { short id, ref, sizes, fixed; char name[32]; } PackFam;
+typedef struct { short ref; char file[32]; } PackFile;
+#define PACK_FAMS 16
+#define PACK_FILES 4
+extern PackFam pack_fams[PACK_FAMS];
+extern short npack_fams;
+extern PackFile pack_files[PACK_FILES];
+extern short npack_files;
+#ifdef MILL_MEMREPORT
+extern Handle fonts_map;        /* the suitcase's resource map, for the report */
+#endif
 extern Boolean sys_fsspec;      /* the File Manager's FSSpec calls */
 extern Boolean sys_new_sf;      /* StandardGetFile and StandardPutFile */
 extern Boolean sys_find_folder; /* FindFolder, and so a Preferences folder */
@@ -43,7 +60,7 @@ Boolean sys_next_event(EventRecord *ev, long sleep);
    says whether it's still gone: memory has run out. */
 void mem_init(void);
 Boolean mem_short(void);
-/* For mill://about: what's free in Mill's heap now, and the heap's whole size */
+/* For mill://about: what's free in Mill's heap, counting what can be purged, and the heap's whole size */
 void mem_report(long *free, long *total);
 
 #endif

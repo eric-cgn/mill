@@ -262,22 +262,49 @@ static void put_text(Buf *b, const char *s, int url)
     }
 }
 
-static void pair(Buf *b, const Submission *s, const char *name, const char *value)
+/* A multipart part: its name and text as they're sent */
+static void add_part(Submission *s, Buf *b, const char *name, const char *value, int file)
 {
-    if (s->multipart) {
-        put_s(b, "--");
-        put_s(b, s->boundary);
-        put_s(b, "\r\nContent-Disposition: form-data; name=\"");
-        put_text(b, name, 0);
-        put_s(b, "\"\r\n\r\n");
-        put_text(b, value, 0);
-        put_s(b, "\r\n");
-        return;
+    Buf n, v;
+    FormPart *more;
+    memset(&n, 0, sizeof n);
+    memset(&v, 0, sizeof v);
+    n.utf8 = v.utf8 = b->utf8;
+    put_text(&n, name, 0);
+    put(&n, "", 1);
+    if (file) put(&v, value, strlen(value) + 1);    /* a Mac path, as it is */
+    else { put_text(&v, value, 0); put(&v, "", 1); }
+    if (n.oom || v.oom || !(more = realloc(s->parts, (s->nparts + 1) * sizeof(FormPart)))) {
+        free(n.p); free(v.p); b->oom = 1; return;
     }
+    s->parts = more;
+    s->parts[s->nparts].name = n.p;
+    s->parts[s->nparts].value = v.p;
+    s->parts[s->nparts].file = file;
+    s->nparts++;
+}
+
+static void pair(Buf *b, Submission *s, const char *name, const char *value)
+{
+    if (s->multipart) { add_part(s, b, name, value, 0); return; }
     if (b->len) put_s(b, "&");
     put_text(b, name, 1);
     put_s(b, "=");
     put_text(b, value, 1);
+}
+
+long form_part_head(const Submission *s, const FormPart *p, const char *filename, const char *type, char *out, long size)
+{
+    long n = snprintf(out, size, "--%s\r\nContent-Disposition: form-data; name=\"%s\"", s->boundary, p->name);
+    if (filename) n += snprintf(out + (n < size ? n : size), n < size ? size - n : 0, "; filename=\"%s\"\r\nContent-Type: %s", filename, type);
+    n += snprintf(out + (n < size ? n : size), n < size ? size - n : 0, "\r\n\r\n");
+    return n < size ? n : -1;
+}
+
+long form_end(const Submission *s, char *out, long size)
+{
+    long n = snprintf(out, size, "--%s--\r\n", s->boundary);
+    return n < size ? n : -1;
 }
 
 static void option_value(const Doc *d, long option, char *out, int size)
@@ -287,8 +314,7 @@ static void option_value(const Doc *d, long option, char *out, int size)
     else forms_option_label(d, option, out, size);
 }
 
-int forms_submit(const Forms *F, const Doc *d, long form, long by, short x, short y,
-                 file_reader read_file, void *ctx, Submission *out)
+int forms_submit(const Forms *F, const Doc *d, long form, long by, short x, short y, Submission *out)
 {
     const Node *fn = form >= 0 ? &d->nodes[form] : NULL;
     const char *method = fn ? html_attr(d, fn, "method") : NULL, *enctype = fn ? html_attr(d, fn, "enctype") : NULL;
@@ -333,29 +359,12 @@ int forms_submit(const Forms *F, const Doc *d, long form, long by, short x, shor
                 pair(&b, out, name, val);
             }
             break;
-        case FIELD_FILE: {
-            const char *path = f->value ? f->value : "", *base = path;
-            const char *p;
-            if (!out->multipart) { pair(&b, out, name, path); break; }
-            for (p = path; *p; p++) if (*p == ':' || *p == '/') base = p + 1;
-            put_s(&b, "--");
-            put_s(&b, out->boundary);
-            put_s(&b, "\r\nContent-Disposition: form-data; name=\"");
-            put_text(&b, name, 0);
-            put_s(&b, "\"; filename=\"");
-            put_text(&b, base, 0);
-            put_s(&b, "\"\r\nContent-Type: application/octet-stream\r\n\r\n");
-            if (*path && read_file) {
-                char *data;
-                long n = read_file(ctx, path, &data);
-                if (n > 0) { put(&b, data, n); free(data); }
-            }
-            put_s(&b, "\r\n");
+        case FIELD_FILE:
+            if (!out->multipart) pair(&b, out, name, f->value ? f->value : "");
+            else add_part(out, &b, name, f->value ? f->value : "", 1);
             break;
         }
-        }
     }
-    if (out->multipart) { put_s(&b, "--"); put_s(&b, out->boundary); put_s(&b, "--\r\n"); }
     if (b.oom) { free(b.p); return -1; }
     if (!b.p) put_s(&b, "");
     if (b.oom) return -1;
@@ -366,8 +375,13 @@ int forms_submit(const Forms *F, const Doc *d, long form, long by, short x, shor
 
 void submission_free(Submission *s)
 {
+    int i;
     free(s->data);
     s->data = NULL;
+    for (i = 0; i < s->nparts; i++) { free(s->parts[i].name); free(s->parts[i].value); }
+    free(s->parts);
+    s->parts = NULL;
+    s->nparts = 0;
 }
 
 /* ------------------------------------------------------------ kept for Back */

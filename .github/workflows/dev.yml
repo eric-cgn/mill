@@ -30,6 +30,12 @@ jobs:
         run: tests/run.sh
       - name: Build
         run: ./build.sh
+      - name: Disk image
+        run: ./build.sh disk
+      - name: Installer
+        run: ./build.sh installer
+      - name: Own the build output
+        run: sudo chown -R "$(id -u):$(id -g)" build dist   # the builds' containers run as root
       - name: Release files
         run: python3 tools/release.py
       - name: Pre-release

@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 '''Mill's download site (mill.1in1e6.com), plain HTML 3.2 for classic Macs, built from
-the release files in <site>/download (Mill-VERSION.hqx, .bin, .dsk) and src/changes.html.
+the release files in <site>/download (Install-Mill-VERSION.hqx and .bin, Mill-VERSION.image; older
+releases have Mill-VERSION.hqx, .bin, and .dsk) and src/changes.html.
 Only the newest few releases are listed (SHOWN).
-python3 tools/site.py site <site dir>     writes <site dir>/index.html, latest.txt, and icon.gif
+python3 tools/site.py site <site dir>     writes <site dir>/index.html, changes.html, latest.txt, and icon.gif
 python3 tools/site.py notes VERSION       prints a version's change log entries as text'''
 
 import html, os, re, shutil, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
-KINDS = [('hqx', 'BinHex'), ('bin', 'MacBinary'), ('dsk', 'disk image')]
+# (file name pattern, what it is), in the order they're listed
+KINDS = [('Install-Mill-%s.hqx', 'Install Mill, BinHex'), ('Install-Mill-%s.bin', 'Install Mill, MacBinary'),
+         ('Mill-%s.image', 'disk image'), ('Mill-%s.hqx', 'BinHex'), ('Mill-%s.bin', 'MacBinary'), ('Mill-%s.dsk', 'disk image')]
 SHOWN = 3   # releases on the page: the newest, and the two before it
 SITE = 'http://mill.1in1e6.com/'
 
@@ -28,17 +31,21 @@ def vkey(v):
 
 
 def releases(download):
+    """[(version, [(file name, size)])], newest first"""
     found = {}
     for f in os.listdir(download):
-        m = re.match(r'Mill-([0-9.]+)\.(hqx|bin|dsk)$', f)
+        m = re.match(r'(?:Install-)?Mill-([0-9.]+)\.(hqx|bin|dsk|image)$', f)
         if m:
-            found.setdefault(m.group(1), {})[m.group(2)] = os.path.getsize(os.path.join(download, f))
-    return sorted(found.items(), key=lambda kv: vkey(kv[0]), reverse=True)
+            found.setdefault(m.group(1), {})[f] = os.path.getsize(os.path.join(download, f))
+    out = []
+    for v, files in found.items():
+        out.append((v, [(pat % v, files[pat % v]) for pat, _ in KINDS if pat % v in files]))
+    return sorted(out, key=lambda kv: vkey(kv[0]), reverse=True)
 
 
 def links(v, files):
-    return ['<A HREF="download/Mill-%s.%s">Mill-%s.%s</A> (%s, %dK)' % (v, ext, v, ext, what, (files[ext] + 1023) // 1024)
-            for ext, what in KINDS if ext in files]
+    what = dict((pat % v, w) for pat, w in KINDS)
+    return ['<A HREF="download/%s">%s</A> (%s, %dK)' % (f, f, what[f], (size + 1023) // 1024) for f, size in files]
 
 
 def site(out):
@@ -50,7 +57,8 @@ def site(out):
          '<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, '
          'no-nonsense browser available for the Plus and later.',
          '<P><B>System Requirements:</B>',
-         '<UL><LI>Mac Plus or later<LI>System 6.0.3 with MacTCP or later<LI>700K free RAM</UL>']
+         '<UL><LI>Mac Plus or later<LI>System 6.0.3 with MacTCP or later<LI>700K free RAM'
+         '<LI>About 500K of disk for everything</UL>']
     if rel:
         v, files = rel[0]
         p.append('<H2>Download Mill %s</H2>' % v)
@@ -62,18 +70,20 @@ def site(out):
         if len(rel) > 1:
             p.append('<H2>Earlier versions</H2>')
             p.append('<UL>' + ''.join('<LI>%s: %s' % (v, ', '.join(links(v, f))) for v, f in rel[1:]) + '</UL>')
-    p.append('<HR><P>Source code: github.com/eric-cgn/mill')
+    p.append('<P><A HREF="changes.html">Change log</A>')
     p.append('</BODY></HTML>')
     open(os.path.join(out, 'index.html'), 'w', encoding='latin-1').write('\n'.join(p) + '\n')
     if rel:
         latest(out, rel[0][0])
     shutil.copy(os.path.join(here, '..', 'art', 'icon.gif'), out)
+    # the change log, which Mill's About page links to: src/changes.html as it is
+    shutil.copy(os.path.join(here, '..', 'src', 'changes.html'), os.path.join(out, 'changes.html'))
 
 
 def latest(out, v):
     '''latest.txt, which Mill's Check for updates reads (src/core/update.h): the newest
     version, the address of its MacBinary file, and what's new in it, a line each'''
-    lines = [v, SITE + 'download/Mill-%s.bin' % v]
+    lines = [v, SITE + 'download/%s-%s.bin' % ('Install-Mill' if int(v.split('.')[0]) >= 2 else 'Mill', v)]
     lines += [' '.join(c.split()) for c in changes(v)]
     open(os.path.join(out, 'latest.txt'), 'w', encoding='latin-1', errors='replace', newline='\n').write('\n'.join(lines) + '\n')
 

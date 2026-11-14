@@ -24,6 +24,7 @@ static int upper(int c) { return c >= 'a' && c <= 'z' ? c - 32 : c; }
 int html_tag(const char *name, int len)
 {
     int t, i;
+    if (len == 1 && upper(name[0]) == 'S') return TAG_STRIKE;     /* S, as Netscape and IE read it */
     for (t = TAG_HTML; t < TAG_COUNT; t++) {
         const char *n = TAG_NAMES[t];
         for (i = 0; i < len && n[i] && upper(name[i]) == n[i]; i++) {}

@@ -6,6 +6,7 @@
 
 #include "mac_net.h"
 #include "mac_sys.h"
+#include "mac_memreport.h"
 #include "version.h"
 
 #define RCV_BUFFER_SIZE 16384
@@ -15,52 +16,15 @@ enum { OPENRESOLVER = 1, CLOSERESOLVER = 2, STRTOADDR = 3 };
 
 typedef OSErr (*dnr_proc)(long selector, ...);
 
-static short ipp = 0;
+short net_ipp = 0;
 void (*net_status)(const char *msg) = NULL;
 Boolean (*net_idle)(void) = NULL;
 int net_stage = NET_LOOKUP;
 
 static void status(const char *msg) { if (net_status) net_status(msg); }
-static Handle dnr_code = NULL;
+Handle net_dnr = NULL;
 
 /* ------------------------------------------------------------ the resolver */
-
-/* MacTCP's resolver lives in a 'dnrp' resource: in the MacTCP control panel or in a
-   "MacTCP DNR" file, in the System Folder, Control Panels or Extensions. */
-static Boolean is_resolver_file(const HFileInfo *pb)
-{
-    OSType type = pb->ioFlFndrInfo.fdType, creator = pb->ioFlFndrInfo.fdCreator;
-    if (type == 'cdev' && (creator == 'ztcp' || creator == 'mtcp')) return true;
-    return pb->ioNamePtr[0] == 10 && memcmp(pb->ioNamePtr + 1, "MacTCP DNR", 10) == 0;
-}
-
-static Handle load_dnrp_from(OSType folder)
-{
-    short vref; long dir; short i;
-    Str63 name;
-    HFileInfo pb;
-    if (sys_folder(folder, &vref, &dir) != noErr) return NULL;
-    for (i = 1; ; i++) {
-        memset(&pb, 0, sizeof pb);
-        pb.ioNamePtr = name;
-        pb.ioVRefNum = vref;
-        pb.ioDirID = dir;
-        pb.ioFDirIndex = i;
-        if (PBGetCatInfoSync((CInfoPBPtr)&pb) != noErr) return NULL;
-        if ((pb.ioFlAttrib & ioDirMask) == 0 && is_resolver_file(&pb)) {
-            FSSpec spec;
-            short ref;
-            Handle h;
-            if (file_spec(vref, dir, name, &spec) != noErr) continue;
-            ref = file_open_res(&spec, fsRdPerm);
-            if (ref == -1) continue;
-            h = Get1IndResource('dnrp', 1);
-            if (h) { DetachResource(h); MoveHHi(h); HLock(h); }
-            CloseResFile(ref);
-            if (h) return h;
-        }
-    }
-}
 
 #define LOOKUP_TICKS (30 * 60L)   /* give up on a name after 30 seconds */
 #define SLOTS 4
@@ -98,11 +62,11 @@ OSErr net_resolve(const char *host, ip_addr *addr)
     int k = (int)(id % SLOTS);
     OSErr err;
     if (parse_dotted(host, addr)) return noErr;
-    if (!dnr_code) return noNameServer;
+    if (!net_dnr) return noNameServer;
     memset(&slots[k].info, 0, sizeof slots[k].info);
     strncpy(slots[k].name, host, 255);
     slots[k].name[255] = 0;
-    err = ((dnr_proc)*dnr_code)(STRTOADDR, slots[k].name, &slots[k].info, (ProcPtr)resolve_result, (char *)id);
+    err = ((dnr_proc)*net_dnr)(STRTOADDR, slots[k].name, &slots[k].info, (ProcPtr)resolve_result, (char *)id);
     if (err == cacheFault) {
         while (answered != id) {
             SystemTask();
@@ -117,26 +81,12 @@ OSErr net_resolve(const char *host, ip_addr *addr)
 
 /* ------------------------------------------------------------ setup */
 
-OSErr net_init(void)
-{
-    OSErr err = OpenDriver("\p.IPP", &ipp);
-    if (err != noErr) return err;
-    dnr_code = load_dnrp_from(kControlPanelFolderType);
-    if (!dnr_code) dnr_code = load_dnrp_from(kSystemFolderType);
-    if (!dnr_code) dnr_code = load_dnrp_from(kExtensionFolderType);
-    if (dnr_code && ((dnr_proc)*dnr_code)(OPENRESOLVER, (char *)NULL) != noErr) {
-        DisposeHandle(dnr_code);
-        dnr_code = NULL;
-    }
-    return noErr;
-}
-
 void net_shutdown(void)
 {
-    if (dnr_code) {
-        ((dnr_proc)*dnr_code)(CLOSERESOLVER);
-        DisposeHandle(dnr_code);
-        dnr_code = NULL;
+    if (net_dnr) {
+        ((dnr_proc)*net_dnr)(CLOSERESOLVER);
+        DisposeHandle(net_dnr);
+        net_dnr = NULL;
     }
 }
 
@@ -147,7 +97,7 @@ void net_shutdown(void)
    aborted, which ends the call, and it returns userCanceledErr. */
 static OSErr tcp_call(TCPiopb *pb, short code)
 {
-    pb->ioCRefNum = ipp;
+    pb->ioCRefNum = net_ipp;
     pb->csCode = code;
     if (code == TCPCreate || code == TCPRelease || code == TCPAbort) return PBControlSync((ParmBlkPtr)pb);
     PBControlAsync((ParmBlkPtr)pb);
@@ -156,7 +106,7 @@ static OSErr tcp_call(TCPiopb *pb, short code)
         if (net_idle && net_idle()) {
             TCPiopb abort;
             memset(&abort, 0, sizeof abort);
-            abort.ioCRefNum = ipp;
+            abort.ioCRefNum = net_ipp;
             abort.csCode = TCPAbort;
             abort.tcpStream = pb->tcpStream;
             PBControlSync((ParmBlkPtr)&abort);
@@ -167,39 +117,56 @@ static OSErr tcp_call(TCPiopb *pb, short code)
     return pb->ioResult;
 }
 
-#define BODY_PIECES 8   /* a send's buffers are at most 64K each: a body of up to 512K */
+/* ------------------------------------------------------------ connections */
 
-OSErr net_http_request(const char *host, unsigned short port, const char *target, const char *site,
-                       const char *headers, const char *content_type, const char *body, long body_len,
-                       net_sink sink, void *ref)
+struct NetConn {
+    StreamPtr stream;
+    Ptr rcv_buffer;
+    TCPiopb *wait;          /* a listen's open, still going */
+};
+
+static void conn_free(NetConn *c)
 {
     TCPiopb pb;
-    Ptr rcv_buffer, chunk;
-    StreamPtr stream;
-    ip_addr addr;
-    wdsEntry wds[BODY_PIECES + 2];
-    char *request;
-    OSErr err;
-    long len;
-    int w;
+    if (c->stream) {
+        memset(&pb, 0, sizeof pb);
+        pb.tcpStream = c->stream;
+        tcp_call(&pb, TCPRelease);
+    }
+    if (c->wait) { while (c->wait->ioResult > 0) SystemTask(); DisposePtr((Ptr)c->wait); }
+    if (c->rcv_buffer) DisposePtr(c->rcv_buffer);
+    DisposePtr((Ptr)c);
+}
 
+static OSErr conn_new(NetConn **out)
+{
+    TCPiopb pb;
+    NetConn *c = (NetConn *)NewPtrClear(sizeof *c);
+    OSErr err;
+    *out = NULL;
+    if (!c) return memFullErr;
+    if (!(c->rcv_buffer = NewPtr(RCV_BUFFER_SIZE))) { DisposePtr((Ptr)c); return memFullErr; }
+    memset(&pb, 0, sizeof pb);
+    pb.csParam.create.rcvBuff = c->rcv_buffer;
+    pb.csParam.create.rcvBuffLen = RCV_BUFFER_SIZE;
+    if ((err = tcp_call(&pb, TCPCreate)) != noErr) { conn_free(c); return err; }
+    c->stream = pb.tcpStream;
+    *out = c;
+    return noErr;
+}
+
+OSErr net_tcp_open(const char *host, unsigned short port, NetConn **out)
+{
+    TCPiopb pb;
+    ip_addr addr;
+    OSErr err;
+    *out = NULL;
     net_stage = NET_LOOKUP;
     status("Looking up host...");
     if ((err = net_resolve(host, &addr)) != noErr) return err;
-    if (!(rcv_buffer = NewPtr(RCV_BUFFER_SIZE))) return memFullErr;
-    if (!(chunk = NewPtr(2048))) { DisposePtr(rcv_buffer); return memFullErr; }
-    if (body_len > 65535L * BODY_PIECES) body_len = 65535L * BODY_PIECES;
-    if (!headers) headers = "";
-    if (!(request = NewPtr(strlen(target) + strlen(site) + strlen(headers) + 256))) { DisposePtr(chunk); DisposePtr(rcv_buffer); return memFullErr; }
-
+    if ((err = conn_new(out)) != noErr) return err;
     memset(&pb, 0, sizeof pb);
-    pb.csParam.create.rcvBuff = rcv_buffer;
-    pb.csParam.create.rcvBuffLen = RCV_BUFFER_SIZE;
-    if ((err = tcp_call(&pb, TCPCreate)) != noErr) goto done;
-    stream = pb.tcpStream;
-
-    memset(&pb.csParam, 0, sizeof pb.csParam);
-    pb.tcpStream = stream;
+    pb.tcpStream = (*out)->stream;
     pb.csParam.open.ulpTimeoutValue = TIMEOUT;
     pb.csParam.open.ulpTimeoutAction = 1;           /* abort */
     pb.csParam.open.validityFlags = 0xC0;           /* both of the above are set */
@@ -208,68 +175,121 @@ OSErr net_http_request(const char *host, unsigned short port, const char *target
     pb.csParam.open.remotePort = port;
     net_stage = NET_CONNECT;
     status("Connecting...");
-    if ((err = tcp_call(&pb, TCPActiveOpen)) != noErr) goto release;
-
-    /* An HTTP/1.0 request, as browsers of 1996 sent them */
-    strcpy(request, content_type ? "POST " : "GET ");
-    strcat(request, target);
-    strcat(request, " HTTP/1.0\r\nAccept: */*\r\nHost: ");
-    strcat(request, site);
-    if (headers[0]) {
-        strcat(request, "\r\n");
-        strcat(request, headers);
-    }
-    if (content_type) {
-        char *end = request + strlen(request);
-        sprintf(end, "\r\nContent-Type: %.100s\r\nContent-Length: %ld", content_type, body_len);
-    }
-    strcat(request, "\r\n\r\n");
-    wds[0].length = strlen(request);
-    wds[0].ptr = request;
-    for (w = 1, len = 0; content_type && len < body_len; w++) {
-        long piece = body_len - len > 65535L ? 65535L : body_len - len;
-        wds[w].length = (unsigned short)piece;
-        wds[w].ptr = (Ptr)body + len;
-        len += piece;
-    }
-    wds[w].length = 0;
-    memset(&pb.csParam, 0, sizeof pb.csParam);
-    pb.tcpStream = stream;
-    pb.csParam.send.ulpTimeoutValue = TIMEOUT;
-    pb.csParam.send.ulpTimeoutAction = 1;
-    pb.csParam.send.validityFlags = 0xC0;
-    pb.csParam.send.pushFlag = true;
-    pb.csParam.send.wdsPtr = (Ptr)wds;
-    if ((err = tcp_call(&pb, TCPSend)) != noErr) goto release;
+    if ((err = tcp_call(&pb, TCPActiveOpen)) != noErr) { conn_free(*out); *out = NULL; return err; }
     net_stage = NET_TRANSFER;
-    status("Waiting for reply...");
+    return noErr;
+}
 
-    for (;;) {
-        memset(&pb.csParam, 0, sizeof pb.csParam);
-        pb.tcpStream = stream;
-        pb.csParam.receive.commandTimeoutValue = TIMEOUT;
-        pb.csParam.receive.rcvBuff = chunk;
-        pb.csParam.receive.rcvBuffLen = 2048;
-        err = tcp_call(&pb, TCPRcv);
-        if (err != noErr) break;
-        len = pb.csParam.receive.rcvBuffLen;
-        if (len > 0 && !sink(chunk, len, ref)) break;
+OSErr net_tcp_send(NetConn *c, const void *data, long len)
+{
+    TCPiopb pb;
+    wdsEntry wds[2];
+    OSErr err = noErr;
+    while (len > 0 && err == noErr) {
+        long piece = len > 65535L ? 65535L : len;
+        wds[0].length = (unsigned short)piece;
+        wds[0].ptr = (Ptr)data;
+        wds[1].length = 0;
+        memset(&pb, 0, sizeof pb);
+        pb.tcpStream = c->stream;
+        pb.csParam.send.ulpTimeoutValue = TIMEOUT;
+        pb.csParam.send.ulpTimeoutAction = 1;
+        pb.csParam.send.validityFlags = 0xC0;
+        pb.csParam.send.pushFlag = true;
+        pb.csParam.send.wdsPtr = (Ptr)wds;
+        err = tcp_call(&pb, TCPSend);
+        data = (const char *)data + piece;
+        len -= piece;
     }
-    if (err == connectionClosing || err == connectionTerminated) err = noErr;
-
-    memset(&pb.csParam, 0, sizeof pb.csParam);
-    pb.tcpStream = stream;
-    pb.csParam.close.ulpTimeoutValue = TIMEOUT;
-    pb.csParam.close.validityFlags = 0x80;
-    tcp_call(&pb, TCPClose);
-
-release:
-    memset(&pb.csParam, 0, sizeof pb.csParam);
-    pb.tcpStream = stream;
-    tcp_call(&pb, TCPRelease);
-done:
-    DisposePtr(request);
-    DisposePtr(chunk);
-    DisposePtr(rcv_buffer);
     return err;
 }
+
+OSErr net_tcp_recv(NetConn *c, void *buf, long *len)
+{
+    TCPiopb pb;
+    OSErr err;
+    memset(&pb, 0, sizeof pb);
+    pb.tcpStream = c->stream;
+    pb.csParam.receive.commandTimeoutValue = TIMEOUT;
+    pb.csParam.receive.rcvBuff = buf;
+    pb.csParam.receive.rcvBuffLen = (unsigned short)(*len > 65535L ? 65535L : *len);
+    err = tcp_call(&pb, TCPRcv);
+    if (err == connectionClosing || err == connectionTerminated) { *len = 0; return noErr; }
+    *len = err == noErr ? pb.csParam.receive.rcvBuffLen : 0;
+    return err;
+}
+
+void net_tcp_close(NetConn *c)
+{
+    TCPiopb pb;
+    if (!c) return;
+    if (!c->wait) {
+        memset(&pb, 0, sizeof pb);
+        pb.tcpStream = c->stream;
+        pb.csParam.close.ulpTimeoutValue = TIMEOUT;
+        pb.csParam.close.validityFlags = 0x80;
+        tcp_call(&pb, TCPClose);
+    }
+    conn_free(c);
+}
+
+OSErr net_tcp_listen(NetConn **out, ip_addr *addr, unsigned short *port)
+{
+    static unsigned short next = 0;
+    GetAddrParamBlock ga;
+    NetConn *c;
+    OSErr err;
+    *out = NULL;
+    memset(&ga, 0, sizeof ga);
+    ga.ioCRefNum = net_ipp;
+    ga.csCode = ipctlGetAddr;
+    if ((err = PBControlSync((ParmBlkPtr)&ga)) != noErr) return err;
+    *addr = ga.ourAddress;
+    if ((err = conn_new(&c)) != noErr) return err;
+    if (!(c->wait = (TCPiopb *)NewPtrClear(sizeof(TCPiopb)))) { conn_free(c); return memFullErr; }
+    /* a port of Mill's own choosing, from the range kept for such things */
+    if (!next) next = (unsigned short)(TickCount() & 0x0FFF);
+    *port = (unsigned short)(49152U + (next++ & 0x3FFF));
+    c->wait->ioCRefNum = net_ipp;
+    c->wait->csCode = TCPPassiveOpen;
+    c->wait->tcpStream = c->stream;
+    c->wait->csParam.open.ulpTimeoutValue = TIMEOUT;
+    c->wait->csParam.open.ulpTimeoutAction = 1;
+    c->wait->csParam.open.validityFlags = 0xC0;
+    c->wait->csParam.open.commandTimeoutValue = TIMEOUT;
+    c->wait->csParam.open.localPort = *port;
+    PBControlAsync((ParmBlkPtr)c->wait);
+    if (c->wait->ioResult < 0) { err = c->wait->ioResult; conn_free(c); return err; }
+    *out = c;
+    return noErr;
+}
+
+OSErr net_tcp_accept(NetConn *c)
+{
+    OSErr err;
+    if (!c->wait) return noErr;
+    while (c->wait->ioResult > 0) {
+        SystemTask();
+        if (net_idle && net_idle()) {
+            TCPiopb abort;
+            memset(&abort, 0, sizeof abort);
+            abort.ioCRefNum = net_ipp;
+            abort.csCode = TCPAbort;
+            abort.tcpStream = c->stream;
+            PBControlSync((ParmBlkPtr)&abort);
+            return userCanceledErr;
+        }
+    }
+    err = c->wait->ioResult;
+    DisposePtr((Ptr)c->wait);
+    c->wait = NULL;
+    return err;
+}
+
+#ifdef MILL_MEMREPORT
+void memreport_net(void)
+{
+    memreport_note(net_dnr, "MacTCP resolver code (from its file)", 1);
+    memreport_settings();
+}
+#endif
