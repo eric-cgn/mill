@@ -694,7 +694,7 @@ static void config(Out *o, const char *body, long len)
     font_row(o, "Fixed font", "fixed", 1, "Monospace font for fixed-width text.");
     out_s(o, "<TR><TD VALIGN=TOP WIDTH=110><B>Scale Text Only</B><TD><INPUT TYPE=checkbox NAME=scale_text_only VALUE=yes");
     if (!strcmp(setting("scale_text_only", "no"), "yes")) out_s(o, " CHECKED");
-    out_s(o, "> Mill scales only the text when zooming (lower memory use)");
+    out_s(o, "> Zoom scales text only. Uses less memory.");
     out_s(o, "<TR><TD VALIGN=TOP WIDTH=110><B>Load images automatically</B><TD><INPUT TYPE=checkbox NAME=load_images VALUE=yes");
     if (auto_images()) out_s(o, " CHECKED");
     out_s(o, "> When off, use the context menu to load individually."
