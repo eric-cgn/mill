@@ -335,7 +335,7 @@ static void test_rule_and_cell_height(void)
     if (n == 3) {
         CHECK(r[0]->width == 192 && r[0]->x == 8 + 192 && r[0]->size == 6 && r[0]->face == 1);   /* half the line, at the right */
         CHECK(r[1]->width == 100 && r[1]->x == 8 + (384 - 100) / 2 && r[1]->size == 3 && r[1]->face == 0);   /* centered */
-        CHECK(r[2]->width == 384 && r[2]->x == 8 && r[2]->size == 2);                                       /* the default */
+        CHECK(r[2]->width == 384 && r[2]->x == 8 && r[2]->size == 1);                                       /* the default */
     }
     m.zoom = 18;
     CHECK(layout_doc(&L2, &d, &m, 400) == 0);

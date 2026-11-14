@@ -1180,10 +1180,10 @@ static void walk(State *S, long node, Ctx c)
         {
             Run *r;
             if (S->L->nruns == S->line_first && (r = add_run(S))) {
-                /* HTML 3.2: SIZE is the thickness in pixels (2), WIDTH pixels or a percent of the line (all of
+                /* HTML 3.2: SIZE is the thickness in pixels (1), WIDTH pixels or a percent of the line (all of
                    it), ALIGN left, center (when narrower than the line), or right, NOSHADE a solid bar.
                    size is the thickness, face 1 for NOSHADE. */
-                short full = line_right(S) - line_left(S), w = full, thick = 2, off;
+                short full = line_right(S) - line_left(S), w = full, thick = 1, off;
                 const char *v;
                 char al = ALIGN_CENTER;
                 if ((v = html_attr(d, n, "size")) && atoi(v) > 0) thick = (short)(atoi(v) > 200 ? 200 : atoi(v));
