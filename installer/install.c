@@ -182,6 +182,7 @@ static Rect prog_bar;
 static long prog_total, prog_done;            /* bytes of the files to write, and done */
 static short prog_drawn;                      /* pixels of the bar filled in */
 static char prog_line[48];
+static Boolean prog_over;                     /* the end: the message and one button, no bar */
 
 /* The bar moves with every piece that comes out of the decompressor */
 static void prog_add(long n)
@@ -745,9 +746,39 @@ static void open_progress(void)
     SetDialogItem(prog_dlg, 2, type, (Handle)(UserItemUPP)prog_draw, &r);
     SetRect(&prog_bar, 12, 44, 288, 60);
     prog_line[0] = 0;
+    prog_over = false;
+    prog_drawn = 0;
     ShowWindow(prog_dlg);
     SetPort(prog_dlg);
     DrawDialog(prog_dlg);
+}
+
+static pascal Boolean prog_filter(DialogPtr d, EventRecord *e, short *item)
+{
+    (void)d;
+    if (e->what == keyDown || e->what == autoKey) {
+        char c = e->message & charCodeMask;
+        if (c == 13 || c == 3) { *item = 1; return true; }
+    }
+    return false;
+}
+
+/* The end, in the same window: a message and one button (Quit, or OK for an error) until it's pressed */
+static void prog_finish(const char *text, const char *button)
+{
+    short item;
+    Str255 t;
+    Rect r;
+    pascalize(t, button);
+    SetControlTitle(c_cancel, t);
+    prog_over = true;
+    SetPort(prog_dlg);
+    r = prog_dlg->portRect;
+    EraseRect(&r);
+    strcpy(prog_line, text);
+    prog_draw(prog_dlg, 2);
+    InitCursor();
+    do ModalDialog((ModalFilterUPP)prog_filter, &item); while (item != 1);
 }
 
 static void close_progress(void)
@@ -763,11 +794,11 @@ static void prog_text(const char *t)
     GrafPtr save;
     GetPort(&save);
     SetPort(prog_dlg);
-    SetRect(&r, 12, 12, 288, 34);
+    SetRect(&r, 12, 12, 288, 46);
     EraseRect(&r);
     big_font();
     pascalize(str, t);
-    MoveTo(12 + (276 - StringWidth(str)) / 2, 28);
+    MoveTo(12 + (276 - StringWidth(str)) / 2, prog_over ? 42 : 28);
     DrawString(str);
     strcpy(prog_line, t);
     SetPort(save);
@@ -777,11 +808,13 @@ static pascal void prog_draw(DialogPtr d, short item)
 {
     Rect fill;
     (void)item;
-    FrameRect(&prog_bar);
-    fill = prog_bar;
-    InsetRect(&fill, 2, 2);
-    fill.right = fill.left + prog_drawn;
-    PaintRect(&fill);
+    if (!prog_over) {
+        FrameRect(&prog_bar);
+        fill = prog_bar;
+        InsetRect(&fill, 2, 2);
+        fill.right = fill.left + prog_drawn;
+        PaintRect(&fill);
+    }
     ring(c_cancel);
     DrawControls(d);
     prog_text(prog_line);
@@ -1025,16 +1058,23 @@ int main(void)
             else if (stage == S_INSTALL) {
                 OSErr err;
                 SetCursor(*GetCursor(watchCursor));
-                if ((err = resolve_place()) != noErr) { InitCursor(); set_stage(d, S_ERROR, "Folder creation failed."); continue; }
                 HideWindow(d);
                 open_progress();
+                if ((err = resolve_place()) != noErr) {
+                    prog_finish("Folder creation failed.", "OK");
+                    close_progress();
+                    ShowWindow(d);
+                    SetPort(d);
+                    set_stage(d, S_INSTALL, NULL);
+                    continue;
+                }
                 err = run_install(d, !custom || checked[0], !custom || checked[1], !custom || checked[2], custom && checked[3]);
-                close_progress();
-                ShowWindow(d);
-                SetPort(d);
                 InitCursor();
                 note[0] = 0;
                 if (err == userCanceledErr) {
+                    close_progress();
+                    ShowWindow(d);
+                    SetPort(d);
                     strcpy(note, "Installation canceled.");
                     set_stage(d, S_INSTALL, NULL);
                 } else if (err) {
@@ -1046,8 +1086,16 @@ int main(void)
                     strcpy(text, "Installation failed (error ");
                     strcat(text, num);
                     strcat(text, ").");
-                    set_stage(d, S_ERROR, text);
-                } else set_stage(d, S_DONE, "Mill is installed.");
+                    prog_finish(text, "OK");
+                    close_progress();
+                    ShowWindow(d);
+                    SetPort(d);
+                    set_stage(d, S_INSTALL, NULL);
+                } else {
+                    prog_finish("Mill is installed.", "Quit");
+                    close_progress();
+                    done = true;
+                }
             }
         }
     }
