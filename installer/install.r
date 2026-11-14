@@ -38,3 +38,14 @@ resource 'DITL' (128) {
         {0, 0, 256, 440}, UserItem { enabled }
     }
 };
+
+/* The small window while installing: a line, the bar, and Cancel */
+resource 'DLOG' (130) {
+    {118, 106, 228, 406}, noGrowDocProc, invisible, noGoAway, 0, 130, "Install Mill " MILL_VERSION, noAutoCenter
+};
+resource 'DITL' (130) {
+    {
+        {76, 208, 98, 288}, Button { enabled, "Cancel" },
+        {0, 0, 110, 300}, UserItem { disabled }
+    }
+};

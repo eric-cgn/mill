@@ -9,7 +9,7 @@
 #include "../src/core/inflate.h"
 
 /* One window, 440 by 256, for every stage; the program draws what's in it over a user item, around the buttons */
-enum { WIN = 128, B_PRIMARY = 1, B_QUIT, B_CHOOSE, CANVAS };
+enum { PROG = 130, WIN = 128, B_PRIMARY = 1, B_QUIT, B_CHOOSE, CANVAS };
 enum { S_WELCOME, S_INSTALL, S_PROGRESS, S_DONE, S_ERROR };
 enum { ID_MILL = 128, ID_INET = 129, ID_FONTS = 130, ID_SDK = 1000 };
 
@@ -176,8 +176,30 @@ static void end_file(Out *o, Boolean whole)
 }
 
 /* Cancel: a click on the button, Escape, or Command-period, looked for as the files are written */
-static DialogPtr main_dlg;
-static ControlHandle c_primary;
+static DialogPtr main_dlg, prog_dlg;          /* the choices' window, and the small one while installing */
+static ControlHandle c_primary, c_cancel;
+static Rect prog_bar;
+static long prog_total, prog_done;            /* bytes of the files to write, and done */
+static short prog_drawn;                      /* pixels of the bar filled in */
+static char prog_line[48];
+
+/* The bar moves with every piece that comes out of the decompressor */
+static void prog_add(long n)
+{
+    short w = prog_bar.right - prog_bar.left - 4, x;
+    Rect r;
+    GrafPtr save;
+    prog_done += n;
+    if (!prog_dlg || prog_total <= 0) return;
+    x = (short)((long)w * (prog_done > prog_total ? prog_total : prog_done) / prog_total);
+    if (x <= prog_drawn) return;
+    GetPort(&save);
+    SetPort(prog_dlg);
+    SetRect(&r, prog_bar.left + 2 + prog_drawn, prog_bar.top + 2, prog_bar.left + 2 + x, prog_bar.bottom - 2);
+    PaintRect(&r);
+    prog_drawn = x;
+    SetPort(save);
+}
 
 static Boolean poll_cancel(void)
 {
@@ -187,10 +209,10 @@ static Boolean poll_cancel(void)
             Point p = e.where;
             ControlHandle c;
             WindowPtr w;
-            if (FindWindow(p, &w) == inContent && w == (WindowPtr)main_dlg) {
-                SetPort(main_dlg);
+            if (prog_dlg && FindWindow(p, &w) == inContent && w == (WindowPtr)prog_dlg) {
+                SetPort(prog_dlg);
                 GlobalToLocal(&p);
-                if (FindControl(p, main_dlg, &c) && c == c_primary && TrackControl(c, p, NULL)) return true;
+                if (FindControl(p, prog_dlg, &c) && c == c_cancel && TrackControl(c, p, NULL)) return true;
             }
         } else {
             char ch = e.message & charCodeMask;
@@ -207,7 +229,7 @@ static int sink(void *ref, const unsigned char *p, long n)
     long at = o->at, end, i;
     if (o->err) return 1;
     if (n <= 0) return 0;
-    if (at == 0 || at - o->polled >= 8192) {       /* every 8K or so */
+    if (at == 0 || at - o->polled >= 4096) {       /* every 4K or so */
         o->polled = at;
         if (poll_cancel()) { o->err = userCanceledErr; return 1; }
     }
@@ -222,6 +244,7 @@ static int sink(void *ref, const unsigned char *p, long n)
         if (o->rf && b > a && (o->err = put(o->rf, p + (a - at), b - a)) != noErr) return 1;
     }
     o->at = end;
+    prog_add(n);
     return 0;
 }
 
@@ -320,17 +343,16 @@ enum { MARGIN = 12, ROW = 16, BAR = 16, ROWS = 7 };
 
 static short stage;
 static char message[64], note[48];     /* what's shown, and a note under the box */
-static short progress_done, progress_total;
 static ControlHandle c_quit, c_choose, w1_bar, w2_bar;
 
 static void small_font(void) { TextFont(kFontIDGeneva); TextSize(9); TextFace(0); }
 static void big_font(void) { TextFont(systemFont); TextSize(12); TextFace(0); }
 
-static void ring(void)
+static void ring(ControlHandle c)
 {
-    Rect r = (*c_primary)->contrlRect;
+    Rect r = (*c)->contrlRect;
     PenState ps;
-    if (!(*c_primary)->contrlVis) return;
+    if (!(*c)->contrlVis) return;
     GetPenState(&ps);
     PenSize(3, 3);
     InsetRect(&r, -4, -4);
@@ -575,19 +597,6 @@ static void draw_install(void)
 
 /* ---- installing, and the end ---- */
 
-static void draw_progress(void)
-{
-    Rect bar, fill;
-    big_font();
-    draw_centered(message, 96);
-    SetRect(&bar, MARGIN + 60, 116, MARGIN + 356, 132);
-    FrameRect(&bar);
-    fill = bar;
-    InsetRect(&fill, 2, 2);
-    if (progress_total) fill.right = fill.left + (fill.right - fill.left) * progress_done / progress_total;
-    PaintRect(&fill);
-}
-
 static void draw_message(void)
 {
     big_font();
@@ -599,10 +608,9 @@ static pascal void draw_all(DialogPtr d, short item)
     (void)item;
     switch (stage) {
     case S_INSTALL: draw_install(); break;
-    case S_PROGRESS: draw_progress(); break;
     default: draw_message();
     }
-    ring();
+    ring(c_primary);
     DrawControls(d);
 }
 
@@ -646,11 +654,6 @@ static void set_stage(DialogPtr d, short st, const char *text)
         place_control(d, B_PRIMARY, 12, 348, 34, 428, "Install", true);
         place_control(d, B_QUIT, 46, 348, 68, 428, "Quit", true);
         place_control(d, B_CHOOSE, 220, 342, 240, 422, "Choose\311", true);
-        break;
-    case S_PROGRESS:
-        place_control(d, B_PRIMARY, 12, 348, 34, 428, "Cancel", true);
-        place_control(d, B_QUIT, 0, 0, 0, 0, NULL, false);
-        place_control(d, B_CHOOSE, 0, 0, 0, 0, NULL, false);
         break;
     case S_DONE:
         place_control(d, B_PRIMARY, 0, 0, 0, 0, NULL, false);
@@ -726,12 +729,70 @@ static OSErr resolve_place(void)
     return dir_of(place_vol, place_parent, place_name, &place_dir);
 }
 
-static void step(DialogPtr d, const char *verb, const char *what, short done)
+/* The progress window: one plain line, and the bar */
+static pascal void prog_draw(DialogPtr d, short item);
+
+static void open_progress(void)
 {
-    strcpy(message, verb);
-    strcat(message, what);
-    progress_done = done;
-    redraw(d);
+    short type;
+    Handle h;
+    Rect r;
+    prog_dlg = GetNewDialog(PROG, NULL, (WindowPtr)-1);
+    if (!prog_dlg) return;
+    GetDialogItem(prog_dlg, 1, &type, &h, &r);
+    c_cancel = (ControlHandle)h;
+    GetDialogItem(prog_dlg, 2, &type, &h, &r);
+    SetDialogItem(prog_dlg, 2, type, (Handle)(UserItemUPP)prog_draw, &r);
+    SetRect(&prog_bar, 12, 44, 288, 60);
+    prog_line[0] = 0;
+    ShowWindow(prog_dlg);
+    SetPort(prog_dlg);
+    DrawDialog(prog_dlg);
+}
+
+static void close_progress(void)
+{
+    if (prog_dlg) DisposeDialog(prog_dlg);
+    prog_dlg = NULL;
+}
+
+static void prog_text(const char *t)
+{
+    Rect r;
+    Str255 str;
+    GrafPtr save;
+    GetPort(&save);
+    SetPort(prog_dlg);
+    SetRect(&r, 12, 12, 288, 34);
+    EraseRect(&r);
+    big_font();
+    pascalize(str, t);
+    MoveTo(12 + (276 - StringWidth(str)) / 2, 28);
+    DrawString(str);
+    strcpy(prog_line, t);
+    SetPort(save);
+}
+
+static pascal void prog_draw(DialogPtr d, short item)
+{
+    Rect fill;
+    (void)item;
+    FrameRect(&prog_bar);
+    fill = prog_bar;
+    InsetRect(&fill, 2, 2);
+    fill.right = fill.left + prog_drawn;
+    PaintRect(&fill);
+    ring(c_cancel);
+    DrawControls(d);
+    prog_text(prog_line);
+}
+
+static void step(const char *verb, const char *what)
+{
+    char line[48];
+    strcpy(line, verb);
+    strcat(line, what);
+    prog_text(line);
 }
 
 /* A folder that's there (not made, as dir_of does) */
@@ -750,13 +811,16 @@ static OSErr find_dir(short vref, long parent, ConstStr255Param name, long *dir)
 }
 
 /* An old name from an earlier version, gone if it's there */
+static Boolean removing;
+
 static OSErr retire(DialogPtr d, long dir, const char *what)
 {
+    (void)d;
     Str255 name;
     pstr(name, what);
     if (!has_file(place_vref, dir, name)) return noErr;
     if (poll_cancel()) return userCanceledErr;
-    step(d, "Removing: ", what, progress_done);
+    if (!removing) { removing = 1; step("Removing", " old files"); }
     remove_file(place_vref, dir, name);
     return noErr;
 }
@@ -765,13 +829,24 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
 {
     static const struct { short id; char *what; } ONE[3] = { { ID_MILL, "Mill" }, { ID_INET, "Internet Services" }, { ID_FONTS, "Web Fonts" } };
     Boolean want[3];
-    short i, n, done = 0;
+    short i, n;
+    Handle iu;
     OSErr err = noErr;
     Str255 name;
     long dir;
     want[0] = mill; want[1] = inet; want[2] = fonts;
     size_window(place_vref, place_dir);
-    progress_total = mill + inet + fonts + sdk;
+    removing = false;
+    prog_done = 0;
+    prog_drawn = 0;
+    prog_total = 0;
+    if ((iu = Get1Resource('IUNC', 128)) && GetHandleSize(iu) >= 16) {
+        long *u = (long *)*iu;
+        if (mill) prog_total += u[0];
+        if (inet) prog_total += u[1];
+        if (fonts) prog_total += u[2];
+        if (sdk) prog_total += u[3];
+    }
     /* retired names from earlier versions */
     err = retire(d, place_dir, "Mill Fonts");
     if (!err) err = retire(d, place_dir, "Mill Fonts Read Me");
@@ -782,7 +857,7 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
         Handle h;
         if (!want[i]) continue;
         if (poll_cancel()) return userCanceledErr;
-        step(d, "Installing: ", ONE[i].what, done++);
+        step("Installing ", ONE[i].what);
         if (!(h = Get1Resource('MBIN', ONE[i].id))) return resNotFound;
         err = install_one(h);
         ReleaseResource(h);
@@ -790,7 +865,7 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
     if (sdk && !err) {
         n = Count1Resources('MBIN');
         if (poll_cancel()) return userCanceledErr;
-        step(d, "Installing: ", "Mill Plug-In SDK", done++);
+        step("Installing ", "Mill Plug-In SDK");
         for (i = 1; i <= n && !err; i++) {
             Handle h = Get1IndResource('MBIN', i);
             short id;
@@ -803,7 +878,6 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
         }
     }
     FlushVol(NULL, place_vref);
-    progress_done = progress_total;
     return err;
 }
 
@@ -952,9 +1026,12 @@ int main(void)
                 OSErr err;
                 SetCursor(*GetCursor(watchCursor));
                 if ((err = resolve_place()) != noErr) { InitCursor(); set_stage(d, S_ERROR, "Folder creation failed."); continue; }
-                progress_done = 0;
-                set_stage(d, S_PROGRESS, "");
+                HideWindow(d);
+                open_progress();
                 err = run_install(d, !custom || checked[0], !custom || checked[1], !custom || checked[2], custom && checked[3]);
+                close_progress();
+                ShowWindow(d);
+                SetPort(d);
                 InitCursor();
                 note[0] = 0;
                 if (err == userCanceledErr) {
