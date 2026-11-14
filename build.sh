@@ -6,6 +6,7 @@
 # file of what its memory holds, once the window is up and once the first page is in.
 # ./build.sh disk makes the distribution disk (tools/disk.py): dist/Mill-*.dsk, from build/Mill.bin
 # (build first) and the Internet Services and Web Fonts it builds itself.
+# ./build.sh installer makes Install Mill (build/installer/Install.bin) from those, for a release.
 # ./build.sh kit makes the Plug-In SDK instead (tools/kit.py): dist/PlugInSDK-*.dsk and .zip.
 set -e
 cd "$(dirname "$0")"
@@ -17,6 +18,14 @@ if [ "${1:-}" = disk ]; then
 		pip install -q freetype-py macresources &&
 		python3 tools/extras/build.py --styles --cache build/fontcache --out build/fonts >/dev/null'
 	exec docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src "$IMAGE" python3 tools/disk.py
+fi
+if [ "${1:-}" = installer ]; then
+	# Install Mill 2.0 (installer/): the payload from the builds above, then the program
+	rm -rf build/installer
+	exec docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src "$IMAGE" sh -c '
+		set -e
+		python3 tools/installer.py
+		cd build/installer && cmake ../../installer -DCMAKE_TOOLCHAIN_FILE=/Retro68-build/toolchain/m68k-apple-macos/cmake/retro68.toolchain.cmake >/dev/null && make'
 fi
 if [ "${1:-}" = kit ]; then
 	exec docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src "$IMAGE" python3 tools/kit.py
