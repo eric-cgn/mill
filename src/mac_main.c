@@ -355,12 +355,15 @@ static Boolean pack_fixed(PackFam *f)
     return f->fixed;
 }
 
-/* The name used when a setting is empty or names a font that's gone: Mill Serif and Mill Mono if
-   a suitcase has them, else the System's Times and Courier */
+static int font_number(const char *name);
+
+/* The name used when a setting is empty or names a font that's gone: the System's Times and
+   Courier, or Mill Serif and Mill Mono where the System doesn't have them */
 const char *font_default(int fixed)
 {
-    if (fixed) return pack_by_name("Mill Mono") ? "Mill Mono" : "Courier";
-    return pack_by_name("Mill Serif") ? "Mill Serif" : "Times";
+    const char *sys = fixed ? "Courier" : "Times", *pack = fixed ? "Mill Mono" : "Mill Serif";
+    if (font_number(sys) >= 0 || !pack_by_name(pack)) return sys;
+    return pack;
 }
 
 static short name_pstr(const char *name, Str255 p)
