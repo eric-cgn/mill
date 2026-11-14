@@ -17,10 +17,12 @@ enum { ID_MILL = 128, ID_INET = 129, ID_FONTS = 130, ID_SDK = 1000 };
 typedef struct {
     short vref;
     long dir;
-    Str255 name;
+    Str255 name, tmp;       /* the file's name, and what it's called while it's written */
     unsigned char head[128];
     long dlen, rlen;
-    long at;                /* where in the stream the next piece begins */
+    Point loc;              /* where its icon goes in the folder's window, if place */
+    char place;
+    long at, polled;        /* where in the stream the next piece begins, and where Cancel was last looked for */
     short df, rf;
     char opened;
     OSErr err;
@@ -112,36 +114,43 @@ static void close_fork(short ref)
 
 static long be32(const unsigned char *p) { return ((long)p[0] << 24) | ((long)p[1] << 16) | ((long)p[2] << 8) | p[3]; }
 
-/* The file: created (a file of that name is replaced) once the 128-byte header is in */
+/* The file, written under a name of its own and put in place when it's whole, so a Cancel or a full disk
+   leaves what was there. Created once the 128-byte header is in. */
 static OSErr begin_file(Out *o)
 {
     HParamBlockRec h;
     OSErr err;
-    remove_file(o->vref, o->dir, o->name);
+    short n = o->name[0] > 30 ? 30 : o->name[0];
+    o->tmp[0] = (unsigned char)(n + 1);
+    o->tmp[1] = '~';
+    memcpy(o->tmp + 2, o->name + 1, n);
+    remove_file(o->vref, o->dir, o->tmp);
     memset(&h, 0, sizeof h);
-    h.fileParam.ioNamePtr = o->name;
+    h.fileParam.ioNamePtr = o->tmp;
     h.fileParam.ioVRefNum = o->vref;
     h.fileParam.ioDirID = o->dir;
     if ((err = PBHCreateSync(&h)) != noErr) return err;
+    o->opened = 1;
     o->dlen = be32(o->head + 83);
     o->rlen = be32(o->head + 87);
     o->df = o->rf = 0;
-    if (o->dlen && (err = open_fork(o->vref, o->dir, o->name, false, &o->df)) != noErr) return err;
-    if (o->rlen && (err = open_fork(o->vref, o->dir, o->name, true, &o->rf)) != noErr) return err;
-    o->opened = 1;
+    if (o->dlen && (err = open_fork(o->vref, o->dir, o->tmp, false, &o->df)) != noErr) return err;
+    if (o->rlen && (err = open_fork(o->vref, o->dir, o->tmp, true, &o->rf)) != noErr) return err;
     return noErr;
 }
 
-static void end_file(Out *o)
+/* Done with it: whole, it gets its type, creator, and flags and its name (replacing the old file); else it's deleted */
+static void end_file(Out *o, Boolean whole)
 {
     HParamBlockRec h;
     if (o->df) close_fork(o->df);
     if (o->rf) close_fork(o->rf);
     o->df = o->rf = 0;
     if (!o->opened) return;
-    /* type, creator, and Finder flags from the header; "inited" off so the Finder places it */
+    if (!whole) { remove_file(o->vref, o->dir, o->tmp); return; }
+    /* "inited" off so the Finder places it */
     memset(&h, 0, sizeof h);
-    h.fileParam.ioNamePtr = o->name;
+    h.fileParam.ioNamePtr = o->tmp;
     h.fileParam.ioVRefNum = o->vref;
     h.fileParam.ioDirID = o->dir;
     if (PBHGetFInfoSync(&h) == noErr) {
@@ -151,8 +160,44 @@ static void end_file(Out *o)
         h.fileParam.ioFlFndrInfo.fdFlags = (short)((((o->head[73] << 8) | o->head[101])) & ~0x0100);
         h.fileParam.ioFlFndrInfo.fdLocation.h = h.fileParam.ioFlFndrInfo.fdLocation.v = 0;
         h.fileParam.ioFlFndrInfo.fdFldr = 0;
+        if (o->place) {         /* "inited" on, so the Finder keeps the place */
+            h.fileParam.ioFlFndrInfo.fdFlags |= 0x0100;
+            h.fileParam.ioFlFndrInfo.fdLocation = o->loc;
+        }
         PBHSetFInfoSync(&h);
     }
+    remove_file(o->vref, o->dir, o->name);
+    memset(&h, 0, sizeof h);
+    h.ioParam.ioNamePtr = o->tmp;
+    h.ioParam.ioVRefNum = o->vref;
+    h.fileParam.ioDirID = o->dir;
+    h.ioParam.ioMisc = (Ptr)o->name;
+    PBHRenameSync(&h);
+}
+
+/* Cancel: a click on the button, Escape, or Command-period, looked for as the files are written */
+static DialogPtr main_dlg;
+static ControlHandle c_primary;
+
+static Boolean poll_cancel(void)
+{
+    EventRecord e;
+    while (GetNextEvent(mDownMask | keyDownMask | autoKeyMask, &e)) {
+        if (e.what == mouseDown) {
+            Point p = e.where;
+            ControlHandle c;
+            WindowPtr w;
+            if (FindWindow(p, &w) == inContent && w == (WindowPtr)main_dlg) {
+                SetPort(main_dlg);
+                GlobalToLocal(&p);
+                if (FindControl(p, main_dlg, &c) && c == c_primary && TrackControl(c, p, NULL)) return true;
+            }
+        } else {
+            char ch = e.message & charCodeMask;
+            if (ch == 27 || (ch == '.' && (e.modifiers & cmdKey))) return true;
+        }
+    }
+    return false;
 }
 
 /* inflate's output: the MacBinary file, data fork then resource fork, each from the next 128 bytes */
@@ -162,6 +207,10 @@ static int sink(void *ref, const unsigned char *p, long n)
     long at = o->at, end, i;
     if (o->err) return 1;
     if (n <= 0) return 0;
+    if (at == 0 || at - o->polled >= 8192) {       /* every 8K or so */
+        o->polled = at;
+        if (poll_cancel()) { o->err = userCanceledErr; return 1; }
+    }
     end = at + n;
     for (i = at; i < 128 && i < end; i++) o->head[i] = p[i - at];
     if (end >= 128 && !o->opened && (o->err = begin_file(o)) != noErr) return 1;
@@ -174,6 +223,44 @@ static int sink(void *ref, const unsigned char *p, long n)
     }
     o->at = end;
     return 0;
+}
+
+/* The Finder's places in the install folder's window. A location is the icon's top left, less the offset the
+   Finder adds (measured on System 6: an icon's middle is 32 across and 25 down from its location, from the
+   window's own corner): icon middles at 50, 140, and 230 across and 34 and 104 down. Mill is at the top
+   left, the folders a row down from the second column. */
+enum { COL_W = 90, ROW_H = 70, LEFT = 18, TOP = 9 };
+
+static void put_folder(short vref, long parent, ConstStr255Param name, short col, short row, const Rect *window)
+{
+    CInfoPBRec c;
+    memset(&c, 0, sizeof c);
+    c.dirInfo.ioNamePtr = (StringPtr)name;
+    c.dirInfo.ioVRefNum = vref;
+    c.dirInfo.ioDrDirID = parent;
+    if (PBGetCatInfoSync(&c) != noErr) return;
+    if (col >= 0) { c.dirInfo.ioDrUsrWds.frLocation.h = LEFT + col * COL_W; c.dirInfo.ioDrUsrWds.frLocation.v = TOP + row * ROW_H; }
+    if (window) c.dirInfo.ioDrUsrWds.frRect = *window;
+    c.dirInfo.ioDrUsrWds.frFlags |= 0x0100;
+    c.dirInfo.ioNamePtr = (StringPtr)name;
+    c.dirInfo.ioDrDirID = parent;
+    PBSetCatInfoSync(&c);
+}
+
+/* The install folder's own window: big enough for Mill and both folders, with room for the bars */
+static void size_window(short vref, long dir)
+{
+    Str255 name;
+    CInfoPBRec c;
+    Rect r;
+    memset(&c, 0, sizeof c);
+    c.dirInfo.ioNamePtr = name;
+    c.dirInfo.ioVRefNum = vref;
+    c.dirInfo.ioDrDirID = dir;
+    c.dirInfo.ioFDirIndex = -1;
+    if (PBGetCatInfoSync(&c) != noErr) return;
+    SetRect(&r, 40, 60, 340, 250);      /* all of it shows: icons to 275 across, the labels to 133 down, the scroll bars */
+    put_folder(vref, c.dirInfo.ioDrParID, name, -1, 0, &r);
 }
 
 /* One payload resource into the install folder, at the path its name gives */
@@ -197,17 +284,32 @@ static OSErr install_one(Handle res)
         comp[0] = (unsigned char)len;
         memcpy(comp + 1, path + start, len);
         if (i > path[0]) break;                 /* the last part is the file */
-        if ((err = dir_of(place_vref, dir, comp, &dir)) != noErr) return err;
+        {
+            long parent = dir;
+            if ((err = dir_of(place_vref, dir, comp, &dir)) != noErr) return err;
+            if (parent == place_dir) {
+                Str255 p1, p2;
+                pstr(p1, "Mill Plug-Ins");
+                pstr(p2, "Mill Plug-In SDK");
+                if (EqualString(comp, p1, false, true)) put_folder(place_vref, parent, comp, 1, 1, NULL);
+                else if (EqualString(comp, p2, false, true)) put_folder(place_vref, parent, comp, 2, 1, NULL);
+            }
+        }
         i++;
     }
     memcpy(o.name, comp, comp[0] + 1);
     o.dir = dir;
+    if (dir == place_dir) {
+        Str255 m;
+        pstr(m, "Mill");
+        if (EqualString(comp, m, false, true)) { o.place = 1; o.loc.h = LEFT; o.loc.v = TOP; }
+    }
     if (!(z = gz_begin(sink, &o))) return memFullErr;
     HLock(res);
     r = gz_data(z, (unsigned char *)*res, GetHandleSize(res));
     HUnlock(res);
     gz_end(z);
-    end_file(&o);
+    end_file(&o, o.err == noErr && r >= 0);
     if (o.err) return o.err;
     return r < 0 ? paramErr : noErr;
 }
@@ -217,9 +319,9 @@ static OSErr install_one(Handle res)
 enum { MARGIN = 12, ROW = 16, BAR = 16, ROWS = 7 };
 
 static short stage;
-static char message[64];
+static char message[64], note[48];     /* what's shown, and a note under the box */
 static short progress_done, progress_total;
-static ControlHandle c_primary, c_quit, c_choose, w1_bar, w2_bar;
+static ControlHandle c_quit, c_choose, w1_bar, w2_bar;
 
 static void small_font(void) { TextFont(kFontIDGeneva); TextSize(9); TextFace(0); }
 static void big_font(void) { TextFont(systemFont); TextSize(12); TextFace(0); }
@@ -311,7 +413,7 @@ static const struct { const char *text; short part; } LIST[ROWS] = {      /* par
 };
 static const char *const DESC[4] = {
     "The web browser.", "Finger, Whois, Dict, Time, FTP, and Gopher.", "Serif and Mono bitmaps at every HTML size.",
-    "Files for writing Mill Plug-Ins."
+    "Files for writing Mill Plug-Ins, for CodeWarrior 4 and MPW 3.5."
 };
 
 static short place_vol;             /* where the install folder is: a volume, the folder it's in, and its name; */
@@ -432,7 +534,8 @@ static void draw_install(void)
     else draw_list();
     small_font();
     MoveTo(w2_box.left, w2_box.bottom + 14);                        /* what the selected item is */
-    if (custom && sel >= 0) draw_fit(DESC[LIST[sel].part], w2_box.right - w2_box.left);
+    if (note[0]) draw_fit(note, 416);
+    else if (custom && sel >= 0) draw_fit(DESC[LIST[sel].part], 416);
     strcpy(line, "Disk space available: ");
     number_k(line + strlen(line), avail_k);
     strcat(line, "      Needed: ");
@@ -545,7 +648,7 @@ static void set_stage(DialogPtr d, short st, const char *text)
         place_control(d, B_CHOOSE, 220, 342, 240, 422, "Choose\311", true);
         break;
     case S_PROGRESS:
-        place_control(d, B_PRIMARY, 0, 0, 0, 0, NULL, false);
+        place_control(d, B_PRIMARY, 12, 348, 34, 428, "Cancel", true);
         place_control(d, B_QUIT, 0, 0, 0, 0, NULL, false);
         place_control(d, B_CHOOSE, 0, 0, 0, 0, NULL, false);
         break;
@@ -586,6 +689,7 @@ static pascal void w2_track(ControlHandle c, short part)
 
 static void set_custom(DialogPtr d, Boolean c)
 {
+    note[0] = 0;
     custom = c;
     sel = -1;
     top = 0;
@@ -622,11 +726,39 @@ static OSErr resolve_place(void)
     return dir_of(place_vol, place_parent, place_name, &place_dir);
 }
 
-static void step(DialogPtr d, const char *what, short done)
+static void step(DialogPtr d, const char *verb, const char *what, short done)
 {
-    strcpy(message, what);
+    strcpy(message, verb);
+    strcat(message, what);
     progress_done = done;
     redraw(d);
+}
+
+/* A folder that's there (not made, as dir_of does) */
+static OSErr find_dir(short vref, long parent, ConstStr255Param name, long *dir)
+{
+    CInfoPBRec c;
+    OSErr err;
+    memset(&c, 0, sizeof c);
+    c.dirInfo.ioNamePtr = (StringPtr)name;
+    c.dirInfo.ioVRefNum = vref;
+    c.dirInfo.ioDrDirID = parent;
+    if ((err = PBGetCatInfoSync(&c)) != noErr) return err;
+    if (!(c.dirInfo.ioFlAttrib & 16)) return fnfErr;
+    *dir = c.dirInfo.ioDrDirID;
+    return noErr;
+}
+
+/* An old name from an earlier version, gone if it's there */
+static OSErr retire(DialogPtr d, long dir, const char *what)
+{
+    Str255 name;
+    pstr(name, what);
+    if (!has_file(place_vref, dir, name)) return noErr;
+    if (poll_cancel()) return userCanceledErr;
+    step(d, "Removing: ", what, progress_done);
+    remove_file(place_vref, dir, name);
+    return noErr;
 }
 
 static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts, Boolean sdk)
@@ -638,28 +770,27 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
     Str255 name;
     long dir;
     want[0] = mill; want[1] = inet; want[2] = fonts;
+    size_window(place_vref, place_dir);
     progress_total = mill + inet + fonts + sdk;
     /* retired names from earlier versions */
-    pstr(name, "Mill Fonts");
-    remove_file(place_vref, place_dir, name);
-    pstr(name, "Mill Fonts Read Me");
-    remove_file(place_vref, place_dir, name);
+    err = retire(d, place_dir, "Mill Fonts");
+    if (!err) err = retire(d, place_dir, "Mill Fonts Read Me");
     pstr(name, "Mill Plug-Ins");
-    if (dir_of(place_vref, place_dir, name, &dir) == noErr) {
-        pstr(name, "Finger");
-        remove_file(place_vref, dir, name);
-    }
+    if (!err && find_dir(place_vref, place_dir, name, &dir) == noErr) err = retire(d, dir, "Finger");
+    if (err) return err;
     for (i = 0; i < 3 && !err; i++) {
         Handle h;
         if (!want[i]) continue;
-        step(d, ONE[i].what, done++);
+        if (poll_cancel()) return userCanceledErr;
+        step(d, "Installing: ", ONE[i].what, done++);
         if (!(h = Get1Resource('MBIN', ONE[i].id))) return resNotFound;
         err = install_one(h);
         ReleaseResource(h);
     }
     if (sdk && !err) {
         n = Count1Resources('MBIN');
-        step(d, "Mill Plug-In SDK", done++);
+        if (poll_cancel()) return userCanceledErr;
+        step(d, "Installing: ", "Mill Plug-In SDK", done++);
         for (i = 1; i <= n && !err; i++) {
             Handle h = Get1IndResource('MBIN', i);
             short id;
@@ -697,6 +828,7 @@ static Boolean install_click(DialogPtr d, Point p)
         short i = top + (p.v - w2_list.top) / ROW;
         if (i < ROWS && LIST[i].part >= 0) {
             short part = LIST[i].part;
+            note[0] = 0;
             if (p.h < w2_list.left + 38) checked[part] = !checked[part];
             sel = i;
             redraw(d);
@@ -765,6 +897,7 @@ int main(void)
     InitCursor();
     FlushEvents(everyEvent, 0);
     if (!(d = GetNewDialog(WIN, NULL, (WindowPtr)-1))) return 1;
+    main_dlg = d;
     SetPort(d);
     c_primary = (GetDialogItem(d, B_PRIMARY, &type, &h, &r), (ControlHandle)h);
     c_quit = (GetDialogItem(d, B_QUIT, &type, &h, &r), (ControlHandle)h);
@@ -812,7 +945,7 @@ int main(void)
         ModalDialog((ModalFilterUPP)filter, &item);
         if (item == B_QUIT) done = true;
         else if (item == CANVAS) { if (stage == S_INSTALL) install_click(d, click_pt); }
-        else if (item == B_CHOOSE) { choose_place(); redraw(d); }
+        else if (item == B_CHOOSE) { choose_place(); note[0] = 0; redraw(d); }
         else if (item == B_PRIMARY) {
             if (stage == S_ERROR) set_stage(d, S_INSTALL, NULL);
             else if (stage == S_INSTALL) {
@@ -823,7 +956,11 @@ int main(void)
                 set_stage(d, S_PROGRESS, "");
                 err = run_install(d, !custom || checked[0], !custom || checked[1], !custom || checked[2], custom && checked[3]);
                 InitCursor();
-                if (err) {
+                note[0] = 0;
+                if (err == userCanceledErr) {
+                    strcpy(note, "Installation canceled.");
+                    set_stage(d, S_INSTALL, NULL);
+                } else if (err) {
                     char text[48], num[16];
                     Str255 n;
                     NumToString(err, n);
