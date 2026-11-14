@@ -9,7 +9,7 @@ Folders
   Interfaces    MillPlugIn.h: the interface, with notes on every call
   Glue          MillGlue.c: the entry point; add it to every Plug-In
   Examples      Finger: a small protocol Plug-In
-  MPW           Finger.make, for MPW 3.5 (SC and Link)
+  MPW           Finger.make, for MPW 3.4 (SC and Link)
   CodeWarrior   Finger's project, for CodeWarrior (CW4 and later)
 KIT-BEGIN-REPO-ONLY
   Retro68       build.sh, for Retro68 (GCC) on a modern computer

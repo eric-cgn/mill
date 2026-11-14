@@ -1,4 +1,4 @@
-# Finger.make: the Finger example Plug-In, built with MPW 3.5 (SC and Link).
+# Finger.make: the Finger example Plug-In, built with MPW 3.4 (SC and Link).
 # In the MPW Shell, set the directory to this folder, then:
 #     Make -f Finger.make > Finger.out; Finger.out
 

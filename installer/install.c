@@ -413,7 +413,7 @@ static const struct { const char *text; short part; } LIST[ROWS] = {      /* par
 };
 static const char *const DESC[4] = {
     "The web browser.", "Finger, Whois, Dict, Time, FTP, and Gopher.", "Serif and Mono bitmaps at every HTML size.",
-    "Files for writing Mill Plug-Ins, for CodeWarrior 4 and MPW 3.5."
+    "Files for writing Mill Plug-Ins, for CodeWarrior 4 and MPW 3.4."
 };
 
 static short place_vol;             /* where the install folder is: a volume, the folder it's in, and its name; */

@@ -37,7 +37,7 @@
 #   define GLUE_ENTER() long glue_a4 = SetCurrentA4()
 #   define GLUE_LEAVE() SetA4(glue_a4)
 #else
-    /* MPW: no globals; SC -b keeps strings in the code. Tested with MPW 3.5. */
+    /* MPW: no globals; SC -b keeps strings in the code. For MPW 3.4. */
 #   define GLUE_ENTER()
 #   define GLUE_LEAVE()
 #endif
