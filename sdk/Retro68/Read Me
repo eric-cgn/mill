@@ -1,0 +1,10 @@
+Finger for Retro68
+
+build.sh builds Finger with Retro68 in Docker (the same pinned image as
+Mill) and writes build/Finger.bin, a MacBinary file. Copy it to the Mac
+and put it in Mill's "Mill Plug-Ins" folder.
+
+The code resource is linked flat (-Wl,--mac-flat) with its entry first
+(-Wl,-eMILLMAIN), and Finger.r reads it into 'MPlg' 128. The glue
+calls RETRO68_RELOCATE, so static data may hold addresses here, but keep
+to the SDK's rules so the same source builds with MPW and CodeWarrior.

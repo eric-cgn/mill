@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-'''Writes pages.r from Mill's longer built-in pages, kept as 'TEXT' resources so each
-is read only when it's opened: mill://license (license.html, TEXT 128) and
-mill://change-log (changes.html, TEXT 129). The build runs it:
+'''Writes pages.r from Mill's longer built-in pages, kept as gzipped 'TXGZ' resources so each
+is read only when it's opened: mill://license (license.html, TXGZ 128). The change
+log is on Mill's site (tools/site.py). The build runs it:
 python3 tools/pages.py <out.r>'''
 
+import gzip
 import os
 import sys
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src')
-PAGES = [(128, 'License', 'license.html'), (129, 'Change Log', 'changes.html')]
+PAGES = [(128, 'License', 'license.html')]
 
 
 def main():
@@ -17,7 +18,8 @@ def main():
         text = open(os.path.join(SRC, path), 'rb').read()
         text.decode('ascii')  # entities for anything else, so it reads the same as Mac Roman
         text = text.replace(b'\n', b'\r')
-        lines.append("data 'TEXT' (%d, \"%s\") {" % (rid, name))
+        text = gzip.compress(text, 9, mtime=0)    # unpacked through Mill's gzip code when the page is built
+        lines.append("data 'TXGZ' (%d, \"%s\") {" % (rid, name))
         for i in range(0, len(text), 32):
             lines.append('\t$"%s"' % text[i:i + 32].hex().upper())
         lines.append('};')

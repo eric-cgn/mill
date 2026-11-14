@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-'''Makes Mill's release files from the build: dist/Mill-VERSION.bin (MacBinary, with the
-Finder's "has bundle" flag set so the windmill icon shows), .hqx (BinHex 4.0), and .dsk
-(the build's disk image). The version comes from src/version.h. Inside the .bin and .hqx
-the application is named "Mill VERSION", with a space, as Mac applications were.
+'''Makes Mill's release files: dist/Install-Mill-VERSION.bin (MacBinary, with the Finder's "has
+bundle" flag set so its icon shows) and .hqx (BinHex 4.0), from the installer ./build.sh installer
+makes. The disk image, dist/Mill-VERSION.image, is made by ./build.sh disk. The version comes from
+src/version.h. Inside the .bin and .hqx the application is named "Install Mill VERSION".
 python3 tools/release.py [build dir] [dist dir]'''
 
-import os, re, shutil, struct, sys
+import os, re, struct, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
 build = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, '..', 'build')
@@ -94,12 +94,11 @@ def binhex(mb):
 def main():
     v = version()
     os.makedirs(dist, exist_ok=True)
-    mb = with_bundle(open(os.path.join(build, 'Mill.bin'), 'rb').read(), 'Mill %s' % v)
-    base = os.path.join(dist, 'Mill-%s' % v)
+    mb = with_bundle(open(os.path.join(build, 'installer', 'Install.bin'), 'rb').read(), 'Install Mill %s' % v)
+    base = os.path.join(dist, 'Install-Mill-%s' % v)
     open(base + '.bin', 'wb').write(mb)
     open(base + '.hqx', 'wb').write(binhex(mb))
-    shutil.copyfile(os.path.join(build, 'Mill.dsk'), base + '.dsk')
-    for ext in ('bin', 'hqx', 'dsk'):
+    for ext in ('bin', 'hqx'):
         print('%s.%s: %d bytes' % (base, ext, os.path.getsize(base + '.' + ext)))
 
 

@@ -1,0 +1,84 @@
+Mill Extras
+
+Optional files for Mill that need nothing from it, and that it needs nothing from: Mill runs
+the same without them.
+
+Web Fonts
+  A font suitcase (type FFIL, creator MiLL) of two bitmap font families, Mill Serif and Mill
+  Mono. Put it in the "Mill Plug-Ins" folder beside Mill. At startup Mill opens each FFIL file
+  there, read-only, and keeps it open; the font settings (General, Proportional font and Fixed
+  font) then list the families in every such file with the System's, and Mill Serif and Mill Mono are
+  the defaults (without the suitcase, Times and Courier). It is skipped where the System has a 36 point Times
+  already (System 7 with TrueType), and when Shift is held at startup, as Plug-Ins are. What is
+  in it is checked first (every table of each FONT and FOND inside the resource, every FONT the
+  FOND names); a family that fails, or a file that can't be opened, is left out, and Mill uses
+  the System's fonts as if it weren't there.
+
+  Two families, each in regular, bold, and italic (bold italic is made by QuickDraw; Mill Mono's
+  bold and italic stop at 14 point), at 9, 10,
+  12, 14, 18, 24, and 36 point, the sizes HTML 3.2 asks for:
+    Mill Serif   Adobe's X11 bitmaps of the Times design: timR, timB, timI
+    Mill Mono    Adobe's X11 bitmaps of the Courier design: courR, courB, courO (the oblique
+                 is the italic)
+  Each size slot takes its strike from the "files" entry in fonts.json (a source and a BDF file
+  for each slot). Now: slot 9 is the 75 dpi 10 pixel strike, 10 is the 100 dpi 8 point (11
+  pixels), 12, 14, 18, and 24 are the 75 dpi 12, 14, 18, and 24 pixel strikes, and 36 is the 100
+  dpi 24 point (34 pixels); the table under Styles gives each slot's pixel size. The strikes are
+  Adobe's hand-tuned bitmaps, converted, not redrawn: each Mac Roman character 32 to 255 is
+  found by its Unicode value in the BDF file (its encoding is ISO 10646-1) and put in its Mac
+  Roman place. The characters a strike lacks show as the missing glyph: the fi and fl ligatures
+  and the Apple logo in every strike, and, in most strikes, ten math symbols (infinity, partial, sum, product, pi, integral,
+  Omega, root, almost equal, increment) and the lozenge; build.py prints the list.
+  Mill measures and draws a line in them with the line height the System's Times or Courier
+  would give, so pages don't shift. Mill uses them only where a setting names them; a page's
+  FACE names only the System's fonts.
+
+  It can also be opened with Font/DA Mover; the Bold and Italic strikes are FONTs of their own
+  (see Styles).
+
+Making it
+  python3 build.py [--config fonts.json] [--out dist] [--cache cache] [--preview] [--styles] [--table]
+  Needs Python 3 with freetype-py and macresources (and Pillow for --preview), for example in
+  the python:3.12-slim image: pip install freetype-py macresources Pillow.
+  It downloads the font releases named in fonts.json (x.org's font-adobe-75dpi and
+  font-adobe-100dpi 1.0.4), checks each SHA-256, converts the BDF strikes, and writes:
+    Web Fonts.bin           MacBinary, with the fonts, 'vers' 1 and 2, and 'TEXT' 128 (about)
+                             and 'TXGZ' 129 (the license, gzipped)
+    Web Fonts Read Me.txt   the same, with the license, for the folder it goes in
+  Nothing from the fonts' releases is kept in this repository. A family with "ttf" instead of
+  "files" in fonts.json is rendered with FreeType (a "hinting" entry then picks, per size, the
+  font's own hints or the autohinter); the default configuration has none.
+
+Styles
+  Mill Serif has real Bold and Italic strikes at every size; Mill Mono at 9, 10, 12, and 14 point
+  (QuickDraw makes them from the plain strike above that). They are FONTs of their own, found
+  through the FOND's association table at an ID in an unused family; the table lists the slot
+  sizes with the strikes inside them. Underline is QuickDraw's.
+  build.py refuses a style whose real strikes are not the family's smallest sizes with no gap: on a
+  Mac Plus, real Bold at only 18, 24, and 36 point hung the machine, and the cause is not known
+  (all sizes, and 9, 10, and 12 of 9 to 36, are tested and fine). --table prints what each strike costs:
+
+  FONT resource bytes          9      10      12      14      18      24      36   total
+  Mill Serif plain          2568    2594    3240    3854    5946    9514   16100   43816
+  Mill Serif bold           2620    2646    3300    4098    5886    9218   15656   43424
+  Mill Serif italic         2698    2698    3300    4170    5946    9920   16026   44758
+  Mill Mono plain           2228    2228    2862    3618    4806    7362   12066   35170
+  Mill Mono bold            2426    2426    3114    3874       -       -       -   11840
+  Mill Mono italic          2404    2360    3142    3778       -       -       -   11684
+  Mill Serif pixels           10      11      12      14      18      24      34
+  Mill Mono pixels            10      11      12      14      18      24      34
+
+  suitcase, plain only: 82847 bytes; with every real style listed: 195493 bytes
+
+More fonts: add an entry to "fonts" in fonts.json: family (a name of your own), id (the font
+family number, 128 to 255, one that isn't a family on the Systems you target; FONT resources
+are id * 128 + size, so each style's strike needs an unused one too; the script checks they are
+all different), source (one in "sources"), ttf (a file in it), from (the name to credit), sizes.
+
+License
+  Adobe's X11 bitmap fonts, under the Adobe and Digital Equipment Corporation notice: use, copy,
+  modify, distribute, and sell allowed, with the copyright notices (Adobe 1984-1989, 1994;
+  Digital 1988, 1994) and the permission notice in supporting documentation; the names of Adobe
+  Systems and Digital Equipment Corporation are not to be used in advertising or publicity
+  without written permission. build.py puts the notice in the suitcase (TXGZ 129) and its Read
+  Me. The names Times and Courier are not used for these families.

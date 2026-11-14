@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.13)
+project(Install C)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m68000 -Os -Wall -Wno-pointer-sign")
+list(APPEND REZ_INCLUDE_PATH ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+add_application(Install install.c ../src/core/inflate.c install.r CREATOR "MiLI")

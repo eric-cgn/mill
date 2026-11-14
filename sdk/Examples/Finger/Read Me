@@ -1,0 +1,14 @@
+Finger
+
+finger://host/user asks host about user (RFC 1288) and shows the answer
+as text; finger://host/ asks about everyone. Try finger://graph.no/oslo.
+
+It shows the least a protocol Plug-In needs: PlugInNew fills in Mill's
+MillInfo and the Plug-In's own tables, and the request method opens a
+TCP connection with Mill's TcpOpen, writes an HTTP reply with Write, and
+copies what the server sends.
+
+KIT-BEGIN-REPO-ONLY
+Finger.r is for Retro68 only: it puts the flat code Retro68 makes into
+the 'MPlg' resource. MPW and CodeWarrior write that resource themselves.
+KIT-END-REPO-ONLY

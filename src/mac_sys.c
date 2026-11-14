@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "mac_sys.h"
+#include "mac_memreport.h"
 
 #define ROOT_DIR 2          /* fsRtDirID: a volume's root folder */
 #define ROOT_PARENT 1       /* fsRtParID: what the root folder is in */
@@ -10,21 +11,6 @@
 #define ON_SYSTEM_DISK ((short)0x8000)   /* kOnSystemDisk */
 
 Boolean sys_fsspec, sys_new_sf, sys_find_folder, sys_wne;
-
-static Boolean trap_available(unsigned short trap, TrapType type)
-{
-    return NGetTrapAddress(trap, type) != NGetTrapAddress(_Unimplemented, kToolboxTrapType);
-}
-
-void sys_init(void)
-{
-    long r;
-    sys_wne = trap_available(_WaitNextEvent, kToolboxTrapType);
-    if (!trap_available(GESTALT_TRAP, kOSTrapType)) return;  /* before 6.0.4: none of the rest */
-    sys_fsspec = Gestalt(gestaltFSAttr, &r) == noErr && (r & gestaltHasFSSpecCalls);
-    sys_new_sf = Gestalt(gestaltStandardFileAttr, &r) == noErr && (r & gestaltStandardFile58);
-    sys_find_folder = Gestalt(gestaltFindFolderAttr, &r) == noErr && (r & FIND_FOLDER_PRESENT);
-}
 
 /* ------------------------------------------------------------ files */
 
@@ -318,7 +304,9 @@ void mem_init(void)
 void mem_report(long *free, long *total)
 {
     THz z = ApplicationZone();
-    *free = FreeMem();
+    long contig;
+    /* free once what can be purged is (unloaded code, resources), as Mill will when it needs it */
+    PurgeSpace(free, &contig);
     *total = (long)z->bkLim - (long)&z->heapData;
 }
 
@@ -333,3 +321,10 @@ Boolean mem_short(void)
     }
     return !*reserve;
 }
+
+#ifdef MILL_MEMREPORT
+void memreport_sys(void)
+{
+    memreport_note(reserve, "Out-of-memory reserve", 1);
+}
+#endif
