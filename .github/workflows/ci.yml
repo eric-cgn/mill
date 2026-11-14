@@ -25,6 +25,10 @@ jobs:
         run: tests/run.sh
       - name: Build
         run: ./build.sh
+      - name: Disk image
+        run: ./build.sh disk
+      - name: Installer
+        run: ./build.sh installer
       - name: Release files
         run: python3 tools/release.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2

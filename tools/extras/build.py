@@ -444,10 +444,14 @@ def main():
     texts = {}
     for key in sorted({k for f in cfg['fonts'] for k in source_keys(f)}):
         src = cfg['sources'][key]
-        if 'dir' in src and not a.download:              # the copy kept in the repository
-            where = os.path.join(os.path.dirname(os.path.abspath(a.config)), src['dir'])
-            files[key] = {n: open(os.path.join(where, n), 'rb').read() for n in sorted(os.listdir(where))}
-            files[key]['COPYING'] = open(os.path.join(where, '..', 'COPYING'), 'rb').read()
+        if 'archive' in src and not a.download:          # the copy kept in the repository, one archive
+            here_ = os.path.dirname(os.path.abspath(a.config))
+            files[key] = {}
+            with tarfile.open(os.path.join(here_, src['archive'])) as t:
+                for m in t.getmembers():
+                    if m.isfile() and os.path.dirname(m.name) == src['dir']:
+                        files[key][os.path.basename(m.name)] = t.extractfile(m).read()
+            files[key]['COPYING'] = open(os.path.join(here_, os.path.dirname(src['archive']), 'adobe-x11', 'COPYING'), 'rb').read()
         else:
             files[key] = members(get(src['url'], src['sha256'], a.cache), src['format'])
         texts.setdefault(source_notice(src, a.cache, files[key]), []).append(src['name'])

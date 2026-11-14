@@ -12,7 +12,8 @@
       "license": {
         "member": "COPYING"
       },
-      "dir": "fonts/adobe-x11/75dpi"
+      "archive": "fonts/adobe-x11.tar.xz",
+      "dir": "75dpi"
     },
     "adobe100": {
       "name": "Adobe 100 dpi X11 bitmap fonts 1.0.4",
@@ -24,7 +25,8 @@
       "license": {
         "member": "COPYING"
       },
-      "dir": "fonts/adobe-x11/100dpi"
+      "archive": "fonts/adobe-x11.tar.xz",
+      "dir": "100dpi"
     }
   },
   "fonts": [
