@@ -20,6 +20,7 @@ On a Mac Plus running System 6.0.5.
 - Mac Plus or later
 - System 6.0.3 with MacTCP or later
 - 700K free RAM
+- About 500K of disk for everything
 
 ## Capabilities
 
@@ -32,17 +33,18 @@ On a Mac Plus running System 6.0.5.
 - Downloads, optional MacBinary decoding
 - HTTP proxy support
 - URL schemes: http:// (https:// w/ proxy), file://, and mill:// (built-ins)
+- Plug-Ins: finger://, whois://, dict://, time://, ftp://, and gopher:// (Internet Services), and more with the Plug-In SDK; Web Fonts
 
 ## Download
 
-From the [releases](https://github.com/eric-cgn/mill/releases), or at
-http://mill.1in1e6.com/
+Install Mill 2.0 (BinHex or MacBinary) and a Mill 2.0 disk image, from the
+[releases](https://github.com/eric-cgn/mill/releases) or at http://mill.1in1e6.com/
 
 ## Building
 
 `./build.sh` builds `build/Mill.bin` (MacBinary) and `build/Mill.dsk` with
 [Retro68](https://github.com/autc04/Retro68) in a container (image pinned by digest).
-The code is plain 68000. `tests/run.sh` runs the host tests for the portable core.
+`./build.sh disk` makes the disk image and `./build.sh installer` the installer. The code is plain 68000. `tests/run.sh` runs the host tests for the portable core.
 
 ## License
 

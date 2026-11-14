@@ -1,6 +1,6 @@
-# Every push to main: if src/version.h names a version with no release yet, build Mill,
-# tag the commit vX.Y.Z, make a GitHub release with its .hqx, .bin, and .dsk (and the
-# Plug-In SDK's .dsk and .zip), and
+# Every push to main: if src/version.h names a version with no release yet, build Mill and
+# its installer, tag the commit vX.Y.Z, make a GitHub release with Install Mill (.hqx and .bin)
+# and the Mill disk image, and
 # rebuild the download site (mill.1in1e6.com) from every release. A push that keeps the
 # version does nothing. Run it by hand to rebuild the site alone.
 name: Release
@@ -42,19 +42,22 @@ jobs:
       - name: Build
         if: steps.version.outputs.new == 'yes'
         run: ./build.sh
+      - name: Disk image
+        if: steps.version.outputs.new == 'yes'
+        run: ./build.sh disk
+      - name: Installer
+        if: steps.version.outputs.new == 'yes'
+        run: ./build.sh installer
       - name: Release files
         if: steps.version.outputs.new == 'yes'
         run: python3 tools/release.py
-      - name: Plug-In SDK
-        if: steps.version.outputs.new == 'yes'
-        run: ./build.sh kit
       - name: Release
         if: steps.version.outputs.new == 'yes'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 tools/site.py notes "$VERSION" > notes.txt
-          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Mill $VERSION" --notes-file notes.txt
+          gh release create "v$VERSION" dist/Install-Mill-*.bin dist/Install-Mill-*.hqx dist/Mill-*.image --target "$GITHUB_SHA" --title "Mill $VERSION" --notes-file notes.txt
 
   site:
     needs: release
@@ -75,7 +78,7 @@ jobs:
         run: |
           mkdir -p site/download
           gh release list --limit 100 --exclude-pre-releases --json tagName,createdAt -q 'sort_by(.createdAt) | reverse | .[:3][] | .tagName' | while read -r tag; do
-            gh release download "$tag" --dir site/download --pattern 'Mill-*'
+            gh release download "$tag" --dir site/download --pattern 'Install-Mill-*' --pattern 'Mill-*'
           done
       - name: Page
         run: python3 tools/site.py site site

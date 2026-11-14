@@ -1,7 +1,7 @@
 /* Mill's version, for the splash screen, the User-Agent, and the 'vers' resource */
-#define MILL_VERSION "1.9.2"
-#define MILL_VERS_MAJOR 0x01  /* BCD, for 'vers' */
-#define MILL_VERS_MINOR 0x92  /* 9.2: minor 9, fix 2 */
+#define MILL_VERSION "2.0"
+#define MILL_VERS_MAJOR 0x02  /* BCD, for 'vers' */
+#define MILL_VERS_MINOR 0x00  /* 0.0: minor 0, fix 0 */
 #define MILL_PUBLISHER "OneInAMillion Software"
 #define MILL_PUBLISHER_SITE "http://1in1e6.com/"
 #define MILL_YEAR "2026"
