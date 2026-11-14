@@ -1,0 +1,89 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<HTML>
+<HEAD>
+<TITLE>HTML 3.2 test</TITLE>
+</HEAD>
+<BODY>
+<H1>HTML 3.2 test</H1>
+<P>One page of what the HTML 3.2 Reference Specification has, to look at in Mill. Test text only.</P>
+
+<H2>Text styles</H2>
+<P>
+<B>bold</B> <I>italic</I> <U>underline</U> <TT>teletype</TT>
+<STRIKE>strike</STRIKE> <S>s</S>
+<BIG>big</BIG> <SMALL>small</SMALL><BR>
+H<SUB>2</SUB>O and E = mc<SUP>2</SUP> and x<SUP>n</SUP><SUB>i</SUB> in a line of plain text
+that goes on a while so it wraps and shows the line spacing stays even.
+</P>
+
+<H2>BASEFONT</H2>
+<P>Normal. <FONT SIZE=+1>+1 is 4</FONT> <FONT SIZE=-1>-1 is 2</FONT>
+<FONT SIZE=5>5</FONT><BR>
+<BASEFONT SIZE=5>
+After BASEFONT 5: <FONT SIZE=+1>+1 is 6</FONT> <FONT SIZE=-2>-2 is 3</FONT>
+<FONT SIZE=2>2 is absolute</FONT><BR>
+<BASEFONT SIZE=3>
+Back to 3: <FONT SIZE=+2>+2 is 5</FONT></P>
+
+<H2>Lists</H2>
+<P>UL TYPE:</P>
+<UL TYPE=disc><LI>disc<LI>disc</UL>
+<UL TYPE=circle><LI>circle<LI>circle</UL>
+<UL TYPE=square><LI>square<LI>square</UL>
+<UL><LI>no TYPE<LI TYPE=square>LI square<LI>and after it<LI TYPE=circle>LI circle
+<UL><LI>nested, no TYPE</UL></UL>
+<P>OL TYPE, START, VALUE:</P>
+<OL><LI>one<LI>two<LI>three</OL>
+<OL TYPE=a><LI>a<LI>b<LI>c</OL>
+<OL TYPE=A START=3><LI>C<LI>D<LI>E</OL>
+<OL TYPE=i><LI>i<LI>ii<LI>iii<LI>iv</OL>
+<OL TYPE=I START=7><LI>VII<LI>VIII<LI>IX<LI VALUE=14>XIV<LI>XV</OL>
+<OL><LI>1<LI VALUE=10>10<LI TYPE=a>a after 11 (this and the rest)<LI>b</OL>
+<P>COMPACT, beside the same lists without it:</P>
+<UL COMPACT><LI>compact<LI>compact</UL>
+<UL><LI>plain<LI>plain</UL>
+<OL COMPACT><LI>compact<LI>compact</OL>
+<DL><DT>Go<DD>A definition under its term.<DT>Longer term<DD>Another.</DL>
+<DL COMPACT><DT>Go<DD>A definition beside a short term.<DT>Longer term<DD>Under a long one.</DL>
+
+<H2>IMG ALIGN</H2>
+<P>bottom (default) <IMG SRC="partly.gif" WIDTH=32 HEIGHT=32 ALT="icon"> text
+<IMG SRC="partly.gif" WIDTH=32 HEIGHT=32 ALIGN=bottom ALT="icon"> bottom
+<IMG SRC="partly.gif" WIDTH=32 HEIGHT=32 ALIGN=middle ALT="icon"> middle
+<IMG SRC="partly.gif" WIDTH=32 HEIGHT=32 ALIGN=top ALT="icon"> top text after.</P>
+<P><IMG SRC="partly.gif" WIDTH=32 HEIGHT=32 ALIGN=left ALT="icon" HSPACE=4> left: text runs beside the
+picture and goes on past its bottom to show it wrapping under the float once the picture ends, as the
+specification describes it.<BR CLEAR=left>
+<IMG SRC="partly.gif" WIDTH=32 HEIGHT=32 ALIGN=right ALT="icon" HSPACE=4> right: the same on the other
+side, with enough words to run past the bottom of the picture and wrap under it.<BR CLEAR=right></P>
+
+<H2>Tables</H2>
+<TABLE BORDER=1>
+<CAPTION>Caption on top (the default)</CAPTION>
+<TR><TD>a<TD>b</TR>
+</TABLE>
+<TABLE BORDER=1>
+<CAPTION ALIGN=top>ALIGN=top</CAPTION>
+<TR><TD>a<TD>b</TR>
+</TABLE>
+<TABLE BORDER=1>
+<CAPTION ALIGN=bottom>ALIGN=bottom</CAPTION>
+<TR><TD>a<TD>b</TR>
+</TABLE>
+<P>TR ALIGN and VALIGN as defaults, cells override:</P>
+<TABLE BORDER=1 WIDTH=300>
+<TR ALIGN=right VALIGN=top><TD>right top<BR>two lines<BR>three lines<TD>right top<TD ALIGN=left VALIGN=bottom>left bottom</TR>
+<TR ALIGN=center VALIGN=bottom><TD>center bottom<BR>two lines<TD>center bottom<TD VALIGN=top ALIGN=right>right top</TR>
+<TR><TH>TH is centered<TD>no attributes<BR>two lines<TD ALIGN=right>right</TR>
+</TABLE>
+
+<H2>Entities</H2>
+<P>&amp; &lt; &gt; &quot; &#65; &#169; and the Latin-1 set:<BR>
+&nbsp;|&iexcl; &cent; &pound; &curren; &yen; &brvbar; &sect; &uml; &copy; &ordf; &laquo; &not; &shy; &reg; &macr;<BR>
+&deg; &plusmn; &sup2; &sup3; &acute; &micro; &para; &middot; &cedil; &sup1; &ordm; &raquo; &frac14; &frac12; &frac34; &iquest;<BR>
+&Agrave; &Aacute; &Acirc; &Atilde; &Auml; &Aring; &AElig; &Ccedil; &Egrave; &Eacute; &Ecirc; &Euml; &Igrave; &Iacute; &Icirc; &Iuml;<BR>
+&ETH; &Ntilde; &Ograve; &Oacute; &Ocirc; &Otilde; &Ouml; &times; &Oslash; &Ugrave; &Uacute; &Ucirc; &Uuml; &Yacute; &THORN; &szlig;<BR>
+&agrave; &aacute; &acirc; &atilde; &auml; &aring; &aelig; &ccedil; &egrave; &eacute; &ecirc; &euml; &igrave; &iacute; &icirc; &iuml;<BR>
+&eth; &ntilde; &ograve; &oacute; &ocirc; &otilde; &ouml; &divide; &oslash; &ugrave; &uacute; &ucirc; &uuml; &yacute; &thorn; &yuml;</P>
+</BODY>
+</HTML>

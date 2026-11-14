@@ -1,0 +1,17 @@
+Adobe's X11 bitmap fonts, the BDF files Mill Fonts is converted from (Times and Courier, regular,
+bold, and oblique or italic), kept here so the suitcase can be rebuilt without a download. They are
+unchanged from the releases:
+
+  font-adobe-75dpi-1.0.4.tar.xz   https://www.x.org/releases/individual/font/font-adobe-75dpi-1.0.4.tar.xz
+    SHA-256 1281a62dbeded169e495cae1a5b487e1f336f2b4d971d92911c59c103999b911
+    -> 75dpi/   (the 8 to 24 pixel files fonts.json names)
+  font-adobe-100dpi-1.0.4.tar.xz  https://www.x.org/releases/individual/font/font-adobe-100dpi-1.0.4.tar.xz
+    SHA-256 b67aff445e056328d53f9732d39884f55dd8d303fc25af3dbba33a8ba35a9ccf
+    -> 100dpi/  (the 8 and 24 point files fonts.json names)
+
+COPYING is the releases' own license (the same in both): Adobe Systems Incorporated and Digital
+Equipment Corporation, which allows use, copying, modification, distribution, and sale with the
+copyright notices and the permission notice in supporting documentation. The notice also goes into
+Mill Fonts itself and its Read Me. Each BDF file carries it in its header as well.
+
+python3 ../../build.py --download reads the releases instead of these files and checks their SHA-256.

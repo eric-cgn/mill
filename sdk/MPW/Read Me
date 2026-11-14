@@ -1,0 +1,20 @@
+Finger for MPW
+
+Tested with MPW 3.5 (SC 8 and Link) on System 7.6.1.
+
+In the MPW Shell:
+    Directory "Disk:Mill Plug-In SDK:MPW:"
+    Make -f Finger.make > Finger.out; Finger.out
+
+This makes Finger, the Plug-In. Put it in Mill's "Mill Plug-Ins" folder.
+
+What matters in Finger.make:
+- SC -b puts strings in the code. A code resource has no globals.
+- Link -rt MPlg=128 makes the code resource; -m MILLMAIN names the entry
+  (pascal names are upper case); -sg Finger keeps it in one segment and
+  names the resource.
+- MillGlue.c.o is linked first, and MillMain is the first function in
+  it, so the entry is at byte 0.
+- -t MPlg -c MiLL set the file's type and creator.
+
+For a Plug-In of your own, copy Finger.make and change the file names.

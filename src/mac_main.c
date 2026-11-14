@@ -18,28 +18,32 @@
 #include "mac_local.h"
 #include "mac_login.h"
 #include "mac_net.h"
+#include "mac_memreport.h"
+#include "mac_plugin.h"
 #include "mac_save.h"
 #include "mac_start.h"
+#include "mac_upload.h"
 #include "mac_sys.h"
 #include "version.h"
 
-enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
+enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
 enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_PAGE_SETUP = 6, FILE_PRINT, FILE_QUIT = 9 };
 enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_PREFERENCES = 7 };
-enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME };
+enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME, GO_STOP = 6 };
+enum { VIEW_LARGER = 1, VIEW_SMALLER, VIEW_PAGE_SOURCE = 4 };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
 #define BAR 14          /* toolbar height: the address's highlight, and a pixel each side */
 #define STATUS_SECS 5   /* a message shows this long once Mill is idle */
 #define SCROLL 16
 #define MAX_PAGE (192L * 1024)
 #define MIN_PAGE (24L * 1024)   /* when memory's short, pages are cut shorter, down to this */
-#define MAX_UPLOAD (256L * 1024)
 #define HISTORY MILL_HISTORY_MAX    /* history_size() says how many are kept */
 #define FILE_MSG "Web pages can't open this Mac's files or Mill's own pages. Type the address to go there."
 #define FORM_MSG "Forms can only send to the same kind of address as their page."
 #define ALERT_MEMORY 202
 #define ALERT_UNSENT 203
 #define ALERT_NO_MEMORY 204
+#define ALERT_FAILED 205
 enum { UNSENT_STAY = 1, UNSENT_LEAVE };
 
 /* One per distinct picture on the page (the same SRC at the same size is fetched once) */
@@ -75,6 +79,9 @@ typedef struct Browser {
     short page_w;               /* how wide the laid-out page is */
     short scroll_scale;         /* page pixels per scroll bar unit (control values are 16-bit) */
     char page_url[300];
+    char page_owner[32];        /* the Plug-In that marked this page as its own, or "" */
+    char page_login[256];       /* the key of the login it was fetched with, or "" */
+    Plug *held;                 /* the Plug-In that made it, kept loaded while it shows */
     char *history[HISTORY];     /* see remember */
     short hist_len, hist_pos;
     char *form_base;            /* form state brought back that had been sent, or NULL */
@@ -90,7 +97,6 @@ static Browser *browsers;       /* every window, front or not */
 static Browser *br;             /* the one being worked on */
 static Boolean quitting = false;
 static Jar jar;         /* cookies, while Mill runs */
-static Keyring keyring; /* names and passwords given for sites, while Mill runs */
 #define PAGE_LEFT (br->view_r.left - (short)br->scroll_x)  /* where page x 0 is in the window */
 
 /* ------------------------------------------------------------ geometry */
@@ -294,25 +300,268 @@ static void status_idle(void)
 
 /* ------------------------------------------------------------ QuickDraw metrics */
 
-static void use_style(const MStyle *s)
+/* The font settings: a proportional and a fixed font, chosen by name (the System's installed
+   fonts, and the families of any font suitcase in the Plug-Ins folder). Text in the core's
+   FONT_PROP and FONT_FIXED is measured and drawn in them; a FACE the System has is its own font.
+   Sizes are the core's (HTML 3.2's ladder). A suitcase's fonts are measured and drawn the same
+   as the System's, so widths agree. */
+static const short LADDER[7] = { 9, 10, 12, 14, 18, 24, 36 };
+static short font_prop = 20, font_fixed = 22;    /* Times and Courier until fonts_choose */
+
+static short ladder_at(short size)
 {
-    TextFont(s->font);
-    TextSize(s->size);
-    TextFace(s->face & ~FACE_INVERSE);
+    short k;
+    for (k = 0; k < 6 && LADDER[k] < size; k++) {}
+    return k;
+}
+
+/* A suitcase's family by font number */
+static PackFam *pack_by_id(short id)
+{
+    short i;
+    for (i = 0; i < npack_fams; i++) if (pack_fams[i].id == id) return &pack_fams[i];
+    return NULL;
+}
+
+static Boolean same_name(const char *a, const char *b);
+
+static PackFam *pack_by_name(const char *name)
+{
+    short i;
+    for (i = 0; i < npack_fams; i++) if (same_name(pack_fams[i].name, name)) return &pack_fams[i];
+    return NULL;
+}
+
+/* Whether a suitcase's family has every letter one width: its strike at the first size it has,
+   measured with its file current. Decided once. */
+static Boolean pack_fixed(PackFam *f)
+{
+    if (f->fixed < 0) {
+        short was = CurResFile(), k = 0, sf = qd.thePort->txFont, ss = qd.thePort->txSize, w;
+        static const short ladder[7] = { 9, 10, 12, 14, 18, 24, 36 };
+        Style sface = qd.thePort->txFace;
+        while (k < 6 && !(f->sizes & (1 << k))) k++;
+        UseResFile(f->ref);
+        TextFont(f->id);
+        TextSize(ladder[k]);
+        TextFace(0);
+        w = CharWidth('i');
+        f->fixed = w > 0 && w == CharWidth('M') && w == CharWidth('W');
+        UseResFile(was);
+        TextFont(sf);
+        TextSize(ss);
+        TextFace(sface);
+    }
+    return f->fixed;
+}
+
+/* The name used when a setting is empty or names a font that's gone: Mill Serif and Mill Mono if
+   a suitcase has them, else the System's Times and Courier */
+const char *font_default(int fixed)
+{
+    if (fixed) return pack_by_name("Mill Mono") ? "Mill Mono" : "Courier";
+    return pack_by_name("Mill Serif") ? "Mill Serif" : "Times";
+}
+
+static short name_pstr(const char *name, Str255 p)
+{
+    short n = (short)strlen(name);
+    if (n > 31) n = 31;
+    p[0] = (unsigned char)n;
+    memcpy(p + 1, name, n);
+    return n;
+}
+
+static Boolean same_name(const char *a, const char *b)
+{
+    while (*a && *b && (*a | 32) == (*b | 32)) { a++; b++; }
+    return !*a && !*b;
+}
+
+/* An installed font's number, or -1. The suitcase's two aren't found by name unless its file
+   is current, so they're known here. */
+static int font_number(const char *name)
+{
+    Str255 p;
+    short num;
+    PackFam *pf;
+    if (!name[0]) return -1;
+    if ((pf = pack_by_name(name))) return pf->id;      /* a suitcase's: not found by name unless its file is current */
+    name_pstr(name, p);
+    GetFNum(p, &num);
+    if (num == 0 && !same_name(name, "Chicago")) return -1;   /* 0 is also "not found" */
+    return num;
+}
+
+static int qd_font_by_name(void *ctx, const char *name)
+{
+    (void)ctx;
+    return font_number(name);
+}
+
+static Metrics qd_m;            /* (defined below) */
+static short dist_zoom(void);
+
+/* Form controls follow the zoom: their text by the text's factor (the System's Geneva, scaled by
+   QuickDraw), their boxes and padding by the distances' (the text's, unless only the text is scaled) */
+static short zscale(short z, long v)
+{
+    long r;
+    if (z <= 9 || v == 0) return (short)v;
+    r = (v * z + (v < 0 ? -4 : 4)) / 9;
+    return (short)(r == 0 ? (v < 0 ? -1 : 1) : r);
+}
+#define CT(v) zscale(qd_m.zoom, (v))
+#define CD(v) zscale(dist_zoom(), (v))
+
+void fonts_choose(void)
+{
+    int n = font_number(setting("font_prop", ""));
+    qd_m.text_only = !strcmp(setting("scale_text_only", "no"), "yes");
+    font_prop = n >= 0 ? n : font_number(font_default(0));
+    if (font_prop < 0) font_prop = 20;
+    n = font_number(setting("font_fixed", ""));
+    font_fixed = n >= 0 ? n : font_number(font_default(1));
+    if (font_fixed < 0) font_fixed = 22;
+}
+
+/* A text style as the Font Manager is to get it: font, size, whether the font is the
+   suitcase's (its file then has to be current), and the System's font whose line height
+   a line in it keeps, so a page doesn't shift between the suitcase's and the System's */
+typedef struct { short font, size, line_font, pack_ref; } Face;   /* pack_ref: the suitcase's file if its font is used, else 0 */
+
+static Face face_of(const MStyle *s)
+{
+    Face f;
+    PackFam *pf;
+    short k;
+    if (s->font == FONT_PROP) f.font = font_prop;
+    else if (s->font == FONT_FIXED) f.font = font_fixed;
+    else f.font = s->font;
+    f.size = s->size;               /* the core's sizes are the ladder's already */
+    f.line_font = f.font;
+    f.pack_ref = 0;
+    if ((pf = pack_by_id(f.font))) {
+        f.line_font = pack_fixed(pf) ? 22 : 20;        /* lines as tall as Courier's or Times's would be */
+        k = ladder_at(f.size);
+        if (LADDER[k] == f.size && (pf->sizes & (1 << k))) f.pack_ref = pf->ref;   /* zoomed sizes off the ladder: scaled */
+        else f.font = f.line_font;                     /* a size it has no strike of: the System's */
+    }
+    return f;
+}
+
+/* The Font Manager looks for a font from the current resource file down, and the suitcase
+   is above Mill's own file in the chain: it's current only while text is measured or drawn
+   in its fonts. font_enter gives what to hand font_leave. */
+static short font_enter(const Face *f)
+{
+    short was = -1;
+    if (f->pack_ref) {
+        was = CurResFile();
+        UseResFile(f->pack_ref);
+    }
+    return was;
+}
+
+static void font_leave(short was)
+{
+    if (was >= 0) UseResFile(was);
+}
+
+/* The fonts the settings list: the System's FONDs by name (found in every open file, the
+   suitcase's too), with no symbol fonts, and for the fixed font only those whose letters
+   are all one width. */
+int font_list(int fixed, char (*names)[FONT_NAME_MAX], int max)
+{
+    int total = (int)CountResources('FOND'), n = 0, i, j;
+    short sf = qd.thePort->txFont, ss = qd.thePort->txSize;
+    Style sface = qd.thePort->txFace;
+    SetResLoad(false);
+    for (i = 1; i <= total && n < max; i++) {
+        Handle h = GetIndResource('FOND', i);
+        short id; ResType t; Str255 p;
+        char name[FONT_NAME_MAX];
+        PackFam *ours;
+        short k;
+        Boolean packed = false;
+        if (!h) continue;
+        GetResInfo(h, &id, &t, p);
+        if (p[0] == 0 || p[1] == '.' || p[0] >= FONT_NAME_MAX) continue;
+        memcpy(name, p + 1, p[0]);
+        name[p[0]] = 0;
+        if (same_name(name, "Symbol") || same_name(name, "Zapf Dingbats") || same_name(name, "Dingbats")) continue;
+        ours = pack_by_id(id);
+        for (k = 0; k < npack_files; k++) if (HomeResFile(h) == pack_files[k].ref) packed = true;
+        if (packed && !(ours && ours->ref == HomeResFile(h))) continue;     /* a suitcase's family that failed its check */
+        if (!packed) ours = NULL;
+        for (j = 0; j < n; j++) if (same_name(names[j], name)) break;
+        if (j < n) continue;
+        if (fixed) {
+            Boolean mono = false;
+            if (ours) {
+                SetResLoad(true);
+                mono = pack_fixed(ours);
+                SetResLoad(false);
+            } else {
+                short w;
+                SetResLoad(true);
+                TextFont(id);
+                TextSize(12);
+                TextFace(0);
+                w = CharWidth('i');
+                mono = w > 0 && w == CharWidth('M') && w == CharWidth('W');
+                SetResLoad(false);
+            }
+            if (!mono) continue;
+        }
+        strcpy(names[n++], name);
+    }
+    SetResLoad(true);
+    TextFont(sf);
+    TextSize(ss);
+    TextFace(sface);
+    for (i = 1; i < n; i++) {      /* sorted, ignoring case */
+        char t[FONT_NAME_MAX];
+        for (j = i; j > 0; j--) {
+            const char *a = names[j - 1], *b = names[j];
+            while (*a && (*a | 32) == (*b | 32)) { a++; b++; }
+            if ((*a | 32) <= (*b | 32)) break;
+            strcpy(t, names[j]); strcpy(names[j], names[j - 1]); strcpy(names[j - 1], t);
+        }
+    }
+    return n;
+}
+
+static void use_face(const Face *f, const MStyle *s)
+{
+    TextFont(f->font);
+    TextSize(f->size);
+    TextFace(s->face & FACE_QD);
 }
 
 static long qd_width(void *ctx, const MStyle *s, const char *text, long len)
 {
+    short was, w;
+    Face f = face_of(s);
     (void)ctx;
-    use_style(s);
-    return TextWidth((Ptr)text, 0, (short)len);
+    was = font_enter(&f);
+    use_face(&f, s);
+    w = TextWidth((Ptr)text, 0, (short)len);
+    font_leave(was);
+    return w;
 }
 
 static void qd_metrics(void *ctx, const MStyle *s, short *a, short *d, short *l)
 {
     FontInfo fi;
+    Face f = face_of(s);
     (void)ctx;
-    use_style(s);
+    /* A line is as tall as the System's own font would make it (the Font Manager scales
+       one it has no strike of this size for), even where Web Fonts draws it, so a page
+       doesn't shift; the few glyphs taller than that just reach into the line above. */
+    TextFont(f.line_font);
+    TextSize(f.size);
+    TextFace(s->face & FACE_QD);
     GetFontInfo(&fi);
     *a = fi.ascent;
     *d = fi.descent;
@@ -426,7 +675,14 @@ static int scheme_of(const char *url)
 static int kind_of(const char *url)
 {
     int s = scheme_of(url);
-    return s == SCHEME_HTTPS ? SCHEME_HTTP : s;
+    return s == SCHEME_HTTPS || s == SCHEME_OTHER ? SCHEME_HTTP : s;
+}
+
+/* A Plug-In's own address (plugin://NAME/...): any page may ask for one, as a picture
+   too, and the Plug-In decides; but nothing redirects to one */
+static Boolean plugin_url(const char *url)
+{
+    return !strncmp(url, "plugin:", 7) || !strncmp(url, "PLUGIN:", 7);
 }
 
 /* The page's pictures, and which IMG shows which; false if memory ran out */
@@ -443,7 +699,7 @@ static Boolean pics_collect(void)
         short k, aw, ah;
         Pic *p;
         if (n->tag != TAG_IMG || !(src = html_attr(&br->doc, n, "src")) || url_resolve(br->page_url, src, url, sizeof url)) continue;
-        if (kind_of(url) != kind) continue;  /* no pictures from another kind of address */
+        if (kind_of(url) != kind && !plugin_url(url)) continue;  /* no pictures from another kind of address */
         aw = px_attr(n, "width");
         ah = px_attr(n, "height");
         for (k = 0; k < br->npics; k++) if (br->pics[k].aw == aw && br->pics[k].ah == ah && !strcmp(br->pics[k].url, url)) break;
@@ -485,16 +741,36 @@ static int qd_image_size(void *ctx, long node, short *w, short *h)
 
 /* ------------------------------------------------------------ form controls */
 
-#define LINE_H 11       /* a line of Geneva 9, which every control uses */
+#define LINE_H CT(11)   /* a line of Geneva 9, which every control uses, at the zoom */
 #define CHOOSE "Choose..."
 
-#define AREA_BAR 16              /* a text area's scroll bar, wide as the Mac's */
+#define AREA_BAR CD(16)          /* a text area's scroll bar, wide as the Mac's */
 
 static void control_font(void)
 {
     TextFont(kFontIDGeneva);
-    TextSize(9);
+    TextSize(CT(9));
     TextFace(0);
+}
+
+/* The control font's ascent, for where a baseline goes */
+static short ctl_asc(void)
+{
+    FontInfo fi;
+    GetFontInfo(&fi);
+    return fi.ascent;
+}
+
+/* A TextEdit record in the control font, for a field being typed in or measured */
+static void te_ctl_style(TEHandle te)
+{
+    FontInfo fi;
+    control_font();
+    GetFontInfo(&fi);
+    (*te)->txFont = kFontIDGeneva;
+    (*te)->txSize = CT(9);
+    (*te)->lineHeight = fi.ascent + fi.descent + fi.leading;
+    (*te)->fontAscent = fi.ascent;
 }
 
 static Field *field_of(long node)
@@ -522,49 +798,52 @@ static short list_rows(const Field *f)
 static int qd_control_size(void *ctx, long node, short *w, short *h, short *asc)
 {
     Field *f = field_of(node);
-    short cw, i, most = br->view_r.right - br->view_r.left - 24;
+    short cw, i, most = br->view_r.right - br->view_r.left - CD(24);
     (void)ctx;
     if (!f || f->type == FIELD_HIDDEN) return 0;
     control_font();
     cw = CharWidth('n');
-    *h = 15;
-    *asc = 11;
+    *h = LINE_H + CD(4);
+    *asc = LINE_H;
     switch (f->type) {
     case FIELD_CHECKBOX: case FIELD_RADIO:
-        *w = *h = 11;
-        *asc = 10;
+        *w = *h = CT(11);
+        *asc = CT(10);
         return 1;
     case FIELD_SUBMIT: case FIELD_RESET: case FIELD_IMAGE: {
         const char *l = button_label(f);
-        *w = TextWidth((Ptr)l, 0, strlen(l)) + 16;
+        *w = TextWidth((Ptr)l, 0, strlen(l)) + CD(16);
         break;
     }
     case FIELD_SELECT: {
-        short widest = 20;
+        short widest = CD(20);
         char label[100];
         for (i = 0; i < f->noptions; i++) {
             short lw;
             forms_option_label(&br->doc, f->options[i], label, sizeof label);
             if ((lw = TextWidth(label, 0, strlen(label))) > widest) widest = lw;
         }
-        if (list_rows(f)) { *w = widest + 8; *h = list_rows(f) * LINE_H + 4; *asc = *h - 4; }
-        else *w = widest + 24;
+        if (list_rows(f)) { *w = widest + CD(8); *h = list_rows(f) * LINE_H + CD(4); *asc = *h - CD(4); }
+        else *w = widest + CD(24);
         break;
     }
     case FIELD_TEXTAREA:
-        *w = (f->cols > 0 ? f->cols : 20) * cw + 8 + AREA_BAR;
-        *h = (f->rows > 0 ? f->rows : 2) * LINE_H + 4;
-        *asc = *h - 4;
+        *w = (f->cols > 0 ? f->cols : 20) * cw + CD(8) + AREA_BAR;
+        *h = (f->rows > 0 ? f->rows : 2) * LINE_H + CD(4);
+        *asc = *h - CD(4);
         break;
     default:  /* text, password, file */
-        *w = (f->size > 0 ? f->size : 20) * cw + 6;
-        if (f->type == FIELD_FILE) *w += TextWidth(CHOOSE, 0, strlen(CHOOSE)) + 20;
+        *w = (f->size > 0 ? f->size : 20) * cw + CD(6);
+        if (f->type == FIELD_FILE) *w += TextWidth(CHOOSE, 0, strlen(CHOOSE)) + CD(20);
     }
-    if (*w > most) *w = most > 20 ? most : 20;
+    if (*w > most) *w = most > CD(20) ? most : CD(20);
     return 1;
 }
 
-static Metrics qd_m = { qd_width, qd_metrics, qd_image_size, qd_control_size, NULL, NULL };
+static short zoom_step;         /* page zoom, 0 (normal) to 6: the size ladder's step; every window */
+/* The zoom distances and pictures have: the text's, unless only the text is scaled */
+static Metrics qd_m = { qd_width, qd_metrics, qd_image_size, qd_control_size, NULL, NULL, qd_font_by_name };
+static short dist_zoom(void) { return qd_m.text_only || qd_m.zoom < 9 ? 9 : qd_m.zoom; }
 
 /* Where a control is in the window right now; false if it isn't laid out */
 static Boolean control_box(long node, Rect *box)
@@ -587,9 +866,9 @@ static Boolean control_box(long node, Rect *box)
 /* The part of a text control that holds text */
 static Rect text_part(const Field *f, Rect box)
 {
-    if (f->type == FIELD_FILE) box.right -= TextWidth(CHOOSE, 0, strlen(CHOOSE)) + 20;
+    if (f->type == FIELD_FILE) box.right -= TextWidth(CHOOSE, 0, strlen(CHOOSE)) + CD(20);
     if (f->type == FIELD_TEXTAREA) box.right -= AREA_BAR - 1;
-    InsetRect(&box, 2, 2);
+    InsetRect(&box, CD(2), CD(2));
     return box;
 }
 
@@ -608,6 +887,7 @@ static long area_height(const Field *f, const Rect *inner)
     long h;
     if (f - br->forms.fields == br->focus) return (long)(*br->field_te)->nLines * (*br->field_te)->lineHeight;
     if (!(te = TENew(inner, inner))) return 0;
+    te_ctl_style(te);
     TESetText(f->value, strlen(f->value), te);
     TECalText(te);
     h = (long)(*te)->nLines * (*te)->lineHeight;
@@ -620,7 +900,7 @@ static long area_height(const Field *f, const Rect *inner)
 static void draw_area_bar(const Rect *box, long top, long height, long view)
 {
     Rect bar = area_bar(box), up, down, track, thumb;
-    short i, x = bar.left + AREA_BAR / 2;
+    short i, n = CD(4), x = bar.left + AREA_BAR / 2;
     EraseRect(&bar);
     FrameRect(&bar);
     if (height <= view) return;
@@ -630,9 +910,9 @@ static void draw_area_bar(const Rect *box, long top, long height, long view)
     SetRect(&down, bar.left, bar.bottom - AREA_BAR, bar.right, bar.bottom);
     FrameRect(&up);
     FrameRect(&down);
-    for (i = 0; i < 4; i++) {
-        MoveTo(x - i, up.top + 4 + i); LineTo(x + i, up.top + 4 + i);
-        MoveTo(x - i, down.bottom - 5 - i); LineTo(x + i, down.bottom - 5 - i);
+    for (i = 0; i < n; i++) {
+        MoveTo(x - i, up.top + CD(4) + i); LineTo(x + i, up.top + CD(4) + i);
+        MoveTo(x - i, down.bottom - CD(5) - i); LineTo(x + i, down.bottom - CD(5) - i);
     }
     SetRect(&track, bar.left + 1, up.bottom, bar.right - 1, down.top);
     if (track.bottom - track.top < AREA_BAR) return;
@@ -647,9 +927,9 @@ static void draw_area_bar(const Rect *box, long top, long height, long view)
 
 static void draw_button(const Rect *b, const char *label)
 {
-    EraseRoundRect(b, 8, 8);
-    FrameRoundRect(b, 8, 8);
-    MoveTo(b->left + (b->right - b->left - TextWidth((Ptr)label, 0, strlen(label))) / 2, b->bottom - 4);
+    EraseRoundRect(b, CD(8), CD(8));
+    FrameRoundRect(b, CD(8), CD(8));
+    MoveTo(b->left + (b->right - b->left - TextWidth((Ptr)label, 0, strlen(label))) / 2, b->bottom - CD(4));
     DrawText((Ptr)label, 0, strlen(label));
 }
 
@@ -666,7 +946,7 @@ static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
 {
     Rect inner = text_part(f, *box), frame = inner;
     RgnHandle save;
-    InsetRect(&frame, -2, -2);
+    InsetRect(&frame, -CD(2), -CD(2));
     EraseRect(&frame);
     FrameRect(&frame);
     save = clip_to(&inner);
@@ -682,11 +962,11 @@ static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
     } else {
         const char *v = f->value ? f->value : "";
         long n = strlen(v);
-        MoveTo(inner.left, inner.top + 9);
+        MoveTo(inner.left, inner.top + ctl_asc());
         if (f->type == FIELD_PASSWORD) {
             long i;
             for (i = 0; i < n; i++) DrawChar((char)0xA5);  /* a bullet for each letter */
-            if (focused) { Line(0, -9); Move(0, 9); }      /* where typing goes */
+            if (focused) { Line(0, -ctl_asc()); Move(0, ctl_asc()); }      /* where typing goes */
         } else {
             DrawText((Ptr)v, 0, n);
         }
@@ -703,7 +983,7 @@ static void draw_text_box(const Field *f, const Rect *box, Boolean focused)
 static void draw_popup(const Field *f, const Rect *box)
 {
     char label[100] = "";
-    short i, x = box->right - 12;
+    short i, n = CD(4), x = box->right - CD(12);
     Rect in = *box;
     for (i = 0; i < f->noptions; i++) if (f->selected[i]) { forms_option_label(&br->doc, f->options[i], label, sizeof label); break; }
     EraseRect(box);
@@ -711,16 +991,16 @@ static void draw_popup(const Field *f, const Rect *box)
     MoveTo(box->left + 1, box->bottom);   /* a pop-up menu's shadow */
     LineTo(box->right, box->bottom);
     LineTo(box->right, box->top + 1);
-    in.right -= 14;
+    in.right -= CD(14);
     {
         RgnHandle save = clip_to(&in);
-        MoveTo(box->left + 4, box->bottom - 4);
+        MoveTo(box->left + CD(4), box->bottom - CD(4));
         DrawText(label, 0, strlen(label));
         unclip(save);
     }
-    for (i = 0; i < 4; i++) {             /* the down arrow */
-        MoveTo(x - 3 + i, box->top + 6 + i);
-        LineTo(x + 3 - i, box->top + 6 + i);
+    for (i = 0; i < n; i++) {             /* the down arrow */
+        MoveTo(x - (n - 1 - i), box->top + CD(6) + i);
+        LineTo(x + (n - 1 - i), box->top + CD(6) + i);
     }
 }
 
@@ -732,13 +1012,13 @@ static void draw_list(const Field *f, const Rect *box)
     FrameRect(box);
     for (i = 0; i < rows && i < f->noptions; i++) {
         Rect row;
-        SetRect(&row, box->left + 1, box->top + 2 + i * LINE_H, box->right - 1, box->top + 2 + (i + 1) * LINE_H);
+        SetRect(&row, box->left + 1, box->top + CD(2) + i * LINE_H, box->right - 1, box->top + CD(2) + (i + 1) * LINE_H);
         forms_option_label(&br->doc, f->options[i], label, sizeof label);
-        MoveTo(row.left + 3, row.bottom - 2);
+        MoveTo(row.left + CD(3), row.bottom - CD(2));
         DrawText(label, 0, strlen(label));
         if (f->selected[i]) InvertRect(&row);
     }
-    if (f->noptions > rows) { MoveTo(box->right - 10, box->bottom - 3); DrawText("...", 0, 3); }
+    if (f->noptions > rows) { MoveTo(box->right - CD(10), box->bottom - CD(3)); DrawText("...", 0, 3); }
 }
 
 static void draw_control(const Run *r, short top)
@@ -760,7 +1040,7 @@ static void draw_control(const Run *r, short top)
     case FIELD_RADIO:
         EraseOval(&box);
         FrameOval(&box);
-        if (f->checked) { Rect dot = box; InsetRect(&dot, 3, 3); PaintOval(&dot); }
+        if (f->checked) { Rect dot = box; InsetRect(&dot, CD(3), CD(3)); PaintOval(&dot); }
         break;
     case FIELD_SUBMIT: case FIELD_RESET: case FIELD_IMAGE:
         draw_button(&box, button_label(f));
@@ -770,7 +1050,7 @@ static void draw_control(const Run *r, short top)
         break;
     case FIELD_FILE: {
         Rect button = box;
-        button.left = text_part(f, box).right + 6;
+        button.left = text_part(f, box).right + CD(6);
         draw_text_box(f, &box, false);
         draw_button(&button, CHOOSE);
         break;
@@ -787,6 +1067,17 @@ static void draw_control(const Run *r, short top)
 }
 
 /* ------------------------------------------------------------ the page view */
+
+/* A list bullet: a disc, a circle, or a square about half the text's size, above the baseline */
+static void draw_mark(const Run *r, short base)
+{
+    Rect m;
+    short top = base - r->width * 2 / 3 - r->width / 2;
+    SetRect(&m, PAGE_LEFT + r->x, top, PAGE_LEFT + r->x + r->width, top + r->width);
+    if (r->face == MARK_SQUARE) { InsetRect(&m, 1, 1); PaintRect(&m); }
+    else if (r->face == MARK_CIRCLE) FrameOval(&m);
+    else PaintOval(&m);
+}
 
 static void draw_picture(const Run *r, short top)
 {
@@ -914,19 +1205,38 @@ static void draw_page(short only)
                     continue;
                 }
                 if (r->kind == RUN_RULE) {
-                    short y = br->view_r.top + (short)(ln->y - br->scroll_y) + ln->height / 2;
-                    MoveTo(PAGE_LEFT + r->x, y);
-                    LineTo(PAGE_LEFT + r->x + r->width - 1, y);
+                    short y = br->view_r.top + (short)(ln->y - br->scroll_y) + ln->height / 2, t = r->size < 1 ? 1 : r->size;
+                    Rect bar;
+                    SetRect(&bar, PAGE_LEFT + r->x, y - t / 2, PAGE_LEFT + r->x + r->width, y - t / 2 + t);
+                    if (t == 1) { MoveTo(bar.left, y); LineTo(bar.right - 1, y); }
+                    else if (r->face) PaintRect(&bar);          /* NOSHADE: a solid bar */
+                    else FrameRect(&bar);                       /* else outlined, the 1-bit engraving */
                     continue;
                 }
                 if (r->kind == RUN_IMAGE) { draw_picture(r, base - r->font); continue; }
                 if (r->kind == RUN_CONTROL) { draw_control(r, base - r->font); continue; }
-                TextFont(r->font);
-                TextSize(r->size);
-                TextFace(r->face & ~FACE_INVERSE);
-                if ((r->face & FACE_INVERSE) && !plain_cells) TextMode(srcBic);  /* white, on a dark cell */
-                MoveTo(PAGE_LEFT + r->x, base);
-                DrawText(r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text, 0, r->len);
+                if (r->kind == RUN_MARK) { draw_mark(r, base); continue; }
+                {
+                    MStyle rs;
+                    Face f;
+                    short was;
+                    rs.font = r->font; rs.size = r->size; rs.face = r->face;
+                    f = face_of(&rs);
+                    use_face(&f, &rs);
+                    short up = layout_shift(r->size, r->face);
+                    if ((r->face & FACE_INVERSE) && !plain_cells) TextMode(srcBic);  /* white, on a dark cell */
+                    MoveTo(PAGE_LEFT + r->x, base - up);
+                    was = font_enter(&f);
+                    DrawText(r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text, 0, r->len);
+                    font_leave(was);
+                    if (r->face & FACE_STRIKE) {
+                        short sy = base - up - (r->size + 2) / 3;
+                        if ((r->face & FACE_INVERSE) && !plain_cells) PenMode(patBic);
+                        MoveTo(PAGE_LEFT + r->x, sy);
+                        LineTo(PAGE_LEFT + r->x + r->width - 1, sy);
+                        PenNormal();
+                    }
+                }
                 TextMode(srcOr);
             }
         }
@@ -1048,7 +1358,7 @@ static int relayout(void)
     br->page_w = 0;
     for (i = 0; i < br->lay.nruns; i++) if (br->lay.runs[i].x + br->lay.runs[i].width > br->page_w) br->page_w = br->lay.runs[i].x + br->lay.runs[i].width;
     for (i = 0; i < br->lay.nboxes; i++) if (br->lay.boxes[i].x + br->lay.boxes[i].w > br->page_w) br->page_w = br->lay.boxes[i].x + br->lay.boxes[i].w;
-    br->page_w += 8;
+    br->page_w += dist_zoom() * 8 / 9;
     SetPort(br->win);
     fit_hbar();
     return err;
@@ -1291,6 +1601,7 @@ static void focus_field(long i, const Point *click, Boolean shift)
     }
     if (f->type != FIELD_PASSWORD) {
         Rect inner = text_part(f, box);
+        te_ctl_style(br->field_te);
         (*br->field_te)->viewRect = inner;
         (*br->field_te)->destRect = inner;
         if (f->type != FIELD_TEXTAREA) (*br->field_te)->destRect.right = inner.left + 2000;  /* one long line */
@@ -1363,6 +1674,14 @@ typedef struct {
     FSSpec spec;
     Boolean saving, declined;
     Saver saver;
+    char owner[32];     /* the Plug-In that marked it as its own page, or "" */
+    Pic *picture;       /* a picture, decoded by a format as it comes (load_images) */
+    FmtRun *run;        /* the format decoding the body as it comes */
+    long raw;           /* bytes received, headers and all, as the server sent them */
+    char encoding[16];  /* Content-Encoding */
+    char inner[64];     /* what a page's format gives (gzip's inside; a format's HTML) */
+    Boolean failed;     /* the format couldn't read it */
+    Boolean as_text;    /* View Source: its own bytes, as text, whatever it is */
 } Response;
 
 static void response_init(Response *r)
@@ -1404,6 +1723,7 @@ static Boolean make_room(void)
 {
     GrafPtr old;
     if (kept_release()) return true;
+    if (plugins_purge(16384)) return true;
     if (!leaving || !br->have_page) return false;
     GetPort(&old);
     SetPort(br->win);
@@ -1535,6 +1855,11 @@ static void read_head(Response *r)
             jar_set(&jar, r->req->host, r->req->path, r->req->scheme == SCHEME_HTTPS, r->buf + line + 11, e - line - 11, now);
         }
         if (e - line > 15 && prefix_ci(r->buf + line, "Content-Length:", 15)) length = atol(r->buf + line + 15);
+        if (e - line > 17 && prefix_ci(r->buf + line, "Content-Encoding:", 17)) {
+            long st = line + 17;
+            while (st < e && r->buf[st] == ' ') st++;
+            snprintf(r->encoding, sizeof r->encoding, "%.*s", (int)(e - st), r->buf + st);
+        }
         if (e - line > 13 && prefix_ci(r->buf + line, "Content-Type:", 13)) {
             long st = line + 13, n;
             while (st < e && r->buf[st] == ' ') st++;
@@ -1547,10 +1872,40 @@ static void read_head(Response *r)
 }
 
 /* What Mill shows: HTML, text, GIF, and JPEG (and pages that don't say) */
-static Boolean showable(const char *mime)
+/* The address without its last extension: what's inside a .gz */
+static void inside_name(const char *url, char *out, int size)
 {
-    return !mime[0] || prefix_ci(mime, "text/", 5) || prefix_ci(mime, "image/gif", 9) ||
-           prefix_ci(mime, "image/jpeg", 10) || prefix_ci(mime, "image/pjpeg", 11);
+    char *dot;
+    snprintf(out, size, "%s", url);
+    out[strcspn(out, "?#")] = 0;
+    if ((dot = strrchr(out, '.')) && !strchr(dot, '/')) *dot = 0;
+}
+
+/* What a stream format (gzip) gives: the reply's own type for Content-Encoding, else the
+   type of the name inside */
+static void inside_type(const Response *r, char *out, int size)
+{
+    char name[300];
+    if (r->encoding[0]) { snprintf(out, size, "%s", r->mime); return; }
+    inside_name(r->url, name, sizeof name);
+    type_for_name(name, out, size);
+}
+
+static Boolean gzipped(const Response *r) { return r->encoding[0] && prefix_ci(r->encoding, "gzip", 4); }
+
+/* Whether Mill shows a reply (else it's saved): text, a picture or HTML a format makes,
+   and gzip with one of those inside */
+static Boolean showable(const Response *r)
+{
+    PlugFormat *f;
+    char inner[64];
+    const char *mime = r->mime;
+    if (gzipped(r) && !format_for("application/gzip", NULL, 0, millGivesStream)) return false;
+    if (!mime[0] || prefix_ci(mime, "text/", 5)) return true;
+    if (format_for(mime, r->url, 0, millGivesPicture | millGivesElements)) return true;
+    if ((f = format_for(mime, r->url, 0, millGivesStream)) == NULL) return false;
+    inside_type(r, inner, sizeof inner);
+    return prefix_ci(inner, "text/", 5) || format_for(inner, NULL, 0, millGivesPicture | millGivesElements) != NULL;
 }
 
 static Boolean ask_where(const char *url, FSSpec *spec)
@@ -1584,35 +1939,109 @@ static Boolean start_save(Response *r)
     return saver_write(&r->saver, r->buf + r->body, r->len - r->body) == noErr;
 }
 
+/* Into the buffer: false once it's full (only the start is kept) */
+static Boolean keep(Response *r, const char *data, long len)
+{
+    if (r->len + len > r->size) {
+        memcpy(r->buf + r->len, data, r->size - r->len);
+        r->len = r->size;
+        r->cut = true;
+        return false;
+    }
+    memcpy(r->buf + r->len, data, len);
+    r->len += len;
+    return true;
+}
+
+/* A page's format's bytes (gzip's inside, a format's HTML) are the page */
+static Boolean decoded(const char *data, long len, void *ref) { return keep(ref, data, len); }
+
+/* Once the headers are in: a picture goes to its format as it comes, and so does a page
+   a format has to read first (gzip, a format giving HTML). False to stop. */
+static Boolean start_format(Response *r)
+{
+    PlugFormat *f = NULL;
+    Boolean gz = gzipped(r);
+    long wants, n;
+    char *rest = NULL, inner[64];
+    int got = 0;
+    if (r->as_text) return true;    /* the original bytes, not what a format makes of them */
+    if (r->picture) {
+        wants = millGivesPicture | millGivesStream;
+        if (!gz && !(f = format_for(r->mime, r->url, 0, wants))) return true;  /* Mill's own icons: kept whole */
+    } else {
+        wants = millGivesStream | millGivesElements;
+        if (!gz && !(f = format_for(r->mime, r->url, 0, wants))) return true;
+        if (f && !(f->gives & millGivesElements)) {
+            /* a picture inside is shown as a picture, by the picture's own page */
+            inside_type(r, inner, sizeof inner);
+            if (format_for(inner, NULL, 0, millGivesPicture)) return true;
+        }
+        if (gz && format_for(r->mime, r->url, 0, millGivesPicture)) return true;
+    }
+    /* what came with the headers goes to the format too */
+    if ((n = r->len - r->body) > 0 && !(rest = malloc(n))) { ran_out = true; return false; }
+    if (n > 0) memcpy(rest, r->buf + r->body, n);
+    r->len = r->body;
+    r->run = format_begin(f, r->mime, gz ? r->encoding : NULL, r->url, r->picture ? r->picture->aw : -1,
+                          r->picture ? r->picture->ah : -1, wants, r->picture ? NULL : decoded, r);
+    if (r->run && !r->picture) {
+        const char *t = format_out_type(r->run);
+        snprintf(r->inner, sizeof r->inner, "%s", t ? t : "");
+    }
+    if (r->run && n > 0) got = format_data(r->run, rest, n);
+    free(rest);
+    if (!r->run) { r->failed = true; return false; }
+    if (got < 0) r->failed = true;
+    return got == 0;
+}
+
 static Boolean collect(const char *data, long len, void *ref)
 {
     Response *r = ref;
     char msg[48];
     if (stop_asked()) return false;
-    if (r->saving) {
+    r->raw += len;
+    if (r->run) {
+        int got = format_data(r->run, data, len);
+        if (got < 0) r->failed = true;
+        if (got != 0) return false;
+    } else if (r->saving) {
         if (saver_write(&r->saver, data, len) != noErr) return false;
         r->len += len;
     } else {
-        if (r->len + len > r->size) {
-            /* too long to show whole: keep what fits */
-            memcpy(r->buf + r->len, data, r->size - r->len);
-            r->len = r->size;
-            r->cut = true;
-            return false;
-        }
-        memcpy(r->buf + r->len, data, len);
-        r->len += len;
+        if (!keep(r, data, len)) return false;
         if (!r->headed) {
             read_head(r);
-            if (r->headed && r->code >= 200 && r->code < 300 && (r->save_all || (r->may_save && !showable(r->mime))))
-                if (!start_save(r)) return false;
+            if (r->headed && r->code >= 200 && r->code < 300) {
+                if (r->save_all || (r->may_save && !showable(r))) { if (!start_save(r)) return false; }
+                else if (!start_format(r)) return false;
+            }
         }
     }
-    if (r->total > 0) sprintf(msg, "%s... %ldK of %ldK", r->saving ? "Saving" : "Reading", (r->len + 1023) / 1024, (r->total + 1023) / 1024);
-    else sprintf(msg, "%s... %ldK", r->saving ? "Saving" : "Reading", (r->len + 1023) / 1024);
+    if (r->total > 0) sprintf(msg, "%s... %ldK of %ldK", r->saving ? "Saving" : "Reading", (r->raw + 1023) / 1024, (r->total + 1023) / 1024);
+    else sprintf(msg, "%s... %ldK", r->saving ? "Saving" : "Reading", (r->raw + 1023) / 1024);
     progress(msg);
     /* done at the length it gave, even if the server (or a proxy) keeps the connection open */
-    return !(r->total > 0 && r->len >= r->total);
+    return !(r->total > 0 && r->raw >= r->total);
+}
+
+enum { FETCH_BAD_URL = 1, FETCH_CROSS, FETCH_FAILED, FETCH_SILENT };
+
+/* Why a request failed (FETCH_FAILED): a Plug-In's Fail */
+static char fail_text[200];
+
+/* A request that failed: said in an alert, as a protocol's errors are, not as a page */
+static void fail_alert(const char *text)
+{
+    Str255 p;
+    long n = strlen(text);
+    if (n > 255) n = 255;
+    p[0] = (unsigned char)n;
+    memcpy(p + 1, text, n);
+    ParamText(p, "\p", "\p", "\p");
+    InitCursor();
+    NoteAlert(ALERT_FAILED, NULL);
 }
 
 /* After a fetch that saved, or was to: say how it went */
@@ -1623,7 +2052,8 @@ static void finish_save(Response *r, OSErr err)
     snprintf(name, sizeof name, "%.*s", r->spec.name[0], (char *)r->spec.name + 1);
     if (stopped || err != noErr) {
         saver_abort(&r->saver);
-        if (stopped) set_status("Stopped. The file wasn't saved.");
+        if (err == FETCH_FAILED) fail_alert(fail_text);
+        else if (stopped) set_status("Stopped. The file wasn't saved.");
         else { snprintf(msg, sizeof msg, "The download failed (MacTCP error %d).", err); set_status(msg); }
         return;
     }
@@ -1716,7 +2146,6 @@ typedef struct {
     int kind;           /* BODY_TEXT, BODY_HTML or BODY_PICTURE */
     int charset;        /* from the header's charset=, else CHARSET_GUESS */
     char location[300];
-    Challenge challenge; /* from WWW-Authenticate, on a 401 */
 } Head;
 
 /* Headers end at a blank line */
@@ -1737,8 +2166,6 @@ static void split_response(const char *b, long len, Head *h)
                 while (s < e && b[s] == ' ') s++;
                 snprintf(h->location, sizeof h->location, "%.*s", (int)(e - s), b + s);
             }
-            if (e - l > 17 && prefix_ci(b + l, "WWW-Authenticate:", 17))
-                auth_challenge(b + l + 17, e - l - 17, &h->challenge);
             if (e - l > 13 && prefix_ci(b + l, "Content-Type:", 13)) {
                 long s = l + 13, k;
                 while (s < e && b[s] == ' ') s++;
@@ -1758,112 +2185,59 @@ static void split_response(const char *b, long len, Head *h)
     }
 }
 
-enum { FETCH_BAD_URL = 1, FETCH_CROSS, FETCH_NO_TLS };
 
-/* A 401 Mill can answer: with the address's own name and password the first time, again
-   with a new nonce when Digest's went stale, and otherwise by asking. sent is what went
-   with the request, if anything. False shows the server's page instead. */
-static Boolean answer(const Url *u, const Challenge *ch, Cred *sent, char *login_user, char *login_pass)
+/* The extra header lines for a request: the User-Agent, the page it came from (referer,
+   or NULL), and cookies. A login is the Plug-In's to send. */
+static const char *request_headers(const Url *u, const char *referer)
 {
-    char user[64], pass[64], place[200];
-    Cred *known;
-    if (sent && sent->ch.scheme == AUTH_DIGEST && ch->scheme == AUTH_DIGEST && ch->stale) {
-        auth_renew(sent, ch);
-        return true;
-    }
-    if (login_user[0]) {
-        auth_keep(&keyring, u->host, u->port, u->path, ch, login_user, login_pass);
-        login_user[0] = 0;
-        memset(login_pass, 0, 64);
-        return true;
-    }
-    known = auth_for_realm(&keyring, u->host, u->port, ch->realm);
-    snprintf(user, sizeof user, "%s", known ? known->user : "");
-    if (ch->realm[0]) snprintf(place, sizeof place, "\"%.100s\" at %.80s", ch->realm, u->host);
-    else snprintf(place, sizeof place, "%.80s", u->host);
-    if (!login_ask(place, sent != NULL, user, sizeof user, pass, sizeof pass)) {
-        if (sent) auth_forget(&keyring, sent);  /* they didn't work: don't send them again */
-        watch_cursor();
-        return false;
-    }
-    watch_cursor();
-    auth_keep(&keyring, u->host, u->port, u->path, ch, user, pass);
-    memset(pass, 0, sizeof pass);
-    return true;
-}
-
-/* The extra header lines for an HTTP request: the User-Agent, the page it came from
-   (referer, or NULL), cookies, and a name and password kept for where it goes (which
-   *sent says, or NULL) */
-static const char *request_headers(const Url *u, const char *method, const char *referer, Cred **sent)
-{
-    static char headers[2300], value[600];
-    static unsigned long count;
+    static char headers[1600];
     unsigned long now;
     int n = 0;
     ReadDateTime(&now);  /* the trap: GetDateTime is a low-memory read GCC flags */
     headers[0] = 0;
     if (user_agent()[0]) n = snprintf(headers, 160, "User-Agent: %.140s", user_agent());
     if (referer) n += snprintf(headers + n, 320, "%sReferer: %.300s", n ? "\r\n" : "", referer);
-    if (accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + n + (n ? 10 : 8), 1024) > 0) {
+    if (url_is_web(u->scheme) && accept_cookies() && jar_header(&jar, u->host, u->path, u->scheme == SCHEME_HTTPS, now, headers + n + (n ? 10 : 8), 1024) > 0) {
         memcpy(headers + n, n ? "\r\nCookie: " : "Cookie: ", n ? 10 : 8);
-        n = strlen(headers);
-    }
-    if ((*sent = auth_for_path(&keyring, u->host, u->port, u->path)) != NULL) {
-        char cnonce[20];
-        sprintf(cnonce, "%08lx%04lx", (unsigned long)TickCount(), ++count & 0xffff);
-        if (auth_header(*sent, method, u->path, cnonce, value, sizeof value))
-            snprintf(headers + n, sizeof headers - n, "%sAuthorization: %s", n ? "\r\n" : "", value);
-        memset(value, 0, sizeof value);
     }
     return headers;
 }
 
-static char asked[140];    /* who the last web request went to: the site, or the proxy */
-
-/* An http: or https: request, through the proxy if there is one and the site isn't
-   excluded from it; https: only goes that way, as Mill can't do TLS itself */
-static OSErr web_request(const Url *u, const char *headers, const char *content_type, const char *body,
-                         long body_len, Response *resp)
-{
-    char site[140], whole[420];
-    Url via;
-    if (u->port == (u->scheme == SCHEME_HTTPS ? 443 : 80)) snprintf(site, sizeof site, "%s", u->host);
-    else snprintf(site, sizeof site, "%s:%u", u->host, u->port);
-    if (proxy_on() && proxy()[0] && !url_parse(proxy(), &via) && !url_host_in(u->host, proxy_excluded()) &&
-        (u->scheme == SCHEME_HTTP || proxy_https())) {
-        /* a proxy is asked for the whole address */
-        strcpy(asked, via.host);
-        url_format(u, whole, sizeof whole);
-        return net_http_request(via.host, via.port, whole, site, headers, content_type, body, body_len, collect, resp);
-    }
-    if (u->scheme == SCHEME_HTTPS) return FETCH_NO_TLS;
-    strcpy(asked, u->host);
-    return net_http_request(u->host, u->port, u->path, site, headers, content_type, body, body_len, collect, resp);
-}
+static char asked[140];    /* the host of the last request, for saying what went wrong */
 
 /* Fetch a URL into resp (a POST when content_type is given), following up to five
    redirects of the same kind and answering a site's request for a name and password;
    target becomes where it ended up, without any user:password@. from is the page that
    asked for it, sent as the Referer (redirects too), or NULL. Returns noErr, a MacTCP
-   error, FETCH_BAD_URL, FETCH_CROSS, or FETCH_NO_TLS. */
-static OSErr fetch(char *target, const char *from, const char *content_type, const char *body, long body_len,
+   error, FETCH_BAD_URL, or FETCH_CROSS. */
+/* The key of the login the last page's fetch logged in with, "" if none (bookmarks
+   offer it) */
+static char fetched_login[AUTH_KEYS];
+
+static void forget_logins(char *addr_pass, char *typed_pass)
+{
+    memset(addr_pass, 0, 64);
+    memset(typed_pass, 0, 64);
+    plugin_login_typed(NULL, NULL, NULL);
+}
+
+static OSErr fetch(char *target, const char *from, const char *content_type, Body *body,
                    Response *resp, Url *u, Head *h)
 {
-    int redirects = 0, answers = 0;
-    char login_user[64], login_pass[64];    /* from the address, until a site asks */
-    char login_host[128];                   /* ...and only for its own host and port */
-    unsigned short login_port = 0;
-    Cred *sent = NULL;
+    int redirects = 0;
+    /* the address's login, for its own server; and what was typed in the dialog this
+       action (Mill asks once), for typed's keys */
+    char addr_user[64], addr_pass[64];
+    char typed[AUTH_KEYS], typed_user[64], typed_pass[64];
     OSErr err;
-    login_user[0] = login_pass[0] = 0;
+    addr_user[0] = addr_pass[0] = typed[0] = typed_user[0] = typed_pass[0] = 0;
+    fetched_login[0] = 0;
+    plugin_login_typed(NULL, NULL, NULL);
     for (;;) {
-        if (url_parse(target, u)) return FETCH_BAD_URL;
+        if (url_parse(target, u)) { forget_logins(addr_pass, typed_pass); return FETCH_BAD_URL; }
         if (u->user[0]) {
-            strcpy(login_user, u->user);
-            strcpy(login_pass, u->pass);
-            strcpy(login_host, u->host);
-            login_port = u->port;
+            strcpy(addr_user, u->user);
+            strcpy(addr_pass, u->pass);
             memset(u->pass, 0, sizeof u->pass);
             u->user[0] = 0;
             url_strip_login(target);
@@ -1871,70 +2245,149 @@ static OSErr fetch(char *target, const char *from, const char *content_type, con
         resp->len = resp->total = resp->body = 0;
         resp->code = 0;
         resp->mime[0] = 0;
+        resp->owner[0] = 0;
+        if (resp->run) { format_end(resp->run, millCutStop, NULL); resp->run = NULL; }
+        resp->raw = 0;
+        resp->encoding[0] = resp->inner[0] = 0;
+        resp->failed = false;
         resp->headed = resp->cut = false;
         resp->url = target;
         resp->req = u;
-        if (url_is_web(u->scheme)) {
+        if (u->scheme != SCHEME_MILL) {
             char referer[300];
             Boolean refer = from && url_referer(from, target, referer, sizeof referer);
-            const char *headers = request_headers(u, content_type ? "POST" : "GET", refer ? referer : NULL, &sent);
-            err = web_request(u, headers, content_type, body, body_len, resp);
+            const char *headers = request_headers(u, refer ? referer : NULL);
+            {
+                /* every scheme but mill: is a Plug-In's (http: and https: too). A page may only
+                   use plugin://NAME/ if NAME marked it as its own; typed addresses and mill:
+                   pages always may. */
+                const char *owner = from && br && !strcmp(from, br->page_url) ? br->page_owner : "";
+                strcpy(asked, u->host[0] ? u->host : "this Mac");
+                if (u->scheme == SCHEME_OTHER && !strcmp(u->name, "plugin") && from && strncmp(from, "mill:", 5) &&
+                    strcmp(owner, u->host)) {
+                    static const char no[] = "HTTP/1.0 403 Forbidden\r\nContent-Type: text/html\r\n\r\n"
+                        "<TITLE>Forbidden</TITLE><H2>Forbidden</H2><P>Only the Plug-In's own pages can use this address.";
+                    collect(no, sizeof no - 1, resp);
+                    err = noErr;
+                } else {
+                    Url with = *u;
+                    char key[AUTH_KEYS];
+                    strcpy(with.user, addr_user);
+                    strcpy(with.pass, addr_pass);
+                    if (body) body_rewind(body);    /* asked again: from the start */
+                    err = plugin_request(&with, target, headers, content_type, body, collect, resp, owner, resp->owner, key);
+                    memset(with.pass, 0, sizeof with.pass);
+                    if (err == PLUGIN_FAILED) {
+                        snprintf(fail_text, sizeof fail_text, "%s", plugin_failure());
+                        forget_logins(addr_pass, typed_pass);
+                        return FETCH_FAILED;
+                    }
+                    if (err == paramErr) { forget_logins(addr_pass, typed_pass); return FETCH_BAD_URL; }
+                    if (err == PLUGIN_ASKED) {
+                        /* it needs a login: the person's, asked once per action (asked
+                           again after the dialog is a Cancel); else its page, or nothing */
+                        const PluginAsked *a = plugin_asked();
+                        Cred *k;
+                        if (!typed[0]) {
+                            char name[64];
+                            snprintf(name, sizeof name, "%s", a->name);
+                            snprintf(typed_pass, sizeof typed_pass, "%s", a->pass);
+                            memset(((PluginAsked *)a)->pass, 0, sizeof a->pass);
+                            if (login_ask(a->prompt, a->name_label, a->pass_label, name, sizeof name, typed_pass, sizeof typed_pass)) {
+                                watch_cursor();
+                                snprintf(typed, sizeof typed, "%s", a->key[0] ? a->key : "\n");
+                                strcpy(typed_user, name);
+                                plugin_login_typed(typed, typed_user, typed_pass);
+                                continue;
+                            }
+                            watch_cursor();
+                        } else if (strcmp(a->key, typed)) {
+                            /* what was typed worked; it's someone else asking now (the site,
+                               after its proxy) */
+                            auth_save(&keyring, typed, typed_user, typed_pass);
+                        }
+                        memset(((PluginAsked *)a)->pass, 0, sizeof a->pass);
+                        /* cancelled: a kept login that didn't work isn't offered again */
+                        if (a->forget && (k = auth_find(&keyring, a->key)) != NULL) auth_forget(&keyring, k);
+                        split_response(resp->buf, resp->len, h);
+                        if (h->body >= resp->len) err = FETCH_SILENT;    /* no page, or just its head */
+                        else err = noErr;
+                    } else if (err == noErr) {
+                        /* it ended without asking: what was typed, or the address's login, worked */
+                        if (typed[0] && typed[0] != '\n') auth_save(&keyring, typed, typed_user, typed_pass);
+                        if (key[0] && addr_user[0]) auth_save(&keyring, key, addr_user, addr_pass);
+                        snprintf(fetched_login, sizeof fetched_login, "%s", typed[0] && typed[0] != '\n' ? typed :
+                                 key[0] && addr_user[0] ? key : plugin_login_used());
+                    }
+                }
+            }
         } else {
-            err = local_request(u, content_type, body, body_len, collect, resp);
+            static short making_page;   /* a mill: page can fetch (Check for updates) */
+            making_page++;
+            {
+                /* Mill's own pages' forms are small: all at once */
+                long len = 0;
+                char *all = body ? body_all(body, &len) : NULL;
+                err = local_request(u, content_type, all, len, collect, resp);
+                free(all);
+            }
+            if (--making_page == 0) UnloadSeg((void *)local_request);  /* mill: pages take memory only while one's made */
         }
-        if (err != noErr || resp->saving || resp->declined) return err;
+        if (resp->run && !resp->picture) {
+            /* a page a format read: the rest of what it gives */
+            format_end(resp->run, resp->cut ? millCutLimit : stopped ? millCutStop : 0, NULL);
+            resp->run = NULL;
+        }
+        if (err != noErr || resp->saving || resp->declined) {
+            forget_logins(addr_pass, typed_pass);
+            return err;
+        }
         split_response(resp->buf, resp->len, h);
-        if (login_user[0] && (u->port != login_port || strcmp(u->host, login_host))) {
-            login_user[0] = 0;  /* redirected somewhere else */
-            memset(login_pass, 0, sizeof login_pass);
+        if (resp->inner[0]) {
+            /* what the format gave: HTML, or text */
+            h->kind = prefix_ci(resp->inner, "text/html", 9) ? BODY_HTML : BODY_TEXT;
+            h->charset = CHARSET_GUESS;
+        } else if (h->kind != BODY_HTML && h->code < 300 &&
+                   (format_for(resp->mime, target, 0, millGivesPicture) ||
+                    (gzipped(resp) && format_for(resp->mime, NULL, 0, millGivesPicture)))) {
+            h->kind = BODY_PICTURE;     /* a picture a format reads, by type or by name */
+        } else if (h->kind == BODY_PICTURE && !format_for(resp->mime, target, 0, millGivesPicture)) {
+            h->kind = BODY_TEXT;
         }
-        if (h->code == 401 && h->challenge.scheme != AUTH_NONE && url_is_web(u->scheme) && answers++ < 4 &&
-            answer(u, &h->challenge, sent, login_user, login_pass))
-            continue;
         if ((h->code == 301 || h->code == 302 || h->code == 303) && h->location[0] && redirects++ < 5) {
             char next[300];
             if (url_resolve(target, h->location, next, sizeof next)) return noErr;
-            if (kind_of(next) != kind_of(target)) return FETCH_CROSS;
+            if (kind_of(next) != kind_of(target) || plugin_url(next)) return FETCH_CROSS;
             strcpy(target, next);
             content_type = NULL;  /* a redirect after a POST is fetched with GET */
+            body = NULL;
+            /* the next address's login is its own */
+            addr_user[0] = typed[0] = 0;
+            forget_logins(addr_pass, typed_pass);
             continue;
         }
+        forget_logins(addr_pass, typed_pass);
         return noErr;
     }
 }
 
-/* While an image decodes: how far it's got, the sails turn, and Command-period stops */
-static int decoding(void *ref, int percent)
-{
-    char msg[32];
-    (void)ref;
-    sprintf(msg, "Decoding... %d%%", percent);
-    progress(msg);
-    spin();
-    return stop_asked();
-}
-
-/* 0, -1 (not a picture Mill can show, or stopped), or IMAGE_NO_MEMORY */
+/* A Mac icon from a Plug-In (plugin://NAME/rsrc, x-rsrc/TYPE), at its own size: 0, -1,
+   or IMAGE_NO_MEMORY. Other pictures go to their formats as they arrive. */
 static int decode_image(Pic *p, Response *resp, long body)
 {
-    short nw, nh, w, h;
-    const unsigned char *data = (unsigned char *)resp->buf + body;
-    long len = resp->len - body;
-    int err;
-    if (image_dims(data, len, &nw, &nh) || nw < 1 || nh < 1) return -1;
-    w = p->aw > 0 ? p->aw : p->ah > 0 ? (short)((long)nw * p->ah / nh) : nw;
-    h = p->ah > 0 ? p->ah : p->aw > 0 ? (short)((long)nh * p->aw / nw) : nh;
-    if ((err = image_decode(data, len, w, h, &p->bm, decoding, NULL)) != IMAGE_NO_MEMORY) return err;
-    /* short of memory: make room, and try again */
-    while (err == IMAGE_NO_MEMORY && make_room()) err = image_decode(data, len, w, h, &p->bm, decoding, NULL);
-    if (err == IMAGE_NO_MEMORY) out_of_memory();
-    return err;
+    char type[5] = "    ";
+    long n;
+    if (strncmp(resp->mime, "x-rsrc/", 7)) return -1;
+    n = strlen(resp->mime + 7);
+    memcpy(type, resp->mime + 7, n < 4 ? n : 4);
+    return image_icon(type, (const unsigned char *)resp->buf + body, resp->len - body, &p->bm);
 }
 
 #define IMAGES_AUTO (-1)    /* load_images: as the settings say */
 /* A page's pictures stop loading by themselves while this much is left, for laying the
    page out again, dialogs, and menus; a picture asked for by itself may use it */
 #define PICTURE_ROOM (32L * 1024)
+#define PICTURE_BUFFER (16L * 1024)  /* a picture's reply: headers, and icons kept whole */
 
 static Boolean wanted(const Pic *p, short which, short i)
 {
@@ -1983,16 +2436,24 @@ static void load_images(Response *resp, short which)
         } else {
             OSErr err;
             int got = -1;
-            if (!response_buffer(resp)) { out_of_memory(); p->state = PIC_WAITING; break; }
+            /* a picture goes to its format as it comes: the buffer is only for the headers,
+               and Mill's own icons */
+            if (!(resp->buf = malloc(PICTURE_BUFFER))) { out_of_memory(); p->state = PIC_WAITING; break; }
+            resp->size = PICTURE_BUFFER;
+            resp->picture = p;
             strcpy(target, p->url);
             /* a picture alone on a page is that page: no page asked for it */
-            err = fetch(target, strcmp(p->url, br->page_url) ? br->page_url : NULL, NULL, NULL, 0, resp, &u, &h);
+            err = fetch(target, strcmp(p->url, br->page_url) ? br->page_url : NULL, NULL, NULL, resp, &u, &h);
             if (err == memFullErr) out_of_memory();
-            if (err == noErr && h.code < 300) {
-                char *fits = realloc(resp->buf, resp->len + 1);  /* shrinks where it is */
-                if (fits) resp->buf = fits;
-                got = decode_image(p, resp, h.body);
+            if (resp->run) {
+                got = format_end(resp->run, stopped ? millCutStop : resp->failed ? millCutBroken : 0, &p->bm);
+                resp->run = NULL;
+                if (got == 0 && (stopped || (err != noErr && err != userCanceledErr && !resp->raw))) { image_free(&p->bm); got = -1; }
+                if (got == IMAGE_NO_MEMORY) out_of_memory();
+            } else if (err == noErr && h.code < 300) {
+                got = decode_image(p, resp, h.body);    /* Mill's own icons (x-rsrc) */
             }
+            resp->picture = NULL;
             free(resp->buf);
             resp->buf = NULL;
             if (got == IMAGE_NO_MEMORY) continue;  /* it shows as a picture that didn't load */
@@ -2032,7 +2493,7 @@ static void set_title(const char *t)
    HTML; the title, if any, escaped the same way. malloc'd; its length in *len. */
 static char *pre_page(const char *title, const char *text, long n, long *len)
 {
-    long i, size = n + strlen(title) * 5 + 64;
+    long i, size = n + strlen(title) * 5 + 80;
     char *page, *o;
     for (i = 0; i < n; i++) size += text[i] == '&' ? 4 : (text[i] == '<' || text[i] == '>') ? 3 : 0;
     if (!(page = malloc(size))) return NULL;
@@ -2041,7 +2502,7 @@ static char *pre_page(const char *title, const char *text, long n, long *len)
         const char *s = i ? text : title;
         long k, m = i ? n : (long)strlen(title);
         if (!i && !m) continue;
-        strcpy(o, i ? "<PRE>" : "<TITLE>");
+        strcpy(o, i ? "<PRE><FONT SIZE=1>" : "<TITLE>");  /* Courier 9: 80 columns fit the window */
         o += strlen(o);
         for (k = 0; k < m; k++) {
             switch (s[k]) {
@@ -2086,11 +2547,12 @@ static long fetch_for_page(const char *url, char *buf, long size, char *why, int
     strcpy(activity, "Checking for updates");
     set_status("Checking for updates\311");
     snprintf(target, sizeof target, "%s", url);
-    err = fetch(target, NULL, NULL, NULL, 0, &resp, &u, &h);
+    err = fetch(target, NULL, NULL, NULL, &resp, &u, &h);
     if (err == memFullErr) out_of_memory();
     if (stopped || err == userCanceledErr) snprintf(why, why_size, ran_out ? "Not enough memory." : "Stopped.");
     else if (err == FETCH_BAD_URL || err == FETCH_CROSS) snprintf(why, why_size, "Its address isn't one Mill can open.");
-    else if (err == FETCH_NO_TLS) snprintf(why, why_size, "https:// needs a proxy, in Preferences.");
+    else if (err == FETCH_FAILED) snprintf(why, why_size, "%s", fail_text);
+    else if (err == FETCH_SILENT) snprintf(why, why_size, "It asked for a name and password.");
     else if (err != noErr) net_trouble(err, why, why_size);
     else if (h.code != 200) snprintf(why, why_size, "The server didn't send it (error %d).", h.code);
     else if (resp.cut) snprintf(why, why_size, "Its answer was too long.");
@@ -2108,7 +2570,7 @@ static long fetch_for_page(const char *url, char *buf, long size, char *why, int
 static Boolean coming_back;     /* load: Back or Forward, so the page's forms come back too */
 static Boolean forms_kept;      /* load: the page being left has had its forms kept already */
 
-static Boolean load(const char *url, Boolean record, const char *from, const char *content_type, const char *body, long body_len)
+static Boolean load(const char *url, Boolean record, const char *from, const char *content_type, Body *body)
 {
     /* view-source:address shows what address sends, as text */
     Boolean source = !strncmp(url, VIEW_SOURCE, strlen(VIEW_SOURCE));
@@ -2122,6 +2584,7 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     int parsed = -1;
     long page_k;
     Boolean back = coming_back;
+    Plug *making;   /* the Plug-In for the address, kept loaded from asking to showing */
 
     coming_back = false;
     blur();
@@ -2142,18 +2605,27 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     response_init(&resp);
     page_k = resp.size / 1024;
     resp.may_save = !source;
+    resp.as_text = source;
     set_loading(true);
     activity[0] = 0;
     memset(&u, 0, sizeof u);
     watch_cursor();
     snprintf(shown_url, sizeof shown_url, "%s%s", source ? VIEW_SOURCE : "", target);
     show_url(shown_url);
-    err = fetch(target, referrer[0] ? referrer : NULL, content_type, body, body_len, &resp, &u, &h);
+    making = plugin_hold(target);
+    err = fetch(target, referrer[0] ? referrer : NULL, content_type, body, &resp, &u, &h);
     snprintf(shown_url, sizeof shown_url, "%s%s", source ? VIEW_SOURCE : "", target);  /* where it ended up */
     if (resp.saving || resp.declined) {
         /* a file Mill can't show: saved, and the page stays */
         finish_save(&resp, err);
         show_url(br->page_url);
+        goto done;
+    }
+    if (err == FETCH_FAILED || err == FETCH_SILENT) {
+        /* the page and its history stay as they were, as after Stop: with an alert when
+           the request failed, quietly after a cancelled login */
+        show_url(br->page_url);
+        if (err == FETCH_FAILED) fail_alert(fail_text);
         goto done;
     }
     show_url(shown_url);
@@ -2165,21 +2637,15 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
         split_response(resp.buf, resp.len, &h);
         err = noErr;
     }
-    if (err == FETCH_NO_TLS) {
-        /* https: without a proxy: a page that says so, at the address asked for */
-        static const char no_tls[] = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n"
-            "<TITLE>TLS is not supported</TITLE><H2>TLS is not supported</H2>"
-            "<P>Please configure a proxy for https:// in Preferences, in the Edit menu.";
-        collect(no_tls, sizeof no_tls - 1, &resp);
-        split_response(resp.buf, resp.len, &h);
-        err = noErr;
-    }
-    if (err == FETCH_BAD_URL) { set_status("Mill opens http:, https:, file:, and mill: addresses."); goto done; }
+    if (err == FETCH_BAD_URL) { set_status("Mill can't open this kind of address."); goto done; }
     if (err == FETCH_CROSS) { set_status("Stopped at a redirect to another kind of address."); goto done; }
     if (err != noErr) {
         char msg[200];
         net_trouble(err, msg, sizeof msg);
-        set_status(msg);
+        /* no reply at all (lookup, connect, timeout, lost before any reply): an alert, and
+           the page stays; a server's own error page is shown as a page instead */
+        show_url(br->page_url);
+        fail_alert(msg);
         goto done;
     }
 
@@ -2201,11 +2667,7 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
         char *page = NULL;
         /* the charset goes by the text itself, before escaping hides its META tag */
         int cs = h.charset != CHARSET_GUESS ? h.charset : charset_sniff(text, n);
-        if (source && resp.mime[0] && !prefix_ci(resp.mime, "text/", 5)) {
-            char msg[100];
-            snprintf(msg, sizeof msg, "Mill can't show %s as source.", resp.mime);
-            page = pre_page(msg, msg, strlen(msg), &len);
-        } else if (source) {
+        if (source) {
             page = pre_page(shown_url, text, n, &len);
         } else if (h.kind == BODY_PICTURE) {
             if ((page = malloc(strlen(target) + 32))) len = sprintf(page, "<IMG SRC=\"%s\">", target);
@@ -2240,6 +2702,14 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
         if (state[0] == 'S') br->form_base = forms_save(&br->forms, &br->doc);
     }
     strcpy(br->page_url, shown_url);
+    strcpy(br->page_login, fetched_login);
+    {
+        /* the Plug-In that made this page stays loaded while it shows */
+        Plug *was = br->held;
+        br->held = plugin_hold(shown_url);
+        plugin_drop(was);
+        strcpy(br->page_owner, source ? "" : resp.owner);
+    }
     if (record) remember(shown_url, referrer);
     set_title(br->doc.title[0] ? br->doc.title : shown_url);
     if (!pics_collect()) out_of_memory();
@@ -2264,6 +2734,7 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     }
     shown = true;
 done:
+    plugin_drop(making);
     leaving = false;
     free(resp.buf);
     set_loading(false);
@@ -2300,7 +2771,7 @@ static Boolean may_leave(const char *what)
 static Boolean go(const char *url, Boolean record, const char *from)
 {
     if (!may_leave("Leave this page?")) return false;
-    return load(url, record, from, NULL, NULL, 0);
+    return load(url, record, from, NULL, NULL);
 }
 
 static Boolean same_kind(const char *url)
@@ -2340,7 +2811,7 @@ static void go_history(short delta)
     br->hist_pos += delta;
     coming_back = true;
     /* always a GET: a page that came from a POST is asked for again without its body */
-    load(br->history[br->hist_pos], false, NULL, NULL, NULL, 0);
+    load(br->history[br->hist_pos], false, NULL, NULL, NULL);
 }
 
 /* Reload sends the Referer the page first had; Back and Forward send none */
@@ -2397,9 +2868,11 @@ static void save_url(const char *url, const char *from)
     activity[0] = 0;
     watch_cursor();
     snprintf(target, sizeof target, "%s", url);
-    err = fetch(target, from, NULL, NULL, 0, &resp, &u, &h);
+    err = fetch(target, from, NULL, NULL, &resp, &u, &h);
     if (err == memFullErr) out_of_memory();
     if (resp.saving) finish_save(&resp, err);
+    else if (err == FETCH_FAILED) fail_alert(fail_text);
+    else if (err == FETCH_SILENT) set_status("Not saved.");
     else if (stopped) set_status("Stopped.");
     else if (err == noErr && h.code >= 300) set_status("The server didn't send it.");
     else set_status("Mill couldn't get it.");
@@ -2409,12 +2882,6 @@ static void save_url(const char *url, const char *from)
     if (ran_out) out_of_memory_alert("it couldn't save that.");
 }
 
-static long read_upload(void *ctx, const char *path, char **data)
-{
-    (void)ctx;
-    return read_mac_file(path, data, MAX_UPLOAD);
-}
-
 /* Send a form, as its field by (a button, or -1 for Return in a text field) sends it */
 static void submit(long form, long by, short x, short y)
 {
@@ -2422,7 +2889,7 @@ static void submit(long form, long by, short x, short y)
     char target[300], content_type[80];
     char *q;
     blur();
-    if (forms_submit(&br->forms, &br->doc, form, by, x, y, read_upload, NULL, &s)) { out_of_memory_alert("it couldn't send the form."); return; }
+    if (forms_submit(&br->forms, &br->doc, form, by, x, y, &s)) { out_of_memory_alert("it couldn't send the form."); return; }
     if (url_resolve(br->page_url, s.action[0] ? s.action : br->page_url, target, sizeof target)) {
         set_status("Mill can't send this form to that address.");
     } else if (!same_kind(target)) {
@@ -2430,11 +2897,18 @@ static void submit(long form, long by, short x, short y)
     } else {
         if ((q = strchr(target, '#'))) *q = 0;
         if (s.post) {
-            if (s.multipart) sprintf(content_type, "multipart/form-data; boundary=%s", s.boundary);
-            else strcpy(content_type, "application/x-www-form-urlencoded");
-            keep_form_state(true);
-            forms_kept = true;
-            load(target, true, br->page_url, content_type, s.data, s.len);
+            /* the body is made as it's sent: files are read a piece at a time */
+            char why[120];
+            Body *body = body_new(&s, why, sizeof why);
+            if (!body) set_status(why);
+            else {
+                strcpy(content_type, body_type(body));
+                keep_form_state(true);
+                forms_kept = true;
+                load(target, true, br->page_url, content_type, body);
+                body_free(body);
+            }
+            UnloadSeg((void *)body_new);    /* sending's code, only while it's used */
         } else {
             if ((q = strchr(target, '?'))) *q = 0;
             if (strlen(target) + s.len + 2 > sizeof target) set_status("This form's data is too long for an address.");
@@ -2443,7 +2917,7 @@ static void submit(long form, long by, short x, short y)
                 strcat(target, s.data);
                 keep_form_state(true);
                 forms_kept = true;
-                load(target, true, br->page_url, NULL, NULL, 0);
+                load(target, true, br->page_url, NULL, NULL);
             }
         }
     }
@@ -2485,7 +2959,7 @@ static void follow(const Run *r)
 {
     char target[300];
     if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) {
-        set_status("Mill opens http:, file:, and mill: addresses.");
+        set_status("Mill can't open this kind of address.");
         return;
     }
     if (!may_follow(target)) { set_status(FILE_MSG); return; }
@@ -2518,6 +2992,7 @@ static int map_target(Point p, const Run *r, char *out, int size)
     if (!r || r->kind != RUN_IMAGE || !run_box(r, &box)) return 0;
     x = p.h - box.left - r->face;  /* in the image, inside its border */
     y = p.v - box.top - r->face;
+    if (dist_zoom() > 9) { x = (short)((long)x * 9 / dist_zoom()); y = (short)((long)y * 9 / dist_zoom()); }   /* back to the image's own pixels */
     if ((map = imagemap_for(&br->doc, r->text)) >= 0) {
         if ((area = imagemap_hit(&br->doc, map, x, y)) < 0) return -1;
         return url_resolve(br->page_url, html_attr(&br->doc, &br->doc.nodes[area], "href"), out, size) ? -1 : 1;
@@ -2538,7 +3013,7 @@ static void go_map(const char *target)
     else go(target, true, br->page_url);
 }
 
-enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE };
+enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE, CM_VIEW_LINK };
 #define HOLD 30         /* ticks the button is held for the menu, as Mac browsers did */
 
 /* The menu for what's under the mouse: an image, a link, or the page itself */
@@ -2566,6 +3041,8 @@ static void context_menu(Point p, const Run *r)
         codes[n++] = CM_NEW_WINDOW;
         AppendMenu(m, "\pSave Link As...");
         codes[n++] = CM_SAVE_LINK;
+        AppendMenu(m, "\pView Link as Text");
+        codes[n++] = CM_VIEW_LINK;
     }
     if (!n) {
         AppendMenu(m, "\pView Source");
@@ -2591,10 +3068,16 @@ static void context_menu(Point p, const Run *r)
     case CM_SAVE_IMAGE:
         save_url(br->pics[pic].url, br->page_url);
         break;
-    case CM_NEW_WINDOW: case CM_SAVE_LINK:
-        if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill opens http:, file:, and mill: addresses.");
+    case CM_NEW_WINDOW: case CM_SAVE_LINK: case CM_VIEW_LINK:
+        if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill can't open this kind of address.");
         else if (!may_follow(target)) set_status(FILE_MSG);
         else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target, br->page_url);
+        else if (codes[LoWord(choice) - 1] == CM_VIEW_LINK) {
+            /* what it sends, as text: View Source, for the link */
+            char source[340];
+            snprintf(source, sizeof source, "%s%s", VIEW_SOURCE, target);
+            go(source, true, br->page_url);
+        }
         else {
             char from[300];
             strcpy(from, br->page_url);     /* the new window becomes br */
@@ -2778,7 +3261,7 @@ static Boolean click_control(Point p, EventRecord *ev)
         break;
     case FIELD_SELECT:
         if (list_rows(f) && f->noptions <= list_rows(f)) {
-            short row = (p.v - box.top - 2) / LINE_H;
+            short row = (p.v - box.top - CD(2)) / LINE_H;
             if (row >= 0 && row < f->noptions) {
                 if (f->multiple) f->selected[row] = !f->selected[row];
                 else { memset(f->selected, 0, f->noptions); f->selected[row] = 1; }
@@ -2790,7 +3273,7 @@ static Boolean click_control(Point p, EventRecord *ev)
         break;
     case FIELD_FILE: {
         Rect button = box;
-        button.left = text_part(f, box).right + 6;
+        button.left = text_part(f, box).right + CD(6);
         if (PtInRect(p, &button) && press(&button)) { choose_file(f); draw_view(); }
         break;
     }
@@ -3011,7 +3494,9 @@ static void print_page(void)
     /* laid out with the screen's fonts, as the Mac's printer drivers expect */
     SetPort(br->win);
     qd_m.progress = print_laying_out;
+    qd_m.zoom = 0;          /* a sheet is at normal size */
     err = layout_doc(&play, &br->doc, &qd_m, paper.right - paper.left);
+    qd_m.zoom = zoom_step ? LADDER[zoom_step] : 0;
     qd_m.progress = NULL;
     if (!err && !(starts = paginate(&play, paper.bottom - paper.top - 2 * edge, &npages))) err = -1;
     if (err) {
@@ -3187,9 +3672,8 @@ static void bookmark_dialog(short slot)
     Str255 s;
     char url[300], title[100], msg[80];
     Cred *login = NULL;
-    Url pu;
     if (!br->page_url[0]) return;
-    if (!url_parse(br->page_url, &pu) && url_is_web(pu.scheme)) login = auth_for_path(&keyring, pu.host, pu.port, pu.path);
+    if (br->page_login[0]) login = auth_find(&keyring, br->page_login);
     blur();
     if (slot < 0) {
         for (slot = 0; slot < BOOKMARKS && bookmark(slot, url, sizeof url, title, sizeof title); slot++) {}
@@ -3294,7 +3778,12 @@ static void refresh_menus(void)
         if (br || da) EnableItem(file, FILE_CLOSE); else DisableItem(file, FILE_CLOSE);
         if (br && br->have_page) EnableItem(file, FILE_PRINT); else DisableItem(file, FILE_PRINT);
         for (i = EDIT_CUT; i <= EDIT_PASTE; i++) if (br || da) EnableItem(edit, i); else DisableItem(edit, i);
+        MenuHandle view = GetMenuHandle(MENU_VIEW);
         for (i = GO_BACK; i <= GO_RELOAD; i++) if (br) EnableItem(nav, i); else DisableItem(nav, i);
+        if (br && br->loading) EnableItem(nav, GO_STOP); else DisableItem(nav, GO_STOP);
+        if (br && zoom_step < 6) EnableItem(view, VIEW_LARGER); else DisableItem(view, VIEW_LARGER);
+        if (br && zoom_step > 0) EnableItem(view, VIEW_SMALLER); else DisableItem(view, VIEW_SMALLER);
+        if (br && br->have_page) EnableItem(view, VIEW_PAGE_SOURCE); else DisableItem(view, VIEW_PAGE_SOURCE);
     }
 }
 
@@ -3321,6 +3810,8 @@ static TEHandle typing_te(void)
 {
     return br->focus >= 0 && br->forms.fields[br->focus].type != FIELD_PASSWORD ? br->field_te : br->url_te;
 }
+
+static void zoom_by(int dir);
 
 static void do_menu(long choice)
 {
@@ -3357,8 +3848,18 @@ static void do_menu(long choice)
         if (item == BM_ADD) { if (br) bookmark_dialog(-1); }
         else if (item == BM_EDIT) { if (need()) go("mill://config#bookmarks", true, NULL); }
         else if (item >= BM_FIRST && item < BM_FIRST + BOOKMARKS) open_bookmark(item - BM_FIRST);
+    } else if (menu == MENU_VIEW) {
+        if (item == VIEW_LARGER) zoom_by(1);
+        else if (item == VIEW_SMALLER) zoom_by(-1);
+        else if (item == VIEW_PAGE_SOURCE && br && br->have_page) {
+            char target[340];
+            const char *page = !strncmp(br->page_url, VIEW_SOURCE, strlen(VIEW_SOURCE)) ? br->page_url + strlen(VIEW_SOURCE) : br->page_url;
+            snprintf(target, sizeof target, "%s%s", VIEW_SOURCE, page);
+            go(target, true, NULL);
+        }
     } else if (menu == MENU_GO) {
-        if (item == GO_HOME) { if (need()) go_home(); }
+        if (item == GO_STOP) { if (br && br->loading) stopped = true; }
+        else if (item == GO_HOME) { if (need()) go_home(); }
         else if (br) {
             if (item == GO_BACK) go_history(-1);
             if (item == GO_FORWARD) go_history(1);
@@ -3366,6 +3867,38 @@ static void do_menu(long choice)
         }
     }
     HiliteMenu(0);
+}
+
+/* Page zoom: Command-plus (or equals) and Command-minus move along HTML 3.2's size ladder, so
+   every size and distance is the ladder's step over 9: 1, 10/9, 12/9, 14/9, 2, 24/9, 4. One zoom
+   for every window, for the session. Each window's page is laid out again, and kept at about the
+   same place. */
+static void zoom_by(int dir)
+{
+    static const short steps[7] = { 9, 10, 12, 14, 18, 24, 36 };
+    short now = zoom_step + dir;
+    Browser *b, *was = br;
+    Boolean failed = false;
+    if (now < 0 || now > 6 || now == zoom_step) return;
+    zoom_step = now;
+    qd_m.zoom = steps[now];
+    for (b = browsers; b; b = b->next) {
+        long before, height;
+        if (!b->have_page) continue;
+        br = b;
+        before = br->scroll_y;
+        height = br->lay.height > 0 ? br->lay.height : 1;
+        watch_cursor();
+        if (relayout() == -1) failed = true;
+        br->scroll_y = br->lay.height * before / height;      /* the same part of the page */
+        if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
+        update_scroll();
+        InvalRect(&br->win->portRect);
+    }
+    br = was;
+    if (br) SetPort(br->win);
+    InitCursor();
+    if (failed) out_of_memory_alert("it shows only part of this page.");
 }
 
 static void resized(void)
@@ -3440,6 +3973,7 @@ static void close_browser(Browser *x)
     use(x);
     if (x->have_page) { layout_free(&x->lay); pics_free(); forms_free(&x->forms); html_free(&x->doc); }
     free(x->form_base);
+    plugin_drop(x->held);
     for (i = 0; i < x->hist_len; i++) free(x->history[i]);
     TEDispose(x->url_te);
     TEDispose(x->field_te);
@@ -3505,6 +4039,8 @@ static void do_key(EventRecord *ev)
         if (br && c == '[') { go_history(-1); return; }
         if (br && c == ']') { go_history(1); return; }
         if (br && (c == 'r' || c == 'R')) { reload(); return; }
+        if (c == '=') c = '+';          /* Command-equals is Command-plus without Shift; Command-Shift-minus is minus */
+        if (c == '_') c = '-';
         if (br && (ev->modifiers & optionKey) && option_digit(ev) >= 0) { bookmark_dialog(option_digit(ev)); return; }
         refresh_menus();
         do_menu(MenuKey(c));
@@ -3594,8 +4130,11 @@ static void setup_menus(void)
     m = NewMenu(MENU_EDIT, "\pEdit");
     AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;(-;Preferences...");
     InsertMenu(m, 0);
+    m = NewMenu(MENU_VIEW, "\pView");
+    AppendMenu(m, "\pLarger Text/+;Smaller Text/-;(-;Page Source");
+    InsertMenu(m, 0);
     m = NewMenu(MENU_GO, "\pGo");
-    AppendMenu(m, "\pBack/[;Forward/];Reload/R;Home/H");
+    AppendMenu(m, "\pBack/[;Forward/];Reload/R;Home/H;(-;Stop/.");
     InsertMenu(m, 0);
     m = NewMenu(MENU_BOOKMARKS, "\pBookmarks");
     AppendMenu(m, "\pAdd Bookmark.../D;(-");
@@ -3619,6 +4158,7 @@ static void net_progress(const char *msg) { progress(msg); }
 static Boolean net_waiting(void)
 {
     spin();
+    if (plugin_tidying()) return false;
     return stop_asked();
 }
 
@@ -3638,8 +4178,16 @@ int mill_run(WindowPtr splash)
     net_status = net_progress;
     net_idle = net_waiting;
     net_ok = net_init() == noErr;
+    plugins_init();
+    fonts_choose();
     DisposeWindow(splash);  /* the browser is ready */
     SetPort(br->win);
+    /* the splash and what Mill does once are done: their segment goes. main's frame
+       stays below, so Mill never returns there; it ends with ExitToShell. */
+    UnloadSeg((void *)main);
+#ifdef MILL_MEMREPORT
+    memreport_snapshot("the window is up, before the first page", true);
+#endif
 
     /* the home page, or Mill's own page when the network isn't there */
     if (!net_ok || !go(setting("homepage", MILL_DEFAULT_HOME), true, NULL)) {
@@ -3648,6 +4196,9 @@ int mill_run(WindowPtr splash)
         go("mill://about", true, NULL);
         set_status(why);  /* why it isn't the home page */
     }
+#ifdef MILL_MEMREPORT
+    memreport_snapshot("the first page has loaded", false);
+#endif
 
     while (!quitting) {
         use(front());
@@ -3666,6 +4217,67 @@ int mill_run(WindowPtr splash)
         case activateEvt: activate((WindowPtr)ev.message, (ev.modifiers & activeFlag) != 0); break;
         }
     }
+    plugins_quit();
     net_shutdown();
+    ExitToShell();
     return 0;
 }
+
+#ifdef MILL_MEMREPORT
+void memreport_main(void)
+{
+    Browser *x;
+    long i;
+    for (x = browsers; x; x = x->next) {
+        memreport_note(x, "Browser window (Mill's record)", 0);
+        memreport_note(x->win, "Window record (Toolbox)", 0);
+        memreport_note(x->url_te, "TextEdit records", 1);
+        memreport_note(x->field_te, "TextEdit records", 1);
+        if (x->url_te) memreport_note((*x->url_te)->hText, "TextEdit text", 1);
+        if (x->field_te) memreport_note((*x->field_te)->hText, "TextEdit text", 1);
+        memreport_note(x->vscroll, "Scroll bars (controls)", 1);
+        memreport_note(x->hscroll, "Scroll bars (controls)", 1);
+        memreport_note(((WindowPeek)x->win)->strucRgn, "Window regions", 1);
+        memreport_note(((WindowPeek)x->win)->contRgn, "Window regions", 1);
+        memreport_note(((WindowPeek)x->win)->updateRgn, "Window regions", 1);
+        memreport_note(((WindowPeek)x->win)->titleHandle, "Window regions", 1);
+        memreport_note(x->win->visRgn, "Window regions", 1);
+        memreport_note(x->win->clipRgn, "Window regions", 1);
+        memreport_note(x->doc.nodes, "Page: parsed nodes", 0);
+        memreport_note(x->doc.text, "Page: text", 0);
+        memreport_note(x->doc.attrs, "Page: attributes", 0);
+        memreport_note(x->lay.lines, "Page: layout", 0);
+        memreport_note(x->lay.runs, "Page: layout", 0);
+        memreport_note(x->lay.gen, "Page: layout", 0);
+        memreport_note(x->lay.links, "Page: layout", 0);
+        memreport_note(x->lay.anchors, "Page: layout", 0);
+        memreport_note(x->lay.boxes, "Page: layout", 0);
+        for (i = 0; i < x->lay.nlinks; i++) memreport_note(x->lay.links[i], "Page: link addresses", 0);
+        for (i = 0; i < x->lay.nanchors; i++) memreport_note(x->lay.anchors[i].name, "Page: layout", 0);
+        memreport_note(x->forms.fields, "Page: forms", 0);
+        for (i = 0; i < x->forms.n; i++) {
+            memreport_note(x->forms.fields[i].value, "Page: forms", 0);
+            memreport_note(x->forms.fields[i].options, "Page: forms", 0);
+            memreport_note(x->forms.fields[i].selected, "Page: forms", 0);
+        }
+        memreport_note(x->pics, "Page: picture list", 0);
+        memreport_note(x->pic_of, "Page: picture list", 0);
+        for (i = 0; i < x->npics; i++) {
+            memreport_note(x->pics[i].url, "Page: picture list", 0);
+            if (x->pics[i].owned) {
+                memreport_note(x->pics[i].bm.bits, "Page: pictures (not cached)", 0);
+                memreport_note(x->pics[i].bm.mask, "Page: pictures (not cached)", 0);
+            }
+        }
+        for (i = 0; i < x->hist_len; i++) memreport_note(x->history[i], "Window history", 0);
+        memreport_note(x->form_base, "Page: forms", 0);
+    }
+    memreport_note(kept, "Image cache", 0);
+    for (i = 0; i < nkept; i++) {
+        memreport_note(kept[i].url, "Image cache", 0);
+        memreport_note(kept[i].bm.bits, "Image cache", 0);
+        memreport_note(kept[i].bm.mask, "Image cache", 0);
+    }
+    memreport_note(&browsers, "Mill's globals", 0);
+}
+#endif

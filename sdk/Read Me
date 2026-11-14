@@ -1,0 +1,35 @@
+Mill Plug-In SDK
+
+A Plug-In adds URL schemes (protocols) or file formats to Mill. It is a
+code resource of type 'MPlg', ID 128, with its entry point at byte 0, in
+a file of type 'MPlg' and creator 'MiLL'. Put the file in the "Mill
+Plug-Ins" folder next to Mill; mill://plugins lists what Mill found.
+
+Folders
+  Interfaces    MillPlugIn.h: the interface, with notes on every call
+  Glue          MillGlue.c: the entry point; add it to every Plug-In
+  Examples      Finger: a small protocol Plug-In
+  MPW           Finger.make, for MPW 3.5 (SC and Link)
+  CodeWarrior   Finger's project, for CodeWarrior (CW4 and later)
+KIT-BEGIN-REPO-ONLY
+  Retro68       build.sh, for Retro68 (GCC) on a modern computer
+KIT-END-REPO-ONLY
+
+Start in the folder for your compiler, and build Finger first. To start
+a Plug-In of your own, copy Finger's folder and its project or make file.
+
+License
+  Put your license text in the Plug-In file as a resource named "License", ID 129: type 'TXGZ'
+  (gzip data) or 'TEXT' (plain). mill://license shows it in a section of its own, and
+  mill://plugins links to that section. Finger's .r file (for Rez) does it with its License file
+  gzipped; any resource editor can do the same.
+
+Rules (MillPlugIn.h has the rest)
+- No int in the interface: short is 16 bits, long is 32.
+- Calls between Mill and a Plug-In use the pascal convention.
+- Mill calls only the entry point. Never hand Mill a pointer to any other
+  function.
+- No static or global data that holds an address (a table of strings or
+  functions). Fill such tables in at run time, as Finger does.
+- Write HTTP's CR LF as MILL_CRLF: '\r' and '\n' differ by compiler.
+- Host functions marked "moves memory" may compact the heap.

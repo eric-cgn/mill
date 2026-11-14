@@ -1,21 +1,27 @@
-/* URLs Mill can open (http:, https: through a proxy, file:, and its own mill: pages):
-   splitting, and resolving links against the page they're on. */
+/* URLs Mill can open (http:, https: through a proxy, file:, its own mill: pages, and
+   the schemes its Plug-Ins add): splitting, and resolving links against the page
+   they're on. */
 #ifndef MILL_URL_H
 #define MILL_URL_H
 
-enum { SCHEME_HTTP, SCHEME_FILE, SCHEME_MILL, SCHEME_HTTPS };
+enum { SCHEME_HTTP, SCHEME_FILE, SCHEME_MILL, SCHEME_HTTPS, SCHEME_OTHER };
 
 typedef struct {
     char scheme;
+    char name[12];      /* SCHEME_OTHER's name, lower case: "gopher" */
     char user[64];      /* from user:password@host, decoded; empty if not given */
     char pass[64];
     char host[128];     /* empty for file:; the page's name for mill: (mill://about) */
-    unsigned short port;    /* 80 for http:, 443 for https: unless given */
+    unsigned short port;    /* 0 if not given (see url_port) */
     char path[256];   /* starts with '/', includes any query; no fragment */
     char fragment[64];
 } Url;
 
-/* Parse an absolute URL (no scheme means http). Returns 0, or -1 if unusable. */
+/* The Plug-In schemes Mill knows besides its own, separated by spaces ("gopher ftp");
+   the string is kept, not copied */
+void url_schemes(const char *names);
+/* Parse an absolute URL (no scheme means http). Returns 0, or -1 if unusable (a scheme
+   Mill doesn't know, or a port that isn't 1 to 65535). */
 int url_parse(const char *s, Url *u);
 /* Resolve href against base into out (an absolute URL string). Returns 0, or -1 for links
    Mill can't follow (mailto:, ftp:, ...). */
@@ -26,6 +32,9 @@ void url_format(const Url *u, char *out, int out_size);
 int url_has_scheme(const char *s);
 /* http: or https:, the web's own kinds (as against file: and mill:) */
 int url_is_web(int scheme);
+/* The port to connect to: the one given, else 80 for http: and 443 for https:; 0 for
+   other schemes with none given (their Plug-In picks) */
+unsigned short url_port(const Url *u);
 /* Whether host is in list (separated by spaces or commas): a domain includes its
    subdomains ("example.com" and ".example.com" both include www.example.com, in any
    case); an IP address only matches itself; a range (192.168.0.0/16) matches the

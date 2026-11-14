@@ -15,6 +15,7 @@ resource 'SIZE' (-1) {
 
 #include "Finder.r"
 #include "icons.r"
+#include "listicons.r"
 #include "splash.r"
 #include "pages.r"
 #include "version.h"
@@ -26,13 +27,18 @@ resource 'vers' (1) {
     MILL_VERSION ", \$A9 " MILL_YEAR " " MILL_PUBLISHER ". Freeware."
 };
 
-/* Mill's Finder icon: the windmill */
+/* Mill's Finder icons: the windmill, and its Plug-In files */
 type 'MiLL' { pstring; };
 resource 'MiLL' (0, "Owner resource") { "Mill " MILL_VERSION " (Mill)" };
 resource 'FREF' (128) { 'APPL', 0, "" };
+/* Plug-In files ('MPlg', made by Mill): the windmill on a puzzle piece */
+resource 'FREF' (129) { 'MPlg', 1, "" };
+/* Web Fonts ('FFIL', creator 'MiLL'): the windmill with a serif A. The Finder takes the
+   suitcase for Mill's, so it shows this icon and a double click starts Mill. */
+resource 'FREF' (130) { 'FFIL', 2, "" };
 resource 'BNDL' (128) {
     'MiLL', 0,
-    { 'ICN#', { 0, 128 }; 'ics#', { 0, 128 }; 'FREF', { 0, 128 } }
+    { 'ICN#', { 0, 128; 1, 129; 2, 130 }; 'ics#', { 0, 128; 1, 129; 2, 130 }; 'FREF', { 0, 128; 1, 129; 2, 130 } }
 };
 
 /* Add Bookmark: which slot, and the title and address to keep there */
@@ -109,5 +115,18 @@ resource 'DITL' (204) {
     {
         {66, 236, 86, 306}, Button { enabled, "OK" },
         {10, 70, 56, 306}, StaticText { disabled, "Mill ran out of memory, so ^0" }
+    }
+};
+
+/* A request that failed (a Plug-In's Fail, a protocol's network error): what went wrong */
+resource 'ALRT' (205) {
+    {80, 96, 196, 416}, 205, {
+        OK, visible, sound1, OK, visible, sound1, OK, visible, sound1, OK, visible, sound1
+    }, noAutoCenter
+};
+resource 'DITL' (205) {
+    {
+        {82, 236, 102, 306}, Button { enabled, "OK" },
+        {10, 70, 74, 306}, StaticText { disabled, "^0" }
     }
 };

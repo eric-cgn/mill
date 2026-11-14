@@ -9,8 +9,8 @@
 #include "core/url.h"
 #include "mac_net.h"
 
-/* Answer a mill: or file: URL the way a web server would: a whole HTTP response,
-   through sink. A POST when content_type is given. */
+/* Answer a mill: URL the way a web server would: a whole HTTP response, through
+   sink. A POST when content_type is given. (file: is a Plug-In.) */
 OSErr local_request(const Url *u, const char *content_type, const char *body, long body_len, net_sink sink, void *ref);
 
 /* An image Mill has built in (mill://splash); returns 0, -1 if there is none by that
@@ -37,6 +37,21 @@ long read_mac_file(const char *path, char **data, long max);
 
 void settings_load(void);
 const char *setting(const char *name, const char *dflt);
+/* Change a setting (not yet saved); save them all to the settings file */
+void setting_put(const char *name, const char *value);
+void put_setting(const char *name, long nlen, const char *value, long vlen);
+/* Where the settings file is (it may not exist yet) */
+OSErr settings_spec(FSSpec *spec);
+OSErr settings_write(void);
+/* The font settings (mac_main.c): the proportional and the fixed font, each with a size.
+   font_list fills out with the installed fonts' names (the fixed-width ones only, if
+   fixed), sorted, and returns how many; fonts_choose reads the settings again. */
+#define FONT_NAME_MAX 32
+int font_list(int fixed, char (*names)[FONT_NAME_MAX], int max);
+void fonts_choose(void);
+const char *font_default(int fixed);    /* the name used when the setting is empty or gone */
+/* One value from a form's urlencoded body, decoded to Mac Roman: 1, or 0 if it isn't there */
+int form_field(const char *body, long len, const char *name, char *out, int size);
 /* How much memory decoded images may keep, in K */
 long image_memory_k(void);
 /* How many pages each window keeps for Back and Forward, 1 to MILL_HISTORY_MAX */
@@ -53,13 +68,6 @@ int print_backgrounds(void);
 int accept_cookies(void);
 /* The User-Agent sent with each request; "" sends none */
 const char *user_agent(void);
-/* Whether to use the proxy; the proxy that fetches pages for Mill (host:port), kept
-   while it's off; the domains and addresses that skip it (see url_host_in); and
-   whether https: addresses go to it */
-int proxy_on(void);
-const char *proxy(void);
-const char *proxy_excluded(void);
-int proxy_https(void);
 
 /* Bookmarks: ten slots, n from 0 (Command-1) to 9 (Command-0), kept in the settings */
 #define BOOKMARKS 10
@@ -67,5 +75,7 @@ int proxy_https(void);
 int bookmark(int n, char *url, int url_size, char *title, int title_size);
 /* Put a page in slot n (url NULL or "" empties it), and save the settings; noErr or why not */
 OSErr bookmark_set(int n, const char *url, const char *title);
+/* The same, without saving */
+void bookmark_put(int n, const char *url, const char *title);
 
 #endif

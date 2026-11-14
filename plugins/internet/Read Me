@@ -1,0 +1,18 @@
+Internet Services
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder. Take out the Finger
+example if it's there: both give finger:.
+
+  ftp://host/path            File Transfer Protocol (RFC 959)
+  gopher://host/             Gopher (RFC 1436)
+  finger://host/user         Finger (RFC 1288)
+  whois://host/query         Whois (RFC 3912)
+  dict://host/d:word         Dictionary Server Protocol (RFC 2229); m:word for matches
+  time://host/               Time Protocol (RFC 868)
+
+plugin://internet/about has a form for each, filled in from Settings.
+
+"Set this Mac's clock" adds the difference shown to the Mac's time when it is
+clicked. The time zone is the Map control panel's.
+
+Build: ./build.sh writes build/Internet Services.bin.

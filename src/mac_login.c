@@ -67,7 +67,8 @@ static pascal Boolean filter(DialogPtr d, EventRecord *e, short *item)
     return false;
 }
 
-Boolean login_ask(const char *place, Boolean refused, char *user, int user_size, char *pass, int pass_size)
+Boolean login_ask(const char *prompt, const char *name_label, const char *pass_label,
+                  char *user, int user_size, char *pass, int pass_size)
 {
     DialogPtr d;
     GrafPtr old;
@@ -75,22 +76,29 @@ Boolean login_ask(const char *place, Boolean refused, char *user, int user_size,
     Handle h;
     Rect r;
     Str255 s;
-    char msg[300];
     GetPort(&old);
-    pass[0] = 0;
     if (!(d = GetNewDialog(201, NULL, (WindowPtr)-1))) return false;
     /* centered a third of the way down, as alerts are */
     MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
                20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
     GetDialogItem(d, LG_RING, &type, &h, &r);
     SetDialogItem(d, LG_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
-    snprintf(msg, sizeof msg, refused ? "The name or password for %s was wrong. Try again?"
-                                      : "Enter a name and password for %s.", place);
-    set_text(d, LG_MESSAGE, msg);
+    set_text(d, LG_MESSAGE, prompt);
+    if (name_label && name_label[0]) set_text(d, LG_USER_LABEL, name_label);
+    if (pass_label && pass_label[0]) set_text(d, LG_PASS_LABEL, pass_label);
     set_text(d, LG_USER, user);
     secret = pass;
     secret_size = pass_size;
-    secret_len = 0;
+    secret_len = strlen(pass);
+    if (secret_len) {
+        /* a password to suggest, as bullets */
+        char dots[64];
+        short i;
+        if (secret_len > (short)sizeof dots - 1) secret_len = sizeof dots - 1;
+        for (i = 0; i < secret_len; i++) dots[i] = (char)BULLET;
+        dots[i] = 0;
+        set_text(d, LG_PASS, dots);
+    }
     SelectDialogItemText(d, user[0] ? LG_PASS : LG_USER, 0, 32767);
     ShowWindow(d);
     InitCursor();

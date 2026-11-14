@@ -4,16 +4,22 @@
 #include <string.h>
 
 #include "../src/core/auth.h"
+#include "../src/core/httpauth.h"
 #include "../src/core/charset.h"
 #include "../src/core/cookie.h"
 #include "../src/core/filetypes.h"
+#include "../src/core/fmt.h"
 #include "../src/core/form.h"
 #include "../src/core/html.h"
 #include "../src/core/imagemap.h"
 #include "../src/core/image.h"
+#include "../src/core/inflate.h"
+#include "../src/core/macenc.h"
+#include "../src/core/picture.h"
 #include "../src/core/layout.h"
 #include "../src/core/update.h"
 #include "../src/core/url.h"
+#include "../src/core/fmt.h"
 
 /* run.sh builds everything with malloc, calloc, and realloc renamed to these, so a test
    can make the core run out of memory: allocation number fail_at fails (counting from 0),
@@ -40,7 +46,7 @@ static int failures = 0;
 
 static long fake_width(void *ctx, const MStyle *s, const char *t, long len) { (void)ctx; (void)t; return len * s->size / 2; }
 static void fake_metrics(void *ctx, const MStyle *s, short *a, short *d, short *l) { (void)ctx; *a = s->size * 3 / 4; *d = s->size / 4; *l = 1; }
-static Metrics M = { fake_width, fake_metrics, NULL, NULL, NULL, NULL };
+static Metrics M = { fake_width, fake_metrics, NULL, NULL, NULL, NULL, NULL, 0, 0 };
 
 static char *slurp(const char *path, long *len)
 {
@@ -98,7 +104,7 @@ static void test_utf8(void)
     CHECK(d.charset == CHARSET_UTF8);
     CHECK(!strcmp(d.title, "Caf\x8E \xD1 L\x97" "dz"));  /* e acute, an em dash, and L and z without their marks */
     CHECK(forms_build(&F, &d) == 0);
-    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, NULL, NULL, &sub) == 0);
+    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, &sub) == 0);
     if (strcmp(sub.data, "q=%C3%A9%E2%80%99")) { printf("FAIL utf-8 form data: %s\n", sub.data); failures++; }
     submission_free(&sub);
     forms_free(&F);
@@ -118,7 +124,7 @@ static void test_disabled(void)
     CHECK(!F.fields[0].disabled && F.fields[1].disabled && F.fields[2].disabled);
     forms_click(&F, 3);
     CHECK(!F.fields[3].checked);
-    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, NULL, NULL, &sub) == 0);
+    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, &sub) == 0);
     if (strcmp(sub.data, "a=1")) { printf("FAIL disabled form data: %s\n", sub.data); failures++; }
     submission_free(&sub);
     forms_free(&F);
@@ -220,6 +226,149 @@ static void test_progress(void)
     layout_free(&L);
     m.progress = stop_at_half;
     CHECK(layout_doc(&L, &d, &m, 200) == -2);
+    layout_free(&L);
+    html_free(&d);
+}
+
+/* A tab in PRE moves the pen to the next multiple of 8 spaces from the line's start; none is drawn */
+static void test_pre_tabs(void)
+{
+    Doc d;
+    Layout L;
+    const char *html = "<PRE>a\tb\n12345678\tc\n\td</PRE>";
+    long i, x_b = -1, x_c = -1, x_d = -1;
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    for (i = 0; i < L.nruns; i++) {
+        const Run *r = &L.runs[i];
+        if (r->kind != RUN_TEXT) continue;
+        CHECK(!memchr(d.text + r->text, '\t', r->len));
+        if (d.text[r->text] == 'b') x_b = r->x;
+        if (d.text[r->text] == 'c') x_c = r->x;
+        if (d.text[r->text] == 'd') x_d = r->x;
+    }
+    /* the fake font is 5 wide for a space: stops every 40 from the left margin, 8 */
+    CHECK(x_b == 8 + 40);
+    CHECK(x_c == 8 + 80);          /* "12345678" is 8 characters, 40 wide: the next stop is 80 */
+    CHECK(x_d == 8 + 40);
+    layout_free(&L);
+    html_free(&d);
+}
+
+/* Zoom: sizes and distances scale by the same factor (the size ladder over 9), rounded */
+static void test_zoom(void)
+{
+    Doc d;
+    Layout L0, L2, L4;
+    Metrics m = M;
+    const char *html = "<P><FONT SIZE=1>nine</FONT> <FONT SIZE=7>big</FONT><PRE>pre</PRE><IMG SRC=a WIDTH=20 HEIGHT=10 BORDER=1 HSPACE=3>"
+                       "<TABLE BORDER=2 CELLPADDING=3 CELLSPACING=1 WIDTH=200><TR><TD WIDTH=50>x</TABLE><UL><LI>item</UL>";
+    long i;
+    const Run *img0 = NULL, *img2 = NULL, *img4 = NULL;
+    short nine0 = 0, nine2 = 0, nine4 = 0, big0 = 0, big4 = 0, pre0 = 0, pre4 = 0, x0 = 0, x2 = 0, x4 = 0;
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(layout_doc(&L0, &d, &m, 400) == 0);
+    m.zoom = 18;
+    CHECK(layout_doc(&L2, &d, &m, 400) == 0);
+    m.zoom = 36;
+    CHECK(layout_doc(&L4, &d, &m, 400) == 0);
+    for (i = 0; i < L0.nruns; i++) {
+        const Run *r = &L0.runs[i];
+        if (r->kind == RUN_IMAGE) img0 = r;
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'n') { nine0 = r->size; x0 = r->x; }
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'b') big0 = r->size;
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'p') pre0 = r->size;
+    }
+    for (i = 0; i < L2.nruns; i++) {
+        const Run *r = &L2.runs[i];
+        if (r->kind == RUN_IMAGE) img2 = r;
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'n') { nine2 = r->size; x2 = r->x; }
+    }
+    for (i = 0; i < L4.nruns; i++) {
+        const Run *r = &L4.runs[i];
+        if (r->kind == RUN_IMAGE) img4 = r;
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'n') { nine4 = r->size; x4 = r->x; }
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'b') big4 = r->size;
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'p') pre4 = r->size;
+    }
+    CHECK(nine0 == 9 && nine2 == 18 && nine4 == 36);          /* HTML size 1: 9 points, times the factor */
+    CHECK(big0 == 36 && big4 == 144);                          /* size 7 at step 6 is 144 */
+    CHECK(pre0 == 10 && pre4 == 40);
+    CHECK(x0 == 8 && x2 == 16 && x4 == 32);                   /* the page margin */
+    CHECK(img0 && img2 && img4);
+    if (img0 && img2 && img4) {                                /* width and height plus the border, scaled together */
+        CHECK(img0->width == 22 && img0->size == 12);
+        CHECK(img2->width == 44 && img2->size == 24);
+        CHECK(img4->width == 88 && img4->size == 48);
+    }
+    CHECK(L2.height > L0.height && L4.height > L2.height);
+    /* only the text: sizes scale, distances and pictures don't */
+    layout_free(&L4);
+    m.text_only = 1;
+    CHECK(layout_doc(&L4, &d, &m, 400) == 0);
+    img4 = NULL;
+    for (i = 0; i < L4.nruns; i++) {
+        const Run *r = &L4.runs[i];
+        if (r->kind == RUN_IMAGE) img4 = r;
+        if (r->kind == RUN_TEXT && d.text[r->text] == 'n') { nine4 = r->size; x4 = r->x; }
+    }
+    CHECK(nine4 == 36 && x4 == 8);
+    CHECK(img4 && img4->width == 22 && img4->size == 12);
+    layout_free(&L0); layout_free(&L2); layout_free(&L4);
+    html_free(&d);
+}
+
+/* HR: SIZE, WIDTH (pixels or percent), ALIGN, NOSHADE; and a cell's HEIGHT as a row minimum; both scale with the zoom */
+static void test_rule_and_cell_height(void)
+{
+    Doc d, t, u;
+    Layout L, L2, A, B, C;
+    Metrics m = M;
+    const char *html = "<HR WIDTH=50% ALIGN=RIGHT SIZE=6 NOSHADE><HR WIDTH=100 SIZE=3><HR>";
+    const char *tall = "<TABLE><TR><TD HEIGHT=60>x</TABLE>", *flat = "<TABLE><TR><TD>x</TABLE>";
+    const Run *r[3];
+    long i, n = 0;
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(layout_doc(&L, &d, &m, 400) == 0);
+    for (i = 0; i < L.nruns && n < 3; i++) if (L.runs[i].kind == RUN_RULE) r[n++] = &L.runs[i];
+    CHECK(n == 3);
+    if (n == 3) {
+        CHECK(r[0]->width == 192 && r[0]->x == 8 + 192 && r[0]->size == 6 && r[0]->face == 1);   /* half the line, at the right */
+        CHECK(r[1]->width == 100 && r[1]->x == 8 + (384 - 100) / 2 && r[1]->size == 3 && r[1]->face == 0);   /* centered */
+        CHECK(r[2]->width == 384 && r[2]->x == 8 && r[2]->size == 2);                                       /* the default */
+    }
+    m.zoom = 18;
+    CHECK(layout_doc(&L2, &d, &m, 400) == 0);
+    for (i = 0, n = 0; i < L2.nruns && n < 3; i++) if (L2.runs[i].kind == RUN_RULE) r[n++] = &L2.runs[i];
+    if (n == 3) { CHECK(r[1]->width == 200 && r[1]->size == 6 && r[0]->size == 12); }
+    CHECK(html_parse(&t, tall, strlen(tall)) == 0 && html_parse(&u, flat, strlen(flat)) == 0);
+    m.zoom = 0;
+    CHECK(layout_doc(&A, &t, &m, 400) == 0 && layout_doc(&B, &u, &m, 400) == 0);
+    CHECK(A.height >= B.height + 40 && A.height >= 60);
+    m.zoom = 18;
+    CHECK(layout_doc(&C, &t, &m, 400) == 0);
+    CHECK(C.height >= 120);
+    layout_free(&L); layout_free(&L2); layout_free(&A); layout_free(&B); layout_free(&C);
+    html_free(&d); html_free(&t); html_free(&u);
+}
+
+static int fake_font(void *ctx, const char *name) { (void)ctx; return !strcmp(name, "Palatino") ? 16 : !strcmp(name, "Geneva") ? 3 : -1; }
+
+/* FACE: the first name the System has; none, and it's the proportional font; TT and PRE are the fixed font */
+static void test_faces(void)
+{
+    Doc d;
+    Layout L;
+    Metrics m = M;
+    const char *html = "<FONT FACE=\"Nope, Palatino\">a</FONT> <FONT FACE=\"Nope\">b</FONT> <FONT FACE=\"Geneva\">c</FONT> <TT>d</TT><PRE>e</PRE>";
+    long i, found = 0;
+    short fonts[5];
+    m.font_by_name = fake_font;
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(layout_doc(&L, &d, &m, 400) == 0);
+    for (i = 0; i < L.nruns && found < 5; i++)
+        if (L.runs[i].kind == RUN_TEXT) fonts[found++] = L.runs[i].font;
+    CHECK(found == 5 && fonts[0] == 16 && fonts[1] == FONT_PROP && fonts[2] == 3 && fonts[3] == FONT_FIXED && fonts[4] == FONT_FIXED);
     layout_free(&L);
     html_free(&d);
 }
@@ -373,6 +522,154 @@ static void test_tables(void)
     html_free(&d);
 }
 
+/* HTML 3.2 pieces of text, lists, images, and tables (tests/fixtures/html32.html shows them) */
+static const Run *run_kind(const Layout *L, int kind, int nth)
+{
+    long i;
+    for (i = 0; i < L->nruns; i++) if (L->runs[i].kind == kind && nth-- == 0) return &L->runs[i];
+    return NULL;
+}
+
+static void test_html32(void)
+{
+    Doc d;
+    Layout L;
+    const Run *a, *b, *c;
+    long i;
+    char buf[20];
+    const char *h;
+
+    /* STRIKE and S strike through; SUB and SUP are smaller and offset, and the line grows by the offset */
+    h = "<STRIKE>gone</STRIKE> plain <S>also</S> H<SUB>sub</SUB> x<SUP>sup</SUP>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = find(&L, &d, "gone"); b = find(&L, &d, "also"); c = find(&L, &d, "plain");
+    CHECK(a && (a->face & FACE_STRIKE) && b && (b->face & FACE_STRIKE) && c && !(c->face & FACE_STRIKE));
+    a = find(&L, &d, "sub"); b = find(&L, &d, "sup");
+    CHECK(a && (a->face & FACE_SUB) && layout_shift(a->size, a->face) < 0 && a->size < c->size);
+    CHECK(b && (b->face & FACE_SUP) && layout_shift(b->size, b->face) > 0 && b->size < c->size);
+    CHECK(layout_shift(c->size, c->face) == 0 && L.nlines == 1);
+    layout_free(&L);
+    html_free(&d);
+
+    /* BASEFONT is what FONT SIZE=+n and -n count from; absolute sizes don't move */
+    h = "<FONT SIZE=+1>aa</FONT> <BASEFONT SIZE=5><FONT SIZE=+1>bb</FONT> <FONT SIZE=-1>cc</FONT> <FONT SIZE=2>dd</FONT>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = find(&L, &d, "aa"); b = find(&L, &d, "bb"); c = find(&L, &d, "cc");
+    CHECK(a && b && c && a->size == 12 + 2 && b->size == 24 && c->size == 14);
+    a = find(&L, &d, "dd");
+    CHECK(a && a->size == 10);
+    layout_free(&L);
+    html_free(&d);
+
+    /* list markers: OL TYPE, START, VALUE, and TYPE on an item; UL TYPE and LI TYPE drawn as shapes */
+    h = "<OL TYPE=a START=2><LI>x<LI>x<LI VALUE=27>x<LI TYPE=I>x</OL><UL TYPE=square><LI>x<LI TYPE=circle>x<LI>x</UL><UL><LI>x</UL>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    {
+        const char *want[] = { "b.", "c.", "aa.", "XXVIII." };
+        for (i = 0; i < 4; i++) {
+            a = run_kind(&L, RUN_GEN, (int)i);
+            CHECK(a && a->len == (short)strlen(want[i]) && !strncmp(L.gen + a->text, want[i], a->len));
+        }
+        CHECK(run_kind(&L, RUN_MARK, 0) && run_kind(&L, RUN_MARK, 0)->face == MARK_SQUARE);
+        CHECK(run_kind(&L, RUN_MARK, 1)->face == MARK_CIRCLE && run_kind(&L, RUN_MARK, 2)->face == MARK_CIRCLE);
+        CHECK(run_kind(&L, RUN_MARK, 3)->face == MARK_DISC);
+    }
+    layout_free(&L);
+    html_free(&d);
+    (void)buf;
+
+    /* a Roman numeral list is indented more, for the wider markers */
+    h = "<OL TYPE=a><LI>aa</OL><OL TYPE=i><LI>bb</OL><OL TYPE=I START=7><LI>cc<LI VALUE=14>dd</OL>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = find(&L, &d, "aa"); b = find(&L, &d, "bb"); c = find(&L, &d, "cc");
+    CHECK(a && b && c && b->x > a->x && c->x == b->x);
+    a = find(&L, &d, "dd");
+    CHECK(a && a->x == c->x);
+    layout_free(&L);
+    html_free(&d);
+
+    /* COMPACT: no gaps around a list; DL COMPACT sets a definition beside a term that fits the indent */
+    {
+        const char *plain = "x<UL><LI>one</UL>y", *compact = "x<UL COMPACT><LI>one</UL>y";
+        long yp, yc;
+        CHECK(html_parse(&d, plain, strlen(plain)) == 0);
+        CHECK(layout_doc(&L, &d, &M, 400) == 0);
+        yp = run_y(&L, find(&L, &d, "y"));
+        layout_free(&L); html_free(&d);
+        CHECK(html_parse(&d, compact, strlen(compact)) == 0);
+        CHECK(layout_doc(&L, &d, &M, 400) == 0);
+        yc = run_y(&L, find(&L, &d, "y"));
+        CHECK(yc < yp);
+        layout_free(&L); html_free(&d);
+        h = "<DL COMPACT><DT>k<DD>beside<DT>a long term here<DD>below</DL>";
+        CHECK(html_parse(&d, h, strlen(h)) == 0);
+        CHECK(layout_doc(&L, &d, &M, 400) == 0);
+        a = find(&L, &d, "k"); b = find(&L, &d, "beside"); c = find(&L, &d, "below");
+        CHECK(a && b && c && run_y(&L, a) == run_y(&L, b) && b->x > a->x + a->width);
+        CHECK(run_y(&L, c) > run_y(&L, b) && c->x == b->x);
+        layout_free(&L); html_free(&d);
+    }
+
+    /* IMG ALIGN: bottom sits on the baseline, middle is centered on the text, top hangs from the line's top */
+    h = "<IMG SRC=a WIDTH=20 HEIGHT=20>x <IMG SRC=a WIDTH=20 HEIGHT=20 ALIGN=middle>y <IMG SRC=a WIDTH=20 HEIGHT=20 ALIGN=top>z";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = run_kind(&L, RUN_IMAGE, 0); b = run_kind(&L, RUN_IMAGE, 1); c = run_kind(&L, RUN_IMAGE, 2);
+    CHECK(a && b && c && a->font == 20 && b->font < a->font && b->font > c->font && c->font > 0);
+    layout_free(&L);
+    html_free(&d);
+
+    /* CAPTION: on top unless ALIGN=BOTTOM */
+    h = "<TABLE><CAPTION>cap</CAPTION><TR><TD>cell</TD></TR></TABLE>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    CHECK(run_y(&L, find(&L, &d, "cap")) < run_y(&L, find(&L, &d, "cell")));
+    layout_free(&L); html_free(&d);
+    h = "<TABLE><CAPTION ALIGN=bottom>cap</CAPTION><TR><TD>cell</TD></TR></TABLE>after";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    CHECK(run_y(&L, find(&L, &d, "cap")) > run_y(&L, find(&L, &d, "cell")));
+    CHECK(run_y(&L, find(&L, &d, "after")) > run_y(&L, find(&L, &d, "cap")));
+    layout_free(&L); html_free(&d);
+
+    /* TR ALIGN and VALIGN are the cells' defaults, and a cell's own win */
+    h = "<TABLE WIDTH=300><TR ALIGN=right VALIGN=top><TD>tall<BR>tall<BR>tall<TD>rr<TD ALIGN=left VALIGN=bottom>ll</TR>"
+        "<TR><TD>base<TD>mid</TR></TABLE>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    {
+        const Run *rr = find(&L, &d, "rr"), *ll = find(&L, &d, "ll"), *t = find(&L, &d, "tall");
+        CHECK(rr && ll && t);
+        if (rr && ll && t) {
+            CHECK(run_y(&L, rr) == run_y(&L, t));                /* row VALIGN=top */
+            CHECK(run_y(&L, ll) > run_y(&L, rr));                /* cell VALIGN=bottom */
+            CHECK(rr->x + rr->width > ll->x - 12 && ll->x > rr->x);  /* ALIGN=right puts rr at its cell's right edge, ll at its left */
+        }
+    }
+    layout_free(&L); html_free(&d);
+
+    /* every Latin-1 entity of 3.2 decodes to a Mac Roman character */
+    for (i = 0; i < 96; i++) {
+        char name[16];
+        int n = snprintf(name, sizeof name, "&#%ld;", 160 + i);
+        CHECK(n > 0 && entity_to_mac(name + 1, n - 2) != 0);
+    }
+    h = "&amp;&lt;&gt;&quot;&nbsp;&copy;&reg;&eacute;&szlig;&yuml;&THORN;";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    {
+        const char *txt = NULL;
+        for (i = 0; i < d.nnodes; i++) if (d.nodes[i].tag == TAG_TEXT) { txt = d.text + d.nodes[i].text; break; }
+        CHECK(txt && !strncmp(txt, "&<>\"", 4) && (unsigned char)txt[4] == 0xCA && (unsigned char)txt[5] == 0xA9 &&
+              (unsigned char)txt[6] == 0xA8 && (unsigned char)txt[7] == 0x8E && (unsigned char)txt[8] == 0xA7 &&
+              (unsigned char)txt[9] == 0xD8 && d.nodes[i].len == 11);
+    }
+    html_free(&d);
+}
+
 /* Write a 1-bit bitmap as a PBM, for looking at */
 static void save_pbm(const Bitmap1 *b, const char *path)
 {
@@ -382,6 +679,163 @@ static void save_pbm(const Bitmap1 *b, const char *path)
     fprintf(f, "P4\n%d %d\n", b->w, b->h);
     for (y = 0; y < b->h; y++) fwrite(b->bits + (long)y * b->row_bytes, 1, (b->w + 7) / 8, f);
     fclose(f);
+}
+
+/* The streaming decoders (picture.h) fed a few bytes at a time, into Mill's canvas: what
+   Mill's format Plug-Ins do, piece by piece */
+typedef struct { short w, h, sw, sh; ImageCanvas *c; int photo; } TestPic;
+
+static int tp_size(void *ref, short w, short h, int photo)
+{
+    TestPic *t = ref;
+    int err;
+    t->photo = photo;
+    if (t->c) return canvas_source(t->c, w, h);
+    t->sw = w; t->sh = h;
+    if (t->w <= 0 || t->h <= 0) image_fit(w, h, t->w, t->h, &t->w, &t->h);
+    err = canvas_new(&t->c, t->w, t->h, w, h);
+    return err;
+}
+static void tp_drawn(void *ref, short *w, short *h) { TestPic *t = ref; *w = t->w; *h = t->h; }
+static void tp_rect(void *ref, short x, short y, short w, short h, const unsigned char *gray, const unsigned char *opaque)
+{
+    TestPic *t = ref;
+    if (t->c) canvas_rect(t->c, x, y, w, h, gray, opaque);
+}
+
+static int piece = 7;   /* bytes fed at a time */
+
+/* 0, -1 (not a picture, or stopped), or IMAGE_NO_MEMORY; w or h 0: its own size */
+static int image_decode(const unsigned char *d, long len, short w, short h, Bitmap1 *out,
+                        int (*progress)(void *, int), void *ref)
+{
+    TestPic t;
+    PicSink s;
+    void *dec;
+    void *(*begin)(const PicSink *);
+    int (*data)(void *, const unsigned char *, long);
+    void (*end)(void *);
+    long pos = 0;
+    int r = 0;
+    memset(out, 0, sizeof *out);
+    memset(&t, 0, sizeof t);
+    t.w = w; t.h = h;
+    s.ref = &t; s.size = tp_size; s.drawn = tp_drawn; s.rect = tp_rect;
+    if (len >= 4 && !memcmp(d, "GIF8", 4)) { begin = gif_begin; data = gif_data; end = gif_end; }
+    else if (len >= 2 && d[0] == 0xFF && d[1] == 0xD8) { begin = jpeg_begin; data = jpeg_data; end = jpeg_end; }
+    else if (len >= 2 && d[0] == 'P') { begin = pnm_begin; data = pnm_data; end = pnm_end; }
+    else return -1;
+    if (!(dec = begin(&s))) return IMAGE_NO_MEMORY;
+    while (pos < len && r == 0) {
+        long n = len - pos < piece ? len - pos : piece;
+        r = data(dec, d + pos, n);
+        pos += n;
+        if (progress && progress(ref, (int)(pos * 100 / len))) { r = -3; break; }
+    }
+    if (r == 0) r = data(dec, d + pos, 0);
+    end(dec);
+    if (r == -3 || r == -1 || !t.c) { canvas_free(t.c); return r == -2 ? IMAGE_NO_MEMORY : -1; }
+    if (r < 0 && r != -2) r = -1;
+    if (r == -2 || r == IMAGE_NO_MEMORY) { canvas_free(t.c); return IMAGE_NO_MEMORY; }
+    r = canvas_finish(t.c, t.photo, out);
+    canvas_free(t.c);
+    if (r) image_free(out);
+    return r;
+}
+
+/* A picture's own size, from its decoder */
+static int dims_size(void *ref, short w, short h, int photo) { short *d = ref; (void)photo; d[0] = w; d[1] = h; return 9; }
+static int image_dims(const unsigned char *d, long len, short *w, short *h)
+{
+    short got[2] = { 0, 0 };
+    PicSink s;
+    void *dec;
+    int r;
+    s.ref = got; s.size = dims_size; s.drawn = tp_drawn; s.rect = tp_rect;
+    if (len >= 4 && !memcmp(d, "GIF8", 4)) { dec = gif_begin(&s); r = gif_data(dec, d, len); gif_end(dec); }
+    else if (len >= 2 && d[0] == 0xFF && d[1] == 0xD8) { dec = jpeg_begin(&s); r = jpeg_data(dec, d, len); jpeg_end(dec); }
+    else return -1;
+    if (r != 9) return -1;
+    *w = got[0]; *h = got[1];
+    return 0;
+}
+
+static void test_pnm(void)
+{
+    static const char *const plain[] = { "P1\n# a comment\n3 2\n1 0 1\n0 1 0\n", "P1 3 2 101010" };
+    static const unsigned char raw[] = { 'P', '4', ' ', '3', ' ', '2', '\n', 0xA0, 0x40 };
+    static const unsigned char gray[] = { 'P', '5', ' ', '2', ' ', '1', ' ', '2', '5', '5', '\n', 0, 255 };
+    static const unsigned char rgb[] = { 'P', '6', '\n', '1', ' ', '1', '\n', '2', '5', '5', '\n', 255, 255, 255 };
+    static const char *const ppm_plain = "P3 2 1 15 0 0 0 15 15 15\n";
+    Bitmap1 b;
+    int k;
+    for (k = 0; k < 2; k++) {
+        CHECK(image_decode((const unsigned char *)plain[k], strlen(plain[k]), 0, 0, &b, NULL, NULL) == 0);
+        CHECK(b.w == 3 && b.h == 2 && b.bits[0] == 0xA0 && b.bits[2] == 0x40 && !b.mask);
+        image_free(&b);
+    }
+    for (piece = 1; piece <= 9; piece += 8) {
+        CHECK(image_decode(raw, sizeof raw, 0, 0, &b, NULL, NULL) == 0 && b.w == 3 && b.h == 2 && b.bits[0] == 0xA0 && b.bits[2] == 0x40);
+        image_free(&b);
+    }
+    piece = 7;
+    CHECK(image_decode(gray, sizeof gray, 0, 0, &b, NULL, NULL) == 0 && b.w == 2 && b.h == 1 && b.bits[0] == 0x80);
+    image_free(&b);
+    CHECK(image_decode(rgb, sizeof rgb, 0, 0, &b, NULL, NULL) == 0 && b.w == 1 && b.h == 1 && b.bits[0] == 0);
+    image_free(&b);
+    CHECK(image_decode((const unsigned char *)ppm_plain, strlen(ppm_plain), 0, 0, &b, NULL, NULL) == 0 && b.w == 2 && b.bits[0] == 0x80);
+    image_free(&b);
+    CHECK(image_decode((const unsigned char *)"P7 1 1", 6, 0, 0, &b, NULL, NULL) == -1 && !b.bits);
+}
+
+typedef struct { unsigned char *buf; long len; } Collected;
+static int gz_collect(void *ref, const unsigned char *p, long n)
+{
+    Collected *c = ref;
+    c->buf = realloc(c->buf, c->len + n);
+    memcpy(c->buf + c->len, p, n);
+    c->len += n;
+    return 0;
+}
+
+static void test_inflate(void)
+{
+    static const char *const files[][2] = {
+        { "inflate-9.txt.gz", "inflate.txt" }, { "inflate-0.txt.gz", NULL }, { "inflate-short.txt.gz", "inflate-short.txt" }
+    };
+    static const int pieces[] = { 1, 3, 1000, 100000 };
+    unsigned k, m;
+    for (k = 0; k < sizeof files / sizeof files[0]; k++) {
+        char path[200];
+        long gzlen, want_len, pos;
+        unsigned char *gz, *want;
+        snprintf(path, sizeof path, "tests/fixtures/%s", files[k][0]);
+        gz = (unsigned char *)slurp(path, &gzlen);
+        snprintf(path, sizeof path, "tests/fixtures/%s", files[k][1] ? files[k][1] : "inflate.txt");
+        want = (unsigned char *)slurp(path, &want_len);
+        if (!files[k][1]) want_len = 5000;
+        CHECK(gz && want);
+        if (!gz || !want) continue;
+        for (m = 0; m < sizeof pieces / sizeof pieces[0]; m++) {
+            Collected c = { NULL, 0 };
+            void *d = gz_begin(gz_collect, &c);
+            int r = 0;
+            for (pos = 0; pos < gzlen && r == 0; pos += pieces[m])
+                r = gz_data(d, gz + pos, gzlen - pos < pieces[m] ? gzlen - pos : pieces[m]);
+            gz_end(d);
+            CHECK(r == 1 && c.len == want_len && !memcmp(c.buf, want, want_len));
+            free(c.buf);
+        }
+        free(gz);
+        free(want);
+    }
+    {
+        Collected c = { NULL, 0 };
+        void *d = gz_begin(gz_collect, &c);
+        CHECK(gz_data(d, (const unsigned char *)"not gzip", 8) == -1);
+        gz_end(d);
+        free(c.buf);
+    }
 }
 
 /* Decoding progress: counts reports, and stops once past stop_at percent */
@@ -415,6 +869,18 @@ static void test_image(const char *name, short want_w, short want_h, short w, sh
         CHECK(black > 0 && black < (long)w * h);
         snprintf(path, sizeof path, "/tmp/out-%s-%dx%d.pbm", name, w, h);
         save_pbm(&b, path);
+        {
+            /* the same however the data comes: a byte at a time, or all at once */
+            int sizes[2] = { 1, 1 << 20 }, k;
+            for (k = 0; k < 2; k++) {
+                Bitmap1 c;
+                piece = sizes[k];
+                CHECK(image_decode(src, len, w, h, &c, NULL, NULL) == 0 && c.bits &&
+                      !memcmp(c.bits, b.bits, (long)b.row_bytes * h) && !c.mask == !b.mask);
+                image_free(&c);
+            }
+            piece = 7;
+        }
         image_free(&b);
     }
     CHECK(image_decode((const unsigned char *)"GIF89a", 6, 10, 10, &b, NULL, NULL) == -1);
@@ -424,15 +890,6 @@ static void test_image(const char *name, short want_w, short want_h, short w, sh
         CHECK(image_decode(src, len, w, h, &b, count_progress, NULL) == -1 && !b.bits);
     }
     free(src);
-}
-
-static long fake_read(void *ctx, const char *path, char **data)
-{
-    (void)ctx;
-    if (strcmp(path, "Macintosh HD:Notes")) return -1;
-    *data = malloc(5);
-    memcpy(*data, "hello", 5);
-    return 5;
 }
 
 static void test_forms(void)
@@ -473,7 +930,7 @@ static void test_forms(void)
     CHECK(!F.fields[r1].checked && F.fields[r2].checked && F.fields[4].checked);
     CHECK(forms_changed(&F, &d));
     forms_set_value(&F.fields[text], "M\x8Ell\xD5s & co\rnext");  /* Mac Roman, a curly quote, a CR */
-    CHECK(forms_submit(&F, &d, F.fields[text].form, go, 0, 0, NULL, NULL, &sub) == 0);
+    CHECK(forms_submit(&F, &d, F.fields[text].form, go, 0, 0, &sub) == 0);
     CHECK(!sub.post && !strcmp(sub.action, "/search"));
     if (strcmp(sub.data, "q=M%E9ll%27s+%26+co%0D%0Anext&lang=en&r=b&other=z&s=2&t=line+%3CB%3Eone%3C%2FB%3E%0D%0Aline+two&go=Go"))
         { printf("FAIL form data: %s\n", sub.data); failures++; }
@@ -498,11 +955,25 @@ static void test_forms(void)
 
     /* a file upload */
     forms_set_value(&F.fields[9], "Macintosh HD:Notes");
-    CHECK(forms_submit(&F, &d, F.fields[9].form, -1, 0, 0, fake_read, NULL, &sub) == 0);
+    CHECK(forms_submit(&F, &d, F.fields[9].form, -1, 0, 0, &sub) == 0);
     CHECK(sub.post && sub.multipart && !strcmp(sub.action, ""));
-    CHECK(strstr(sub.data, "name=\"f\"; filename=\"Notes\"\r\nContent-Type: application/octet-stream\r\n\r\nhello\r\n") != NULL);
-    CHECK(strstr(sub.data, "name=\"n\"\r\n\r\nx\r\n") != NULL);
-    CHECK(sub.len > 0 && !memcmp(sub.data + sub.len - 2, "\r\n", 2) && strstr(sub.data, "MillFormBoundary7d3a9e0c--"));
+    {
+        /* the parts, whose bytes are made as they're sent */
+        char head[300];
+        int k, file = -1, n = -1;
+        for (k = 0; k < sub.nparts; k++) {
+            if (sub.parts[k].file) file = k;
+            if (!strcmp(sub.parts[k].name, "n")) n = k;
+        }
+        CHECK(file >= 0 && !strcmp(sub.parts[file].name, "f") && !strcmp(sub.parts[file].value, "Macintosh HD:Notes"));
+        CHECK(n >= 0 && !strcmp(sub.parts[n].value, "x"));
+        CHECK(form_part_head(&sub, &sub.parts[file], "Notes", "application/octet-stream", head, sizeof head) > 0 &&
+              !strcmp(head, "--MillFormBoundary7d3a9e0c\r\nContent-Disposition: form-data; name=\"f\"; filename=\"Notes\"\r\n"
+                            "Content-Type: application/octet-stream\r\n\r\n"));
+        CHECK(form_part_head(&sub, &sub.parts[n], NULL, NULL, head, sizeof head) > 0 &&
+              !strcmp(head, "--MillFormBoundary7d3a9e0c\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n"));
+        CHECK(form_end(&sub, head, sizeof head) == 30 && !strcmp(head, "--MillFormBoundary7d3a9e0c--\r\n"));
+    }
     submission_free(&sub);
 
     /* controls take room in the layout; hidden ones don't */
@@ -647,7 +1118,7 @@ static void test_isindex(void)
     CHECK(hrs == 2 && prompt);
     CHECK(forms_build(&F, &d) == 0 && F.n == 1);
     forms_set_value(&F.fields[0], "old macs");
-    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, NULL, NULL, &sub) == 0);
+    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, &sub) == 0);
     if (strcmp(sub.data, "old+macs") || sub.post || sub.action[0]) { printf("FAIL isindex: %s\n", sub.data); failures++; }
     submission_free(&sub);
     forms_free(&F);
@@ -745,11 +1216,39 @@ static void test_urls(void)
         CHECK(url_parse("file:///Macintosh%20HD/x.html", &u) == 0 && u.scheme == SCHEME_FILE && !u.host[0]);
         CHECK(url_parse("www.example.com", &u) == 0 && u.scheme == SCHEME_HTTP);
         CHECK(url_parse("gopher://x", &u) == -1);
-        CHECK(url_parse("HTTPS://Secure.example/a", &u) == 0 && u.scheme == SCHEME_HTTPS && u.port == 443 &&
+        CHECK(url_parse("HTTPS://Secure.example/a", &u) == 0 && u.scheme == SCHEME_HTTPS && u.port == 0 && url_port(&u) == 443 &&
               !strcmp(u.host, "Secure.example") && !strcmp(u.path, "/a"));
         CHECK(url_parse("https://h:8443/", &u) == 0 && u.port == 8443);
         CHECK(url_parse("proxy.example:5001", &u) == 0 && u.scheme == SCHEME_HTTP && u.port == 5001 && !strcmp(u.host, "proxy.example"));
         CHECK(url_is_web(SCHEME_HTTP) && url_is_web(SCHEME_HTTPS) && !url_is_web(SCHEME_FILE) && !url_is_web(SCHEME_MILL));
+    }
+    {
+        /* ports: 1 to 65535, digits only; none given is 0 */
+        Url u;
+        char out[300];
+        CHECK(url_parse("http://h/", &u) == 0 && u.port == 0 && url_port(&u) == 80);
+        CHECK(url_parse("http://h:65535/", &u) == 0 && u.port == 65535);
+        CHECK(url_parse("http://h:0/", &u) == -1);
+        CHECK(url_parse("http://h:65536/", &u) == -1);
+        CHECK(url_parse("http://h:8o/", &u) == -1);
+        CHECK(url_parse("http://h:/", &u) == 0 && u.port == 0);
+        CHECK(url_parse("http://:80/", &u) == -1);
+        /* Plug-In schemes, once Mill knows them */
+        url_schemes("gopher ftp");
+        CHECK(url_parse("Gopher://Floodgap.com/1/world", &u) == 0 && u.scheme == SCHEME_OTHER && !strcmp(u.name, "gopher") &&
+              !strcmp(u.host, "Floodgap.com") && u.port == 0 && url_port(&u) == 0 && !strcmp(u.path, "/1/world"));
+        CHECK(url_parse("ftp://joe:pw@ftp.example:2121/pub/", &u) == 0 && u.scheme == SCHEME_OTHER && u.port == 2121 &&
+              !strcmp(u.user, "joe") && !strcmp(u.pass, "pw"));
+        url_format(&u, out, sizeof out);
+        CHECK(!strcmp(out, "ftp://joe:pw@ftp.example:2121/pub/"));
+        CHECK(url_parse("ftp://h:0/", &u) == -1);
+        CHECK(url_parse("finger://h/", &u) == -1);
+        check_resolve("gopher://h/1/a/b", "gopher://h:70/0/x/../y", "gopher://h:70/0/x/../y");
+        check_resolve("ftp://h/pub/a/", "../b.txt", "ftp://h/pub/b.txt");
+        check_resolve("ftp://h:21/pub/", "//other/x", "ftp://other/x");
+        check_resolve("http://h/", "ftp://h/pub/", "ftp://h/pub/");
+        url_schemes("");
+        CHECK(url_parse("gopher://x", &u) == -1);
     }
     /* https: resolves like http:, and keeps its own default port */
     check_resolve("https://www.example.com/news/", "a.html", "https://www.example.com/news/a.html");
@@ -941,37 +1440,31 @@ static void test_auth(void)
     memset(&k, 0, sizeof k);
     c = challenge("Digest realm=\"testrealm@host.com\", qop=\"auth\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", "
                   "opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"");
-    cr = auth_keep(&k, "www.nowhere.org", 80, "/dir/index.html", &c, "Mufasa", "Circle Of Life");
-    CHECK(auth_header(cr, "GET", "/dir/index.html", "0a4f113b", out, sizeof out) > 0);
+    CHECK(auth_header(&c, "Mufasa", "Circle Of Life", 1, "GET", "/dir/index.html", "0a4f113b", out, sizeof out) > 0);
     CHECK(strstr(out, "response=\"6629fae49393a05397450978507c4ef1\"") && strstr(out, "nc=00000001") &&
           strstr(out, "opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"") && !strncmp(out, "Digest username=\"Mufasa\"", 24));
-    auth_header(cr, "GET", "/dir/index.html", "0a4f113b", out, sizeof out);
+    auth_header(&c, "Mufasa", "Circle Of Life", 2, "GET", "/dir/index.html", "0a4f113b", out, sizeof out);
     CHECK(strstr(out, "nc=00000002") != NULL);
     c.qop = 0;
-    auth_renew(cr, &c);
-    auth_header(cr, "GET", "/dir/index.html", "0a4f113b", out, sizeof out);
+    auth_header(&c, "Mufasa", "Circle Of Life", 1, "GET", "/dir/index.html", "0a4f113b", out, sizeof out);
     CHECK(strstr(out, "response=\"670fd8c2df070c60b045671b8b24ff02\"") && !strstr(out, "qop"));
     c.qop = c.sess = 1;
-    auth_renew(cr, &c);
-    auth_header(cr, "GET", "/dir/index.html", "0a4f113b", out, sizeof out);
-    auth_header(cr, "GET", "/dir/index.html", "0a4f113b", out, sizeof out);
+    auth_header(&c, "Mufasa", "Circle Of Life", 2, "GET", "/dir/index.html", "0a4f113b", out, sizeof out);
     CHECK(strstr(out, "response=\"d16df0df0d92cef8935129145e21b5e1\"") && strstr(out, "algorithm=MD5-sess"));
 
-    /* Basic, and which paths get it without asking */
+    /* Basic's header; the keyring by keys */
     c = challenge("Basic realm=\"WallyWorld\"");
-    cr = auth_keep(&k, "Example.com", 8080, "/members/a/page.html?x=1", &c, "Aladdin", "open sesame");
-    CHECK(!strcmp(cr->dir, "/members/a/"));
-    CHECK(auth_header(cr, "GET", "/", "", out, sizeof out) > 0 && !strcmp(out, "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="));
-    CHECK(auth_for_path(&k, "example.com", 8080, "/members/a/other") == cr);
-    CHECK(auth_for_path(&k, "example.com", 8080, "/members/b/") == NULL);
-    CHECK(auth_for_path(&k, "example.com", 80, "/members/a/") == NULL);
-    auth_keep(&k, "example.com", 8080, "/members/b/x", &c, "Aladdin", "open sesame");   /* same realm: widens */
-    CHECK(k.n == 2 && !strcmp(cr->dir, "/members/") && auth_for_path(&k, "example.com", 8080, "/members/b/") == cr);
-    auth_keep(&k, "example.com", 8080, "/other", &c, "Aladdin", "open sesame");
-    CHECK(!strcmp(cr->dir, "/"));
-    CHECK(auth_for_realm(&k, "EXAMPLE.COM", 8080, "WallyWorld") == cr);
+    CHECK(auth_header(&c, "Aladdin", "open sesame", 1, "GET", "/", "", out, sizeof out) > 0 && !strcmp(out, "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="));
+    cr = auth_save(&k, "http://example.com:80 \"WallyWorld\"\nhttp://example.com:80/members/ Basic", "Aladdin", "open sesame");
+    CHECK(auth_find(&k, "http://example.com:80 \"WallyWorld\"") == cr && auth_find(&k, "http://example.com:80/members/ Basic") == cr);
+    CHECK(!auth_find(&k, "http://example.com:80/members/") && !auth_find(&k, "http://example.com:80") && !auth_find(&k, ""));
+    auth_save(&k, "proxy proxy.lab:8080 \"Squid\"", "me", "pw");
+    CHECK(k.n == 2 && !strcmp(auth_find(&k, "proxy proxy.lab:8080 \"Squid\"")->user, "me"));
+    /* saved again under one of its keys: replaces it */
+    cr = auth_save(&k, "http://example.com:80/members/ Basic", "Bob", "x");
+    CHECK(k.n == 2 && !auth_find(&k, "http://example.com:80 \"WallyWorld\"") && !strcmp(cr->user, "Bob"));
     auth_forget(&k, cr);
-    CHECK(k.n == 1 && auth_for_realm(&k, "example.com", 8080, "WallyWorld") == NULL);
+    CHECK(k.n == 1 && !auth_find(&k, "http://example.com:80/members/ Basic"));
     auth_clear(&k);
     CHECK(k.n == 0);
 }
@@ -1372,17 +1865,74 @@ static void test_update(void)
     CHECK(update_compare("1.10b2", "1.9.5") > 0);
     CHECK(update_compare("1.10b2", "1.10b3") < 0);
     /* the decisions the About page makes: newer, the same, older */
-    CHECK(update_compare("1.9.2", "1.9.1") > 0 && update_compare("1.9.1", "1.9.1") == 0 && update_compare("1.9", "1.9.1") < 0);
+    CHECK(update_compare("2.0", "1.9.2") > 0 && update_compare("1.9.2", "1.9.1") > 0 && update_compare("1.9.1", "1.9.1") == 0 && update_compare("1.9", "1.9.1") < 0);
+}
+
+static void test_format(void)
+{
+    char out[64];
+    long a[4];
+    a[0] = (long)"ftp"; a[1] = -42; a[2] = 255; a[3] = 'x';
+    CHECK(mill_format(out, sizeof out, "%s:%d/%x%c%%", a) == 12 && !strcmp(out, "ftp:-42/ffx%"));
+    a[0] = 7; a[1] = (long)"abcdef";
+    CHECK(mill_format(out, sizeof out, "[%05ld][%-4.3s]", a) == 13 && !strcmp(out, "[00007][abc ]"));
+    a[0] = -7;
+    CHECK(mill_format(out, sizeof out, "%4d|%04d", (a[1] = -7, a)) == 9 && !strcmp(out, "  -7|-007"));
+    a[0] = (long)"0123456789";
+    CHECK(mill_format(out, 5, "%s", a) == 10 && !strcmp(out, "0123"));
+    a[0] = 3; a[1] = (long)"GETTING";
+    CHECK(mill_format(out, sizeof out, "%.*s /", a) == 5 && !strcmp(out, "GET /"));
+    a[0] = 4000000000UL;
+    CHECK(mill_format(out, sizeof out, "%lu", a) == 10 && !strcmp(out, "4000000000"));
+}
+
+static void test_macenc(void)
+{
+    unsigned char h[128], out[256];
+    Hqx q;
+    static const unsigned char runs[] = { 'a', 'a', 'a', 'a', 0x90, 'b' };
+    CHECK(crc_ccitt(0, (const unsigned char *)"123456789", 9) == 0x31C3);
+    macbinary_make(h, "Read Me", "TEXT", "ttxt", 0x0100, 300, 0, 1, 2);
+    CHECK(h[0] == 0 && h[1] == 7 && !memcmp(h + 2, "Read Me", 7) && !memcmp(h + 65, "TEXTttxt", 8) && h[73] == 1 &&
+          h[86] == 44 && h[85] == 1 && h[122] == 129 && h[123] == 129);
+    CHECK(((h[124] << 8) | h[125]) == crc_ccitt(0, h, 124));
+    /* BinHex: a run of four a's, a literal 0x90, and b */
+    hqx_begin(&q, out, sizeof out);
+    hqx_put(&q, runs, sizeof runs);
+    hqx_finish(&q);
+    out[q.len] = 0;
+    CHECK(!strncmp((char *)out, "(This file must be converted with BinHex 4.0)\r\r:", 48) && out[q.len - 1] == ':');
+    {
+        /* the six-bit text back to bytes: a 0x90 0x04 0x90 0x00 b */
+        static const char abc[] = "!\"#$%&'()*+,-012345689@ABCDEFGHIJKLMNPQRSTUVXYZ[`abcdefhijklmpqr";
+        unsigned long bits = 0;
+        int nbits = 0, k = 0;
+        unsigned char got[8];
+        const char *c;
+        for (c = (char *)out + 48; *c != ':' && k < 8; c++) {
+            bits = bits << 6 | (unsigned long)(strchr(abc, *c) - abc);
+            if ((nbits += 6) >= 8) { nbits -= 8; got[k++] = (unsigned char)(bits >> nbits); }
+        }
+        CHECK(k >= 5 && got[0] == 'a' && got[1] == 0x90 && got[2] == 4 && got[3] == 0x90 && got[4] == 0 && got[5] == 'b');
+    }
 }
 
 int main(void)
 {
+    test_format();
+    test_macenc();
+    test_pnm();
+    test_inflate();
     test_charset();
     test_fixed_width();
     test_disabled();
     test_utf8();
     test_parse();
     test_layout();
+    test_faces();
+    test_zoom();
+    test_rule_and_cell_height();
+    test_pre_tabs();
     test_lists();
     test_progress();
     test_floats();
@@ -1400,6 +1950,7 @@ int main(void)
     test_form_state();
     test_update();
     test_tables();
+    test_html32();
     test_forms();
     test_image("masthead-s.gif", 318, 57, 318, 57);
     test_image("partly.gif", 32, 32, 32, 32);

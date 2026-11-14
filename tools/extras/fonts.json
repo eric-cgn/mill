@@ -1,0 +1,268 @@
+{
+  "name": "Web Fonts",
+  "version": "1.0",
+  "sources": {
+    "adobe75": {
+      "name": "Adobe 75 dpi X11 bitmap fonts 1.0.4",
+      "format": "tar.xz",
+      "url": "https://www.x.org/releases/individual/font/font-adobe-75dpi-1.0.4.tar.xz",
+      "sha256": "1281a62dbeded169e495cae1a5b487e1f336f2b4d971d92911c59c103999b911",
+      "licence_name": "Adobe/DEC X11 notice",
+      "summary": "Adobe and Digital Equipment Corporation notice (X11 licence): use, copy, modify, distribute, and sell allowed with the copyright notices and the permission notice in supporting documentation; the names of Adobe Systems and Digital Equipment Corporation are not to be used in advertising or publicity without written permission.",
+      "license": {
+        "member": "COPYING"
+      },
+      "dir": "fonts/adobe-x11/75dpi"
+    },
+    "adobe100": {
+      "name": "Adobe 100 dpi X11 bitmap fonts 1.0.4",
+      "format": "tar.xz",
+      "url": "https://www.x.org/releases/individual/font/font-adobe-100dpi-1.0.4.tar.xz",
+      "sha256": "b67aff445e056328d53f9732d39884f55dd8d303fc25af3dbba33a8ba35a9ccf",
+      "licence_name": "Adobe/DEC X11 notice",
+      "summary": "Adobe and Digital Equipment Corporation notice (X11 licence): use, copy, modify, distribute, and sell allowed with the copyright notices and the permission notice in supporting documentation; the names of Adobe Systems and Digital Equipment Corporation are not to be used in advertising or publicity without written permission.",
+      "license": {
+        "member": "COPYING"
+      },
+      "dir": "fonts/adobe-x11/100dpi"
+    }
+  },
+  "fonts": [
+    {
+      "family": "Mill Serif",
+      "id": 250,
+      "files": {
+        "9": [
+          "adobe75",
+          "timR10.bdf"
+        ],
+        "10": [
+          "adobe100",
+          "timR08.bdf"
+        ],
+        "12": [
+          "adobe75",
+          "timR12.bdf"
+        ],
+        "14": [
+          "adobe75",
+          "timR14.bdf"
+        ],
+        "18": [
+          "adobe75",
+          "timR18.bdf"
+        ],
+        "24": [
+          "adobe75",
+          "timR24.bdf"
+        ],
+        "36": [
+          "adobe100",
+          "timR24.bdf"
+        ]
+      },
+      "sizes": [
+        9,
+        10,
+        12,
+        14,
+        18,
+        24,
+        36
+      ],
+      "from": "converted from Adobe's X11 bitmaps of the Times design (timR, timB, timI)",
+      "styles": {
+        "1": {
+          "id": 245,
+          "files": {
+            "9": [
+              "adobe75",
+              "timB10.bdf"
+            ],
+            "10": [
+              "adobe100",
+              "timB08.bdf"
+            ],
+            "12": [
+              "adobe75",
+              "timB12.bdf"
+            ],
+            "14": [
+              "adobe75",
+              "timB14.bdf"
+            ],
+            "18": [
+              "adobe75",
+              "timB18.bdf"
+            ],
+            "24": [
+              "adobe75",
+              "timB24.bdf"
+            ],
+            "36": [
+              "adobe100",
+              "timB24.bdf"
+            ]
+          }
+        },
+        "2": {
+          "id": 246,
+          "files": {
+            "9": [
+              "adobe75",
+              "timI10.bdf"
+            ],
+            "10": [
+              "adobe100",
+              "timI08.bdf"
+            ],
+            "12": [
+              "adobe75",
+              "timI12.bdf"
+            ],
+            "14": [
+              "adobe75",
+              "timI14.bdf"
+            ],
+            "18": [
+              "adobe75",
+              "timI18.bdf"
+            ],
+            "24": [
+              "adobe75",
+              "timI24.bdf"
+            ],
+            "36": [
+              "adobe100",
+              "timI24.bdf"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "family": "Mill Mono",
+      "id": 253,
+      "files": {
+        "9": [
+          "adobe75",
+          "courR10.bdf"
+        ],
+        "10": [
+          "adobe100",
+          "courR08.bdf"
+        ],
+        "12": [
+          "adobe75",
+          "courR12.bdf"
+        ],
+        "14": [
+          "adobe75",
+          "courR14.bdf"
+        ],
+        "18": [
+          "adobe75",
+          "courR18.bdf"
+        ],
+        "24": [
+          "adobe75",
+          "courR24.bdf"
+        ],
+        "36": [
+          "adobe100",
+          "courR24.bdf"
+        ]
+      },
+      "sizes": [
+        9,
+        10,
+        12,
+        14,
+        18,
+        24,
+        36
+      ],
+      "from": "converted from Adobe's X11 bitmaps of the Courier design (courR, courB, courO; the oblique is the italic)",
+      "styles": {
+        "1": {
+          "id": 239,
+          "files": {
+            "9": [
+              "adobe75",
+              "courB10.bdf"
+            ],
+            "10": [
+              "adobe100",
+              "courB08.bdf"
+            ],
+            "12": [
+              "adobe75",
+              "courB12.bdf"
+            ],
+            "14": [
+              "adobe75",
+              "courB14.bdf"
+            ],
+            "18": [
+              "adobe75",
+              "courB18.bdf"
+            ],
+            "24": [
+              "adobe75",
+              "courB24.bdf"
+            ],
+            "36": [
+              "adobe100",
+              "courB24.bdf"
+            ]
+          },
+          "sizes": [
+            9,
+            10,
+            12,
+            14
+          ]
+        },
+        "2": {
+          "id": 240,
+          "files": {
+            "9": [
+              "adobe75",
+              "courO10.bdf"
+            ],
+            "10": [
+              "adobe100",
+              "courO08.bdf"
+            ],
+            "12": [
+              "adobe75",
+              "courO12.bdf"
+            ],
+            "14": [
+              "adobe75",
+              "courO14.bdf"
+            ],
+            "18": [
+              "adobe75",
+              "courO18.bdf"
+            ],
+            "24": [
+              "adobe75",
+              "courO24.bdf"
+            ],
+            "36": [
+              "adobe100",
+              "courO24.bdf"
+            ]
+          },
+          "sizes": [
+            9,
+            10,
+            12,
+            14
+          ]
+        }
+      }
+    }
+  ]
+}
