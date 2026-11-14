@@ -48,6 +48,9 @@ jobs:
       - name: Installer
         if: steps.version.outputs.new == 'yes'
         run: ./build.sh installer
+      - name: Own the build output
+        if: steps.version.outputs.new == 'yes'
+        run: sudo chown -R "$(id -u):$(id -g)" build dist   # the builds' containers run as root
       - name: Release files
         if: steps.version.outputs.new == 'yes'
         run: python3 tools/release.py
