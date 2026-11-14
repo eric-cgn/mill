@@ -1,15 +1,9 @@
-/* gopher: (RFC 1436) as a built-in Plug-In: menus become pages, text and files come
+/* gopher: (RFC 1436) in Internet Services: menus become pages, text and files come
    through as they are, and searches (type 7) use ISINDEX. */
 #include <Multiverse.h>
 #include <string.h>
 
-#define MILL_BUILTIN
-#define MILL_ENTRY gopher_main
-#define MILL_NEW gopher_new
-#define MILL_CLOSE gopher_close
-#define MILL_REQUEST gopher_request
-#include "../sdk/Glue/MillGlue.c"
-#include "version.h"
+#include "MillPlugIn.h"
 
 #define LINE 1024
 
@@ -50,7 +44,7 @@ static void icon(GopherPlugIn *me, short id)
 {
     long a[1];
     a[0] = id;
-    H->Printf(me->r, "<IMG SRC=\"plugin://gopher/rsrc?type=ics%%23&id=%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> ", a);
+    H->Printf(me->r, "<IMG SRC=\"plugin://internet/rsrc?type=ics%%23&id=%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> ", a);
 }
 
 static void header(GopherPlugIn *me, const char *type)
@@ -147,7 +141,7 @@ static short start_menu(GopherPlugIn *me, MillRequest *r)
     return 1;
 }
 
-static OSErr gopher_request(MillPlugIn *self, MillRequest *r)
+OSErr gopher_request(MillPlugIn *self, MillRequest *r)
 {
     GopherPlugIn *me = (GopherPlugIn *)self;
     char type = '1', *sel = me->line, *query = NULL, *p;
@@ -238,26 +232,21 @@ static OSErr gopher_request(MillPlugIn *self, MillRequest *r)
     return err == userCanceledErr ? err : noErr;
 }
 
-static void gopher_close(MillPlugIn *self) { self->host->FreeMem(self); }
-
 static const MillSetting settings[] = {
     { "images", "Show images inline", "Picture items in menus as pictures, above their links.", millCheckbox, "no", 0, 0, NULL },
     kMillProxySetting
 };
 static const MillProtocol protocols[] = { { "gopher", "Gopher", "Internet Gopher Protocol (RFC 1436)", 2, settings } };
 
-MillPlugIn *gopher_new(const MillHost *host, short resFile, MillInfo *info)
+/* Internet.c's: the protocol's description and settings, and its state for a request (the caller
+   sets base.host, and frees it with FreeMem) */
+const MillProtocol *gopher_protocol(void) { return protocols; }
+
+MillPlugIn *gopher_state(const MillHost *host)
 {
     GopherPlugIn *me = host->NewMem(sizeof *me);
-    (void)resFile;
     if (!me) return NULL;
-    me->base.methods = NULL;    /* a built-in's are called by name (MillGlue.c) */
-    info->name = "gopher";
-    info->version = "1.0";
-    info->copyright = "\251 " MILL_YEAR " " MILL_PUBLISHER;
-    info->by = MILL_PUBLISHER;
-    info->description = "Gopher menus, text, files, and searches.";
-    info->protocolCount = 1;
-    info->protocols = protocols;
+    me->base.methods = NULL;
+    me->base.host = host;
     return &me->base;
 }

@@ -1,16 +1,10 @@
-/* ftp: (RFC 959, addresses as RFC 1738) as a built-in Plug-In: folders become pages,
+/* ftp: (RFC 959, addresses as RFC 1738) in Internet Services: folders become pages,
    files come through as they are, and with a name and password, files can be sent up
    with a form. Passive mode by default; active mode (PORT) waits for the server. */
 #include <Multiverse.h>
 #include <string.h>
 
-#define MILL_BUILTIN
-#define MILL_ENTRY ftp_main
-#define MILL_NEW ftp_new
-#define MILL_CLOSE ftp_close
-#define MILL_REQUEST ftp_request
-#include "../sdk/Glue/MillGlue.c"
-#include "version.h"
+#include "MillPlugIn.h"
 
 #define CTL 512
 #define NAME 256
@@ -184,7 +178,7 @@ static void icon(FtpPlugIn *me, short id)
 {
     long a[1];
     a[0] = id;
-    H->Printf(me->r, "<IMG SRC=\"plugin://ftp/rsrc?type=ics%%23&id=%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> ", a);
+    H->Printf(me->r, "<IMG SRC=\"plugin://internet/rsrc?type=ics%%23&id=%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> ", a);
 }
 
 static short icon_for(const char *name)
@@ -413,7 +407,7 @@ refused:
     return "";
 }
 
-static OSErr ftp_request(MillPlugIn *self, MillRequest *r)
+OSErr ftp_request(MillPlugIn *self, MillRequest *r)
 {
     FtpPlugIn *me = (FtpPlugIn *)self;
     char user[NAME], pass[NAME], anon_pass[NAME], key[NAME + 16], prompt[NAME + 64], setting[8], note[NAME + 16], *p, *seg;
@@ -509,8 +503,6 @@ quit:
     return err;
 }
 
-static void ftp_close(MillPlugIn *self) { self->host->FreeMem(self); }
-
 static const MillSetting settings[] = {
     { "passive", "Passive mode", "When off, the server connects back to this Mac.", millCheckbox, "yes", 0, 0, NULL },
     { "messages", "Show server messages", "Welcome and folder messages above listings.", millCheckbox, "yes", 0, 0, NULL },
@@ -522,18 +514,15 @@ static const MillSetting settings[] = {
 };
 static const MillProtocol protocols[] = { { "ftp", "FTP", "File Transfer Protocol (RFC 959)", 6, settings } };
 
-MillPlugIn *ftp_new(const MillHost *host, short resFile, MillInfo *info)
+/* Internet.c's: the protocol's description and settings, and its state for a request (the caller
+   sets base.host, and frees it with FreeMem) */
+const MillProtocol *ftp_protocol(void) { return protocols; }
+
+MillPlugIn *ftp_state(const MillHost *host)
 {
     FtpPlugIn *me = host->NewMem(sizeof *me);
-    (void)resFile;
     if (!me) return NULL;
-    me->base.methods = NULL;    /* a built-in's are called by name (MillGlue.c) */
-    info->name = "ftp";
-    info->version = "1.0";
-    info->copyright = "\251 " MILL_YEAR " " MILL_PUBLISHER;
-    info->by = MILL_PUBLISHER;
-    info->description = "FTP folders and files, and uploads with a name and password.";
-    info->protocolCount = 1;
-    info->protocols = protocols;
+    me->base.methods = NULL;
+    me->base.host = host;
     return &me->base;
 }

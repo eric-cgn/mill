@@ -1,16 +1,26 @@
-/* Internet Services: a Plug-In for Mill with four small protocols.
+/* Internet Services: a Plug-In for Mill with six protocols.
      finger://host/user         RFC 1288   the answer as text
      whois://host/query         RFC 3912   the answer as text
      dict://host/d:word[:db]    RFC 2229   definitions as HTML; m:word[:db[:strategy]] matches
      time://host/               RFC 868    the server's time, and a button to set this Mac's clock
-   Mill's addresses need a host, so "default" stands for a protocol's Default server
-   setting: whois://default/example.com, dict://default/d:word, time://default/. */
+     ftp://host/path            RFC 959    folders as pages, files; uploads with a name and password (ftp.c)
+     gopher://host/             RFC 1436   menus as pages, text, files, searches (gopher.c)
+   Every address names its server. plugin://internet/about explains the addresses and has a
+   form for each, filled in with the protocol's Default server setting. */
 #include <string.h>
 #include <OSUtils.h>
 
 #include "MillPlugIn.h"
 
-enum { kFinger = 0, kWhois, kDict, kTime, kProtocols };
+/* ftp.c and gopher.c: what each protocol says about itself, and a state for one request */
+const MillProtocol *ftp_protocol(void);
+MillPlugIn *ftp_state(const MillHost *host);
+OSErr ftp_request(MillPlugIn *self, MillRequest *r);
+const MillProtocol *gopher_protocol(void);
+MillPlugIn *gopher_state(const MillHost *host);
+OSErr gopher_request(MillPlugIn *self, MillRequest *r);
+
+enum { kFinger = 0, kWhois, kDict, kTime, kFtp, kGopher, kProtocols };
 enum { LINE = 768, ESC = 4700, HOST = 256, BUF = 1024 };
 /* 1900 to 1904: four years, none of them leap */
 #define EPOCH_GAP 126144000UL
@@ -20,7 +30,7 @@ typedef struct {
     MillPlugIn base;            /* first, so this is a MillPlugIn too */
     MillMethods methods;        /* filled in by PlugInNew (see MillPlugIn.h's rules) */
     MillProtocol protocol[kProtocols];
-    MillSetting whoisSet[1], dictSet[1], timeSet[2];
+    MillSetting whoisSet[1], dictSet[1], timeSet[1];
     MillReqRef r;
     short stopped;
     char line[LINE];
@@ -75,27 +85,6 @@ static void failf(Inet *me, const char *fmt, const char *arg)
     a[0] = (long)arg;
     me->base.host->Format(text, sizeof text, fmt, a);
     me->base.host->Fail(me->r, text);
-}
-
-/* The host to connect to: the address's, or the setting's for "default" */
-static const char *pick_host(Inet *me, MillRequest *r, const char *scheme, const char *dflt)
-{
-    if (strcmp(r->host, "default")) return r->host;
-    if (me->base.host->GetSetting(scheme, "server", me->host, HOST) <= 0 || !me->host[0]) strcpy(me->host, dflt);
-    return me->host;
-}
-
-static long number_setting(Inet *me, const char *scheme, const char *key)
-{
-    char v[24];
-    const char *p = v;
-    long n = 0;
-    short neg = 0;
-    if (me->base.host->GetSetting(scheme, key, v, sizeof v) <= 0) return 0;
-    while (*p && *p != '-' && *p != '+' && (*p < '0' || *p > '9')) p++;     /* "UTC-8" */
-    if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
-    while (*p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
-    return neg ? -n : n;
 }
 
 /* Receive into me->buf; 0 bytes or an error ends it */
@@ -164,7 +153,7 @@ static OSErr do_whois(Inet *me, MillRequest *r)
     const MillHost *h = me->base.host;
     char q[160];
     long k;
-    const char *host = pick_host(me, r, "whois", "whois.iana.org");
+    const char *host = r->host;
     const char *p = strchr(r->path, '?');
     /* the words after '?' (from ISINDEX, with + for space), else the path */
     strncpy(q, p ? p + 1 : r->path + 1, sizeof q - 1);
@@ -250,7 +239,7 @@ static void dict_link(Inet *me, const char *host, const char *word, const char *
 static OSErr do_dict(Inet *me, MillRequest *r)
 {
     const MillHost *h = me->base.host;
-    const char *host = pick_host(me, r, "dict", "dict.org");
+    const char *host = r->host;
     char cmd[560], word[160], db[64], strat[32], shown[160];
     const char *q;
     short mode = 0;     /* 0 database list, 1 define, 2 match */
@@ -454,12 +443,36 @@ static void time_page(Inet *me, const char *title)
     put(me, "</H2>\n");
 }
 
+/* The Map control panel's time zone: the System keeps it in parameter RAM, as ReadLocation
+   reads it (ReadXPRam, 12 bytes at $E4: latitude, longitude, then a flags byte and gmtDelta,
+   seconds east of UTC in 24 bits). Returns the seconds east, DST included; *set is 0 when the
+   whole location is zero, which is how it is before the Map has been used (UTC). */
+static long map_offset(short *set)
+{
+    unsigned char loc[12];
+    register long d0 __asm__("d0") = (12L << 16) | 0xE4;
+    register void *a0 __asm__("a0") = loc;
+    long delta, i, any = 0;
+    *set = 0;
+    /* ReadXPRam, if this System has it (an unimplemented trap points where an unused one does) */
+    if (GetTrapAddress(0xA051) == GetTrapAddress(0xA89F)) return 0;
+    __asm__ volatile (".short 0xA051" : "+d"(d0), "+a"(a0) : : "d1", "d2", "a1", "cc", "memory");
+    if (d0 != 0) return 0;
+    for (i = 0; i < 12; i++) if (i != 8) any |= loc[i];     /* latitude, longitude, and gmtDelta (not the DST byte) */
+    *set = any != 0;
+    delta = ((long)loc[9] << 16) | ((long)loc[10] << 8) | loc[11];
+    if (delta & 0x800000L) delta -= 0x1000000L;
+    if (loc[8] & 0x80) delta += 3600L;      /* daylight saving time is on */
+    return delta;
+}
+
 static OSErr do_time(Inet *me, MillRequest *r)
 {
     const MillHost *h = me->base.host;
-    const char *host = pick_host(me, r, "time", "time.nist.gov");
+    const char *host = r->host;
     unsigned long srv, mac, local;
-    long tz = number_setting(me, "time", "zone"), diff;
+    long tz, diff;
+    short zone_set;
     short daytime;
     char hh[HOST], t1[48], t2[48];
     OSErr err;
@@ -499,7 +512,8 @@ static OSErr do_time(Inet *me, MillRequest *r)
         put(me, "</PRE></BODY></HTML>\n");
         return noErr;
     }
-    local = srv - EPOCH_GAP + (unsigned long)(tz * 3600L);
+    tz = map_offset(&zone_set);
+    local = srv - EPOCH_GAP + (unsigned long)tz;
     GetDateTime(&mac);
     diff = (long)(local - mac);
     show_time(me, local, t1, sizeof t1);
@@ -508,11 +522,100 @@ static OSErr do_time(Inet *me, MillRequest *r)
     put1(me, "<BR>This Mac: <B>%s</B>", (long)t2);
     put2(me, "<BR>Difference: %ld second%s, ", diff < 0 ? -diff : diff, (long)(diff == 1 || diff == -1 ? "" : "s"));
     put(me, diff < 0 ? "the Mac is ahead." : diff > 0 ? "the Mac is behind." : "none.");
-    if (tz) put2(me, "<BR>Time zone: UTC%s%ld hours.", (long)(tz < 0 ? "-" : "+"), tz < 0 ? -tz : tz);
     put(me, "</P>\n");
+    if (!zone_set && (diff > 1800 || diff < -1800)) put(me, "<P>Set the time zone in the Map control panel before setting the clock.</P>\n");
     put1(me, "<FORM METHOD=POST ACTION=\"time://%s/\">", (long)hh);
     put1(me, "<INPUT TYPE=HIDDEN NAME=offset VALUE=\"%ld\">", diff);
     put(me, "<INPUT TYPE=SUBMIT VALUE=\"Set this Mac's clock\"></FORM>\n</BODY></HTML>\n");
+    return noErr;
+}
+
+/* ---- plugin://internet/about, and the forms on it ---- */
+
+/* the Default server setting of a protocol, or its public server */
+static const char *default_server(Inet *me, const char *scheme, const char *dflt)
+{
+    if (!dflt) return "";
+    if (me->base.host->GetSetting(scheme, "server", me->host, HOST) <= 0 || !me->host[0]) strcpy(me->host, dflt);
+    return me->host;
+}
+
+/* One protocol's form: a server field, a second field (named w), and a button; the page sends it
+   to plugin://internet/go, which answers with the full address */
+static void about_form(Inet *me, const char *scheme, const char *dflt, const char *label, const char *button)
+{
+    char hh[HOST];
+    me->base.host->HtmlEscape(default_server(me, scheme, dflt), hh, sizeof hh);
+    put(me, "<FORM ACTION=\"plugin://internet/go\"><P><INPUT TYPE=HIDDEN NAME=p VALUE=");
+    put(me, scheme);
+    put(me, "><B>");
+    put(me, scheme);
+    put(me, "</B> server <INPUT NAME=host VALUE=\"");
+    put(me, hh);
+    put(me, "\" SIZE=20>");
+    if (label) { put(me, " "); put(me, label); put(me, " <INPUT NAME=w SIZE=16>"); }
+    put(me, " <INPUT TYPE=SUBMIT VALUE=\"");
+    put(me, button);
+    put(me, "\"></P></FORM>\n");
+}
+
+static OSErr do_about(Inet *me)
+{
+    me->base.host->PlugInPage(me->r);
+    header(me, "text/html");
+    put(me, "<HTML><HEAD><TITLE>Internet Services</TITLE></HEAD><BODY><H2>Internet Services</H2>\n"
+        "<P>Every address names its server:<UL>"
+        "<LI>finger://host/user"
+        "<LI>whois://host/query"
+        "<LI>dict://host/d:word, or m:word for the words that match"
+        "<LI>time://host/, to check this Mac's clock"
+        "<LI>ftp://host/path"
+        "<LI>gopher://host/"
+        "</UL>The forms below fill in the address.</P>\n");
+    about_form(me, "finger", 0, "user", "Finger");
+    about_form(me, "whois", "whois.iana.org", "query", "Look up");
+    about_form(me, "dict", "dict.org", "word", "Define");
+    about_form(me, "time", "time.nist.gov", 0, "Check");
+    put(me, "</BODY></HTML>\n");
+    return noErr;
+}
+
+/* plugin://internet/go?p=scheme&host=server&w=word, from a form on the about page: a redirect
+   to the address in full, which Mill follows (it only refuses a redirect into plugin://) */
+static OSErr do_go(Inet *me, MillRequest *r)
+{
+    const MillHost *h = me->base.host;
+    const char *q = strchr(r->path, '?');
+    char scheme[12], host[HOST], word[160], enc[300], esc[340], url[HOST + 360];
+    long args[3];
+    long ql = q ? (long)strlen(++q) : 0, i, o = 0;
+    if (h->From(r->ref) != millFromOwnPage) { h->Fail(r->ref, "Internet Services: Only its own page can send this."); return noErr; }
+    if (!q || h->FormField(q, ql, "p", scheme, sizeof scheme) <= 0 || h->FormField(q, ql, "host", host, sizeof host) < 0) {
+        h->Fail(r->ref, "Internet Services: The form is missing something.");
+        return noErr;
+    }
+    if (h->FormField(q, ql, "w", word, sizeof word) < 0) word[0] = 0;
+    for (i = 0; host[i]; i++) {     /* a host name, and a port after a colon */
+        char c = host[i];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '-' || c == ':') host[o++] = c;
+    }
+    host[o] = 0;
+    if (!host[0]) { h->Fail(r->ref, "Internet Services: Name a server."); return noErr; }
+    for (i = 0; word[i]; i++) if ((unsigned char)word[i] < 32) word[i] = ' ';
+    h->UrlEncode(word, enc, sizeof enc);
+    for (i = o = 0; enc[i] && o < (long)sizeof esc - 4; i++) {      /* dict's colons separate the word from the database */
+        if (enc[i] == ':' && !strcmp(scheme, "dict")) { esc[o++] = '%'; esc[o++] = '3'; esc[o++] = 'A'; }
+        else esc[o++] = enc[i];
+    }
+    esc[o] = 0;
+    args[0] = (long)(strcmp(scheme, "dict") ? scheme : "dict");
+    args[1] = (long)host;
+    args[2] = (long)esc;
+    if (!strcmp(scheme, "dict") && esc[0]) h->Format(url, sizeof url, "dict://%s/d:%s", args + 1);
+    else if (!strcmp(scheme, "dict") || !strcmp(scheme, "time")) h->Format(url, sizeof url, "%s://%s/", args);
+    else if (!strcmp(scheme, "whois") || !strcmp(scheme, "finger")) h->Format(url, sizeof url, "%s://%s/%s", args);
+    else { h->Fail(r->ref, "Internet Services: Unknown protocol."); return noErr; }
+    put1(me, "HTTP/1.0 302 Found" MILL_CRLF "Location: %s" MILL_CRLF MILL_CRLF, (long)url);
     return noErr;
 }
 
@@ -523,11 +626,25 @@ static OSErr inet_request(MillPlugIn *self, MillRequest *r)
     Inet *me = (Inet *)self;
     me->r = r->ref;
     me->stopped = 0;
+    if (r->protocol < 0) {
+        if (!strcmp(r->path, "/about")) return do_about(me);
+        if (!strncmp(r->path, "/go?", 4)) return do_go(me, r);
+        return millUnknown;
+    }
     switch (r->protocol) {
     case kFinger: return do_finger(me, r);
     case kWhois: return do_whois(me, r);
     case kDict: return do_dict(me, r);
     case kTime: return do_time(me, r);
+    case kFtp: case kGopher: {
+        const MillHost *h = me->base.host;
+        MillPlugIn *s = r->protocol == kFtp ? ftp_state(h) : gopher_state(h);
+        OSErr err;
+        if (!s) return memFullErr;
+        err = r->protocol == kFtp ? ftp_request(s, r) : gopher_request(s, r);
+        h->FreeMem(s);
+        return err;
+    }
     }
     return millUnknown;
 }
@@ -565,24 +682,21 @@ MillPlugIn *PlugInNew(const MillHost *host, short resFile, MillInfo *info)
     me->methods.purge = 0;
     me->methods.format = 0;
     me->base.methods = &me->methods;
-    setting(&me->whoisSet[0], "server", "Default server", "For whois://default/query", millText, "whois.iana.org", 0, 0);
-    setting(&me->dictSet[0], "server", "Default server", "For dict://default/d:word", millText, "dict.org", 0, 0);
-    setting(&me->timeSet[0], "server", "Default server", "For time://default/", millText, "time.nist.gov", 0, 0);
-    setting(&me->timeSet[1], "zone", "Time zone", "Hours from UTC. System 6 has none, so UTC sets this Mac's clock to UTC.", millChoice, "UTC", 0, 0);
-    /* a choice, not a number: Mill's number settings take no minus sign, and a menu item
-       that starts with one is a divider */
-    me->timeSet[1].choices = "UTC-12|UTC-11|UTC-10|UTC-9|UTC-8|UTC-7|UTC-6|UTC-5|UTC-4|UTC-3|UTC-2|UTC-1|UTC|"
-                             "UTC+1|UTC+2|UTC+3|UTC+4|UTC+5|UTC+6|UTC+7|UTC+8|UTC+9|UTC+10|UTC+11|UTC+12|UTC+13|UTC+14";
+    setting(&me->whoisSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "whois.iana.org", 0, 0);
+    setting(&me->dictSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "dict.org", 0, 0);
+    setting(&me->timeSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "time.nist.gov", 0, 0);
     protocol(&me->protocol[kFinger], "finger", "Finger", "Finger User Information Protocol (RFC 1288)", 0, 0);
     protocol(&me->protocol[kWhois], "whois", "Whois", "Whois (RFC 3912)", 1, me->whoisSet);
     protocol(&me->protocol[kDict], "dict", "Dict", "Dictionary Server Protocol (RFC 2229)", 1, me->dictSet);
-    protocol(&me->protocol[kTime], "time", "Time", "Time Protocol (RFC 868)", 2, me->timeSet);
+    protocol(&me->protocol[kTime], "time", "Time", "Time Protocol (RFC 868)", 1, me->timeSet);
+    me->protocol[kFtp] = *ftp_protocol();
+    me->protocol[kGopher] = *gopher_protocol();
     info->name = "internet";
     info->version = "1.0";
     info->copyright = "Copyright 2026 OneInAMillion Software";
     info->by = "OneInAMillion Software";
-    info->description = "Finger, whois, dict, and time.";
-    info->flags = 0;
+    info->description = "Finger, whois, dict, time, FTP, and Gopher.";
+    info->flags = millHasAbout;
     info->protocolCount = kProtocols;
     info->protocols = me->protocol;
     info->formatCount = 0;

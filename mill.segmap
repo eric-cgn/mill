@@ -10,10 +10,6 @@ SEGMENT HTTPS
 *plug_https.c.obj
 SEGMENT File
 *plug_file.c.obj
-SEGMENT Gopher
-*plug_gopher.c.obj
-SEGMENT FTP
-*plug_ftp.c.obj
 SEGMENT GIF
 *plug_gif.c.obj
 *gif.c.obj

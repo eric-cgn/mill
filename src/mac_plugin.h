@@ -1,4 +1,4 @@
-/* Plug-Ins: protocols that aren't Mill's own, built in (file:, gopher:, ftp:) or code
+/* Plug-Ins: protocols that aren't Mill's own, built in (http:, https:, file:) or code
    resources in the "Mill Plug-Ins" folder. Each is loaded only while something uses it:
    a request to it, or a window showing a page it made. See sdk/Interfaces/MillPlugIn.h. */
 #ifndef MILL_PLUGIN_H_MILL
@@ -10,7 +10,7 @@
 #include "core/url.h"
 #include "mac_net.h"
 
-#define BUILTINS 9     /* http, https, file, gopher, ftp, gif, jpeg, netpbm, gzip: Plug.builtin 1 to 9 */
+#define BUILTINS 7     /* http, https, file, gif, jpeg, netpbm, gzip: Plug.builtin 1 to 7 */
 
 enum { PLUG_READY, PLUG_NEWER, PLUG_CONFLICT, PLUG_SKIPPED, PLUG_FAILED };
 

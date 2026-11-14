@@ -18,8 +18,6 @@
 pascal OSErr http_main(short selector, void *params, void **self);
 pascal OSErr https_main(short selector, void *params, void **self);
 pascal OSErr file_main(short selector, void *params, void **self);
-pascal OSErr gopher_main(short selector, void *params, void **self);
-pascal OSErr ftp_main(short selector, void *params, void **self);
 pascal OSErr gif_main(short selector, void *params, void **self);
 pascal OSErr jpeg_main(short selector, void *params, void **self);
 pascal OSErr netpbm_main(short selector, void *params, void **self);
@@ -44,12 +42,10 @@ static OSErr call(Plug *p, short selector, void *params)
     case 1: err = http_main(selector, params, &p->self); break;
     case 2: err = https_main(selector, params, &p->self); break;
     case 3: err = file_main(selector, params, &p->self); break;
-    case 4: err = gopher_main(selector, params, &p->self); break;
-    case 5: err = ftp_main(selector, params, &p->self); break;
-    case 6: err = gif_main(selector, params, &p->self); break;
-    case 7: err = jpeg_main(selector, params, &p->self); break;
-    case 8: err = netpbm_main(selector, params, &p->self); break;
-    case 9: err = gzip_main(selector, params, &p->self); break;
+    case 4: err = gif_main(selector, params, &p->self); break;
+    case 5: err = jpeg_main(selector, params, &p->self); break;
+    case 6: err = netpbm_main(selector, params, &p->self); break;
+    case 7: err = gzip_main(selector, params, &p->self); break;
     default: if (p->code) err = ((MillMainProc)*p->code)(selector, params, &p->self);
     }
     UseResFile(was);
@@ -62,12 +58,10 @@ static void unload(Plug *p)
     case 1: UnloadSeg((void *)http_main); break;
     case 2: UnloadSeg((void *)https_main); break;
     case 3: UnloadSeg((void *)file_main); break;
-    case 4: UnloadSeg((void *)gopher_main); break;
-    case 5: UnloadSeg((void *)ftp_main); break;
-    case 6: UnloadSeg((void *)gif_main); break;
-    case 7: UnloadSeg((void *)jpeg_main); break;
-    case 8: UnloadSeg((void *)netpbm_main); break;
-    case 9: UnloadSeg((void *)gzip_main); break;
+    case 4: UnloadSeg((void *)gif_main); break;
+    case 5: UnloadSeg((void *)jpeg_main); break;
+    case 6: UnloadSeg((void *)netpbm_main); break;
+    case 7: UnloadSeg((void *)gzip_main); break;
     }
     if (p->code) { HUnlock(p->code); ReleaseResource(p->code); p->code = NULL; }
     if (p->res > 0) { CloseResFile(p->res); p->res = 0; }

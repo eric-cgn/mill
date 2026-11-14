@@ -11,7 +11,7 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/pages.r
 list(APPEND REZ_INCLUDE_PATH ${CMAKE_CURRENT_BINARY_DIR})
 add_application(Mill
     src/mac_start.c src/mac_main.c src/mac_net.c src/mac_local.c src/mac_save.c src/mac_sys.c src/mac_login.c
-    src/mac_init.c src/mac_memreport.c src/mac_upload.c src/mac_pages.c src/mac_plugin.c src/plug_http.c src/plug_https.c src/plug_file.c src/plug_gopher.c src/plug_ftp.c
+    src/mac_init.c src/mac_memreport.c src/mac_upload.c src/mac_pages.c src/mac_plugin.c src/plug_http.c src/plug_https.c src/plug_file.c
     src/plug_gif.c src/plug_jpeg.c src/plug_pnm.c src/plug_gzip.c
     src/core/auth.c src/core/httpauth.c src/core/charset.c src/core/cookie.c src/core/filetypes.c src/core/fmt.c src/core/form.c src/core/gif.c src/core/inflate.c src/core/jpeg.c src/core/macenc.c src/core/pnm.c src/core/html.c src/core/imagemap.c src/core/image.c src/core/layout.c src/core/update.c src/core/url.c
     src/third_party/tjpgd/tjpgd.c
