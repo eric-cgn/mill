@@ -100,6 +100,37 @@ def copy_kit(into=''):
         shutil.rmtree(tmp)
 
 
+def macbinary(name, ftype, creator, data):
+    """A MacBinary file of a data fork alone"""
+    n = name.encode('mac_roman')
+    h = bytearray(128)
+    h[1] = len(n)
+    h[2:2 + len(n)] = n
+    h[65:69], h[69:73] = ftype, creator
+    h[83:87] = struct.pack('>I', len(data))
+    h[122] = h[123] = 129
+    crc = 0
+    for b in h[:124]:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    h[124:126] = crc.to_bytes(2, 'big')
+    return bytes(h) + data + bytes(-len(data) % 128)
+
+
+def entries():
+    """(folder parts, name, MacBinary bytes) for each file as the disk has it, for the installer"""
+    for parts, name, path in files():
+        if (parts and parts[0] in DISK_SKIP_DIRS) or name in DISK_SKIP_FILES:
+            continue
+        if is_macbinary(path):
+            mb = open(path, 'rb').read()
+            yield parts, mb[2:2 + mb[1]].decode('mac_roman'), mb
+        else:
+            text = scrub(open(path, encoding='utf-8').read(), path)
+            yield parts, name, macbinary(name, b'TEXT', b'ttxt', text.encode('mac_roman').replace(b'\n', b'\r'))
+
+
 def disk(out):
     with open(out, 'wb') as f:
         f.write(bytes(800 * 1024))
