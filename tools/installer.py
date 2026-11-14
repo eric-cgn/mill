@@ -42,6 +42,9 @@ def main():
         return (d + 1023) // 1024 * 1024 + (rl + 1023) // 1024 * 1024
     sizes = [need(items[i][2]) for i in range(3)] + [sum(need(mb) for _, _, mb in items[3:])]
     r.append("data 'ISIZ' (128) { $\"%s\" };" % ''.join('%08X' % n for n in sizes))
+    # bytes each part's files come to once unpacked (the MacBinary streams), for the progress bar
+    unpacked = [len(items[i][2]) for i in range(3)] + [sum(len(mb) for _, _, mb in items[3:])]
+    r.append("data 'IUNC' (128) { $\"%s\" };" % ''.join('%08X' % n for n in unpacked))
     open(os.path.join(out, 'payload.r'), 'w').write('\n'.join(r) + '\n')
     print('%d files, %d bytes compressed' % (len(items), total))
 
