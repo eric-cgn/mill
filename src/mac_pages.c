@@ -690,8 +690,8 @@ static void config(Out *o, const char *body, long len)
     sprintf(k, "%d", history_size());
     out_s(o, k);
     out_s(o, "\"><BR>Pages remembered for Back, 1 to 32.");
-    font_row(o, "Proportional font", "prop", 0, "Most text.");
-    font_row(o, "Fixed font", "fixed", 1, "PRE, TT, CODE, KBD, SAMP, text files, and listings.");
+    font_row(o, "Proportional font", "prop", 0, "Default font for page text.");
+    font_row(o, "Fixed font", "fixed", 1, "Monospace font for fixed-width text.");
     out_s(o, "<TR><TD VALIGN=TOP WIDTH=110><B>Scale Text Only</B><TD><INPUT TYPE=checkbox NAME=scale_text_only VALUE=yes");
     if (!strcmp(setting("scale_text_only", "no"), "yes")) out_s(o, " CHECKED");
     out_s(o, "> Mill scales only the text when zooming (lower memory use)");
