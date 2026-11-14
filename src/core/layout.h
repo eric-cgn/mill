@@ -10,9 +10,14 @@
    choose them. QuickDraw face bits follow. */
 enum { FONT_PROP = 0x7FF0, FONT_FIXED = 0x7FF1 };
 enum { FACE_BOLD = 1, FACE_ITALIC = 2, FACE_UNDERLINE = 4 };
-/* Text on a dark background (a BGCOLOR under half bright), drawn white; a bit QuickDraw
-   doesn't use, to take off before TextFace */
+/* Bits QuickDraw doesn't use, to take off before TextFace (FACE_QD keeps what it does):
+   text on a dark background (a BGCOLOR under half bright), drawn white; struck through
+   (STRIKE); and raised or lowered (SUP, SUB), by layout_shift */
 #define FACE_INVERSE 0x80
+#define FACE_STRIKE 0x40
+#define FACE_SUP 0x20
+#define FACE_SUB 0x10
+#define FACE_QD 0x0F
 
 typedef struct { short font, size; unsigned char face; } MStyle;
 
@@ -37,7 +42,11 @@ typedef struct {
     char text_only;
 } Metrics;
 
-enum { RUN_TEXT, RUN_GEN, RUN_RULE, RUN_IMAGE, RUN_CONTROL };
+enum { RUN_TEXT, RUN_GEN, RUN_RULE, RUN_IMAGE, RUN_CONTROL, RUN_MARK };
+
+/* RUN_MARK: a bullet drawn as a shape in a box width wide (x, width), on the line's baseline:
+   face is MARK_DISC, MARK_CIRCLE, or MARK_SQUARE (UL TYPE); font and size are the item's text style */
+enum { MARK_DISC, MARK_CIRCLE, MARK_SQUARE };
 
 /* RUN_IMAGE and RUN_CONTROL: text is the IMG (or INPUT, SELECT, TEXTAREA) node, size its
    height, font its height above the baseline, and face an image's border width */
@@ -77,6 +86,9 @@ typedef struct {
 /* Returns 0, -1 when out of memory, or -2 when progress said to stop */
 int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width);
 void layout_free(Layout *L);
+/* How many pixels up a run of this size and face is drawn off the baseline: raised for SUP,
+   negative for SUB, else 0 */
+short layout_shift(short size, unsigned char face);
 /* The run under a point in page coordinates, or NULL */
 const Run *layout_hit(const Layout *L, long y, short x);
 /* The first line that could reach y; draw from here while lines start above the bottom */

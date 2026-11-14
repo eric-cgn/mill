@@ -536,7 +536,7 @@ static void use_face(const Face *f, const MStyle *s)
 {
     TextFont(f->font);
     TextSize(f->size);
-    TextFace(s->face & ~FACE_INVERSE);
+    TextFace(s->face & FACE_QD);
 }
 
 static long qd_width(void *ctx, const MStyle *s, const char *text, long len)
@@ -561,7 +561,7 @@ static void qd_metrics(void *ctx, const MStyle *s, short *a, short *d, short *l)
        doesn't shift; the few glyphs taller than that just reach into the line above. */
     TextFont(f.line_font);
     TextSize(f.size);
-    TextFace(s->face & ~FACE_INVERSE);
+    TextFace(s->face & FACE_QD);
     GetFontInfo(&fi);
     *a = fi.ascent;
     *d = fi.descent;
@@ -1068,6 +1068,17 @@ static void draw_control(const Run *r, short top)
 
 /* ------------------------------------------------------------ the page view */
 
+/* A list bullet: a disc, a circle, or a square about half the text's size, above the baseline */
+static void draw_mark(const Run *r, short base)
+{
+    Rect m;
+    short top = base - r->width * 2 / 3 - r->width / 2;
+    SetRect(&m, PAGE_LEFT + r->x, top, PAGE_LEFT + r->x + r->width, top + r->width);
+    if (r->face == MARK_SQUARE) { InsetRect(&m, 1, 1); PaintRect(&m); }
+    else if (r->face == MARK_CIRCLE) FrameOval(&m);
+    else PaintOval(&m);
+}
+
 static void draw_picture(const Run *r, short top)
 {
     Rect box, in;
@@ -1204,6 +1215,7 @@ static void draw_page(short only)
                 }
                 if (r->kind == RUN_IMAGE) { draw_picture(r, base - r->font); continue; }
                 if (r->kind == RUN_CONTROL) { draw_control(r, base - r->font); continue; }
+                if (r->kind == RUN_MARK) { draw_mark(r, base); continue; }
                 {
                     MStyle rs;
                     Face f;
@@ -1211,11 +1223,19 @@ static void draw_page(short only)
                     rs.font = r->font; rs.size = r->size; rs.face = r->face;
                     f = face_of(&rs);
                     use_face(&f, &rs);
+                    short up = layout_shift(r->size, r->face);
                     if ((r->face & FACE_INVERSE) && !plain_cells) TextMode(srcBic);  /* white, on a dark cell */
-                    MoveTo(PAGE_LEFT + r->x, base);
+                    MoveTo(PAGE_LEFT + r->x, base - up);
                     was = font_enter(&f);
                     DrawText(r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text, 0, r->len);
                     font_leave(was);
+                    if (r->face & FACE_STRIKE) {
+                        short sy = base - up - (r->size + 2) / 3;
+                        if ((r->face & FACE_INVERSE) && !plain_cells) PenMode(patBic);
+                        MoveTo(PAGE_LEFT + r->x, sy);
+                        LineTo(PAGE_LEFT + r->x + r->width - 1, sy);
+                        PenNormal();
+                    }
                 }
                 TextMode(srcOr);
             }

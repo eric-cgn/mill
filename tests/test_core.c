@@ -522,6 +522,143 @@ static void test_tables(void)
     html_free(&d);
 }
 
+/* HTML 3.2 pieces of text, lists, images, and tables (tests/fixtures/html32.html shows them) */
+static const Run *run_kind(const Layout *L, int kind, int nth)
+{
+    long i;
+    for (i = 0; i < L->nruns; i++) if (L->runs[i].kind == kind && nth-- == 0) return &L->runs[i];
+    return NULL;
+}
+
+static void test_html32(void)
+{
+    Doc d;
+    Layout L;
+    const Run *a, *b, *c;
+    long i;
+    char buf[20];
+    const char *h;
+
+    /* STRIKE and S strike through; SUB and SUP are smaller and offset, and the line grows by the offset */
+    h = "<STRIKE>gone</STRIKE> plain <S>also</S> H<SUB>sub</SUB> x<SUP>sup</SUP>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = find(&L, &d, "gone"); b = find(&L, &d, "also"); c = find(&L, &d, "plain");
+    CHECK(a && (a->face & FACE_STRIKE) && b && (b->face & FACE_STRIKE) && c && !(c->face & FACE_STRIKE));
+    a = find(&L, &d, "sub"); b = find(&L, &d, "sup");
+    CHECK(a && (a->face & FACE_SUB) && layout_shift(a->size, a->face) < 0 && a->size < c->size);
+    CHECK(b && (b->face & FACE_SUP) && layout_shift(b->size, b->face) > 0 && b->size < c->size);
+    CHECK(layout_shift(c->size, c->face) == 0 && L.nlines == 1);
+    layout_free(&L);
+    html_free(&d);
+
+    /* BASEFONT is what FONT SIZE=+n and -n count from; absolute sizes don't move */
+    h = "<FONT SIZE=+1>aa</FONT> <BASEFONT SIZE=5><FONT SIZE=+1>bb</FONT> <FONT SIZE=-1>cc</FONT> <FONT SIZE=2>dd</FONT>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = find(&L, &d, "aa"); b = find(&L, &d, "bb"); c = find(&L, &d, "cc");
+    CHECK(a && b && c && a->size == 12 + 2 && b->size == 24 && c->size == 14);
+    a = find(&L, &d, "dd");
+    CHECK(a && a->size == 10);
+    layout_free(&L);
+    html_free(&d);
+
+    /* list markers: OL TYPE, START, VALUE, and TYPE on an item; UL TYPE and LI TYPE drawn as shapes */
+    h = "<OL TYPE=a START=2><LI>x<LI>x<LI VALUE=27>x<LI TYPE=I>x</OL><UL TYPE=square><LI>x<LI TYPE=circle>x<LI>x</UL><UL><LI>x</UL>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    {
+        const char *want[] = { "b.", "c.", "aa.", "XXVIII." };
+        for (i = 0; i < 4; i++) {
+            a = run_kind(&L, RUN_GEN, (int)i);
+            CHECK(a && a->len == (short)strlen(want[i]) && !strncmp(L.gen + a->text, want[i], a->len));
+        }
+        CHECK(run_kind(&L, RUN_MARK, 0) && run_kind(&L, RUN_MARK, 0)->face == MARK_SQUARE);
+        CHECK(run_kind(&L, RUN_MARK, 1)->face == MARK_CIRCLE && run_kind(&L, RUN_MARK, 2)->face == MARK_CIRCLE);
+        CHECK(run_kind(&L, RUN_MARK, 3)->face == MARK_DISC);
+    }
+    layout_free(&L);
+    html_free(&d);
+    (void)buf;
+
+    /* COMPACT: no gaps around a list; DL COMPACT sets a definition beside a term that fits the indent */
+    {
+        const char *plain = "x<UL><LI>one</UL>y", *compact = "x<UL COMPACT><LI>one</UL>y";
+        long yp, yc;
+        CHECK(html_parse(&d, plain, strlen(plain)) == 0);
+        CHECK(layout_doc(&L, &d, &M, 400) == 0);
+        yp = run_y(&L, find(&L, &d, "y"));
+        layout_free(&L); html_free(&d);
+        CHECK(html_parse(&d, compact, strlen(compact)) == 0);
+        CHECK(layout_doc(&L, &d, &M, 400) == 0);
+        yc = run_y(&L, find(&L, &d, "y"));
+        CHECK(yc < yp);
+        layout_free(&L); html_free(&d);
+        h = "<DL COMPACT><DT>k<DD>beside<DT>a long term here<DD>below</DL>";
+        CHECK(html_parse(&d, h, strlen(h)) == 0);
+        CHECK(layout_doc(&L, &d, &M, 400) == 0);
+        a = find(&L, &d, "k"); b = find(&L, &d, "beside"); c = find(&L, &d, "below");
+        CHECK(a && b && c && run_y(&L, a) == run_y(&L, b) && b->x > a->x + a->width);
+        CHECK(run_y(&L, c) > run_y(&L, b) && c->x == b->x);
+        layout_free(&L); html_free(&d);
+    }
+
+    /* IMG ALIGN: bottom sits on the baseline, middle is centered on the text, top hangs from the line's top */
+    h = "<IMG SRC=a WIDTH=20 HEIGHT=20>x <IMG SRC=a WIDTH=20 HEIGHT=20 ALIGN=middle>y <IMG SRC=a WIDTH=20 HEIGHT=20 ALIGN=top>z";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = run_kind(&L, RUN_IMAGE, 0); b = run_kind(&L, RUN_IMAGE, 1); c = run_kind(&L, RUN_IMAGE, 2);
+    CHECK(a && b && c && a->font == 20 && b->font < a->font && b->font > c->font && c->font > 0);
+    layout_free(&L);
+    html_free(&d);
+
+    /* CAPTION: on top unless ALIGN=BOTTOM */
+    h = "<TABLE><CAPTION>cap</CAPTION><TR><TD>cell</TD></TR></TABLE>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    CHECK(run_y(&L, find(&L, &d, "cap")) < run_y(&L, find(&L, &d, "cell")));
+    layout_free(&L); html_free(&d);
+    h = "<TABLE><CAPTION ALIGN=bottom>cap</CAPTION><TR><TD>cell</TD></TR></TABLE>after";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    CHECK(run_y(&L, find(&L, &d, "cap")) > run_y(&L, find(&L, &d, "cell")));
+    CHECK(run_y(&L, find(&L, &d, "after")) > run_y(&L, find(&L, &d, "cap")));
+    layout_free(&L); html_free(&d);
+
+    /* TR ALIGN and VALIGN are the cells' defaults, and a cell's own win */
+    h = "<TABLE WIDTH=300><TR ALIGN=right VALIGN=top><TD>tall<BR>tall<BR>tall<TD>rr<TD ALIGN=left VALIGN=bottom>ll</TR>"
+        "<TR><TD>base<TD>mid</TR></TABLE>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    {
+        const Run *rr = find(&L, &d, "rr"), *ll = find(&L, &d, "ll"), *t = find(&L, &d, "tall");
+        CHECK(rr && ll && t);
+        if (rr && ll && t) {
+            CHECK(run_y(&L, rr) == run_y(&L, t));                /* row VALIGN=top */
+            CHECK(run_y(&L, ll) > run_y(&L, rr));                /* cell VALIGN=bottom */
+            CHECK(rr->x + rr->width > ll->x - 12 && ll->x > rr->x);  /* ALIGN=right puts rr at its cell's right edge, ll at its left */
+        }
+    }
+    layout_free(&L); html_free(&d);
+
+    /* every Latin-1 entity of 3.2 decodes to a Mac Roman character */
+    for (i = 0; i < 96; i++) {
+        char name[16];
+        int n = snprintf(name, sizeof name, "&#%ld;", 160 + i);
+        CHECK(n > 0 && entity_to_mac(name + 1, n - 2) != 0);
+    }
+    h = "&amp;&lt;&gt;&quot;&nbsp;&copy;&reg;&eacute;&szlig;&yuml;&THORN;";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    {
+        const char *txt = NULL;
+        for (i = 0; i < d.nnodes; i++) if (d.nodes[i].tag == TAG_TEXT) { txt = d.text + d.nodes[i].text; break; }
+        CHECK(txt && !strncmp(txt, "&<>\"", 4) && (unsigned char)txt[4] == 0xCA && (unsigned char)txt[5] == 0xA9 &&
+              (unsigned char)txt[6] == 0xA8 && (unsigned char)txt[7] == 0x8E && (unsigned char)txt[8] == 0xA7 &&
+              (unsigned char)txt[9] == 0xD8 && d.nodes[i].len == 11);
+    }
+    html_free(&d);
+}
+
 /* Write a 1-bit bitmap as a PBM, for looking at */
 static void save_pbm(const Bitmap1 *b, const char *path)
 {
@@ -1802,6 +1939,7 @@ int main(void)
     test_form_state();
     test_update();
     test_tables();
+    test_html32();
     test_forms();
     test_image("masthead-s.gif", 318, 57, 318, 57);
     test_image("partly.gif", 32, 32, 32, 32);
