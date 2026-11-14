@@ -14,6 +14,34 @@ static const char *SCHEMES[] = { "http://", "file://", "mill://", "https://" };
 
 int url_is_web(int scheme) { return scheme == SCHEME_HTTP || scheme == SCHEME_HTTPS; }
 
+static const char *others = "";
+void url_schemes(const char *names) { others = names ? names : ""; }
+
+unsigned short url_port(const Url *u)
+{
+    if (u->port) return u->port;
+    return u->scheme == SCHEME_HTTPS ? 443 : u->scheme == SCHEME_HTTP ? 80 : 0;
+}
+
+/* The n characters at s, a scheme's name, if it's one of the Plug-Ins': into name, in
+   lower case */
+static int other_named(const char *s, long n, char *name)
+{
+    const char *p = others;
+    long i;
+    if (n < 1 || n > 11) return 0;
+    for (i = 0; i < n; i++) name[i] = (char)(s[i] >= 'A' && s[i] <= 'Z' ? s[i] | 32 : s[i]);
+    name[n] = 0;
+    while (*p) {
+        const char *e;
+        while (*p == ' ') p++;
+        for (e = p; *e && *e != ' '; e++) {}
+        if (e - p == n && !memcmp(p, name, n)) return 1;
+        p = e;
+    }
+    return 0;
+}
+
 static int same_ci(const char *a, const char *b, long n)
 {
     while (n-- > 0) { if ((*a | 32) != (*b | 32)) return 0; a++; b++; }
@@ -124,12 +152,14 @@ int url_parse(const char *s, Url *u)
     long n;
     int k;
     memset(u, 0, sizeof *u);
-    u->port = 80;
     while (*s == ' ') s++;
     for (k = 0; k < NSCHEMES && !prefix_ci(s, SCHEMES[k]); k++) {}
     if (k < NSCHEMES) { u->scheme = (char)k; s += strlen(SCHEMES[k]); }
-    else if (url_has_scheme(s)) return -1;  /* gopher://, ftp:// ... */
-    if (u->scheme == SCHEME_HTTPS) u->port = 443;
+    else if ((k = url_has_scheme(s)) != 0) {
+        if (!other_named(s, k - 3, u->name)) return -1;  /* a scheme no Plug-In has */
+        u->scheme = SCHEME_OTHER;
+        s += k;
+    }
     for (end = s; *end && *end != '/' && *end != '?' && *end != '#'; end++) {}
     /* user:password@ before the host (the last @, as a password may hold one) */
     for (p = end; p > s && p[-1] != '@'; p--) {}
@@ -145,10 +175,17 @@ int url_parse(const char *s, Url *u)
     if (n >= (long)sizeof u->host || (n == 0 && u->scheme != SCHEME_FILE)) return -1;
     memcpy(u->host, s, n);
     if (u->scheme == SCHEME_MILL) for (k = 0; u->host[k]; k++) u->host[k] |= 32;  /* mill://About is mill://about */
-    if (url_is_web(u->scheme) && (p = strchr(u->host, ':'))) {
-        u->port = 0;
-        for (p++; *p >= '0' && *p <= '9'; p++) u->port = (unsigned short)(u->port * 10 + (*p - '0'));
-        *strchr(u->host, ':') = 0;
+    if ((url_is_web(u->scheme) || u->scheme == SCHEME_OTHER) && (p = strchr(u->host, ':'))) {
+        /* 1 to 65535; nothing after the colon is no port */
+        long port = 0;
+        char *colon = (char *)p;
+        for (p++; *p; p++) {
+            if (*p < '0' || *p > '9' || (port = port * 10 + (*p - '0')) > 65535) return -1;
+        }
+        if (p > colon + 1 && !port) return -1;
+        u->port = (unsigned short)port;
+        *colon = 0;
+        if (!u->host[0]) return -1;
     }
     p = end;
     if (*p != '/') { strcpy(u->path, "/"); }
@@ -168,7 +205,11 @@ void url_format(const Url *u, char *out, int out_size)
 {
     if (u->scheme == SCHEME_FILE) snprintf(out, out_size, "file://%s", u->path);
     else if (u->scheme == SCHEME_MILL) snprintf(out, out_size, "mill://%s%s", u->host, strcmp(u->path, "/") ? u->path : "");
-    else if (u->port == (u->scheme == SCHEME_HTTPS ? 443 : 80)) snprintf(out, out_size, "%s%s%s", SCHEMES[(int)u->scheme], u->host, u->path);
+    else if (u->scheme == SCHEME_OTHER) {
+        if (u->port) snprintf(out, out_size, "%s://%s:%u%s", u->name, u->host, u->port, u->path);
+        else snprintf(out, out_size, "%s://%s%s", u->name, u->host, u->path);
+    }
+    else if (!u->port || u->port == (u->scheme == SCHEME_HTTPS ? 443 : 80)) snprintf(out, out_size, "%s%s%s", SCHEMES[(int)u->scheme], u->host, u->path);
     else snprintf(out, out_size, "%s%s:%u%s", SCHEMES[(int)u->scheme], u->host, u->port, u->path);
     if (u->user[0]) {
         char with[300];
@@ -283,9 +324,9 @@ int url_resolve(const char *base, const char *href, char *out, int out_size)
 {
     Url b, r;
     while (*href == ' ') href++;
-    if (prefix_ci(href, "http://") || prefix_ci(href, "https://") || prefix_ci(href, "file://") || prefix_ci(href, "mill://")) {
-        if (url_parse(href, &r)) return -1;
-        normalize(r.path);
+    if (url_has_scheme(href)) {
+        if (url_parse(href, &r)) return -1;  /* a scheme Mill doesn't know */
+        if (r.scheme != SCHEME_OTHER) normalize(r.path);  /* a Plug-In's paths are its own */
     } else if (other_scheme(href)) {
         return -1;  /* mailto:, ftp:, javascript: ... */
     } else {
@@ -296,8 +337,9 @@ int url_resolve(const char *base, const char *href, char *out, int out_size)
             strncpy(r.fragment, href + 1, sizeof r.fragment - 1);
         } else if (href[0] == '/' && href[1] == '/') {
             char tmp[300];
-            snprintf(tmp, sizeof tmp, "%.*s%s", (int)(strchr(SCHEMES[(int)b.scheme], ':') + 1 - SCHEMES[(int)b.scheme]),
-                     SCHEMES[(int)b.scheme], href);
+            if (b.scheme == SCHEME_OTHER) snprintf(tmp, sizeof tmp, "%s:%s", b.name, href);
+            else snprintf(tmp, sizeof tmp, "%.*s%s", (int)(strchr(SCHEMES[(int)b.scheme], ':') + 1 - SCHEMES[(int)b.scheme]),
+                          SCHEMES[(int)b.scheme], href);
             if (url_parse(tmp, &r)) return -1;
         } else {
             char path[300];

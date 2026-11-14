@@ -93,6 +93,10 @@ struct JDEC {
 /* TJpgDec API functions */
 JRESULT jd_prepare (JDEC* jd, size_t (*infunc)(JDEC*,uint8_t*,size_t), void* pool, size_t sz_pool, void* dev);
 JRESULT jd_decomp (JDEC* jd, int (*outfunc)(JDEC*,void*,JRECT*), uint8_t scale);
+/* Added for Mill: decode one MCU at (x, y), or read restart marker rstn; the caller sets
+   jd->scale and jd->dcv first, as jd_decomp does (src/core/jpeg.c) */
+JRESULT jd_mcu (JDEC* jd, int (*outfunc)(JDEC*,void*,JRECT*), unsigned int x, unsigned int y);
+JRESULT jd_restart (JDEC* jd, uint16_t rstn);
 
 
 #ifdef __cplusplus

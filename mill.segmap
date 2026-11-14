@@ -1,4 +1,34 @@
 SEGMENT Start
 *mac_start.c.obj
+*mac_init.c.obj
+SEGMENT Pages
+*mac_pages.c.obj
+SEGMENT HTTP
+*plug_http.c.obj
+*httpauth.c.obj
+SEGMENT HTTPS
+*plug_https.c.obj
+SEGMENT File
+*plug_file.c.obj
+SEGMENT Gopher
+*plug_gopher.c.obj
+SEGMENT FTP
+*plug_ftp.c.obj
+SEGMENT GIF
+*plug_gif.c.obj
+*gif.c.obj
+SEGMENT JPEG
+*plug_jpeg.c.obj
+*jpeg.c.obj
+*tjpgd.c.obj
+SEGMENT Netpbm
+*plug_pnm.c.obj
+*pnm.c.obj
+SEGMENT Gzip
+*plug_gzip.c.obj
+*inflate.c.obj
+SEGMENT Upload
+*mac_upload.c.obj
+*macenc.c.obj
 SEGMENT Mill
 *

@@ -12,6 +12,16 @@
 /* HTML font sizes 1..7 in points, Netscape's ladder */
 static const short SIZES[8] = { 9, 9, 10, 12, 14, 18, 24, 36 };
 
+/* A size or distance at the page's zoom (zn over 9), in whole pixels; one that's there stays at least 1 */
+static short zoom_px(short zn, long v)
+{
+    long r;
+    if (zn == 9 || v == 0) return (short)v;
+    r = (v * zn + (v < 0 ? -4 : 4)) / 9;
+    return (short)(r == 0 ? (v < 0 ? -1 : 1) : r);
+}
+#define ZS(S, v) zoom_px((S)->zn, (v))
+
 enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT };
 /* Measuring lays content out and throws it away: at width 0 (every break taken) for
    its narrowest, and unwrapped for its widest */
@@ -45,6 +55,9 @@ typedef struct {
     long y, top;            /* pen; top of the current box, where gaps collapse */
     short left, right;      /* current block margins */
     short x;                /* pen within the current line */
+    short zn;               /* zoom: distances are times zn over 9 */
+    short zt;               /* and text sizes times zt over 9 (zn is 9 when only the text is scaled) */
+    short lead;             /* a tab began the line: where its first text starts, from the margin */
     long line_first;        /* first run of the current line */
     long pending_gap;
     int space;              /* a collapsed space is waiting before the next word */
@@ -81,11 +94,15 @@ static int grow(void **p, long *cap, long need, long size)
     return 0;
 }
 
-static MStyle style_of(const Ctx *c)
+static MStyle style_of(const State *S, const Ctx *c)
 {
     MStyle s;
-    s.font = c->pre ? FONT_COURIER : c->font;
-    s.size = c->pre ? 10 : SIZES[c->size_index < 1 ? 1 : c->size_index > 7 ? 7 : c->size_index];
+    s.font = c->pre ? FONT_FIXED : c->font;
+    /* PRE is the fixed font at 10, or 9 when made smaller (FONT SIZE=1 or 2, SMALL): these are
+       steps on the size ladder from the fixed font's size setting, 10 by default (Courier
+       or Mill Mono there: 5 pixels a character, so 80 columns fit a Plus's full-width
+       window, as text files and gopher menus need) */
+    s.size = zoom_px(S->zt, c->pre ? (c->size_index < 3 ? 9 : 10) : SIZES[c->size_index < 1 ? 1 : c->size_index > 7 ? 7 : c->size_index]);
     s.face = c->face | (c->link ? FACE_UNDERLINE : 0) | (c->dark ? FACE_INVERSE : 0);
     return s;
 }
@@ -173,14 +190,14 @@ static void finish_line(State *S, int force, const Ctx *c)
     MLine *ln;
     if (count == 0 && !force) return;
     if (count == 0) {
-        MStyle s = style_of(c);
+        MStyle s = style_of(S, c);
         S->m->font_metrics(S->m->ctx, &s, &asc, &desc, &lead);
     }
     for (i = S->line_first; i < L->nruns; i++) {
         Run *r = &L->runs[i];
         short a, d, l;
         MStyle s;
-        if (r->kind == RUN_RULE) { if (asc < 4) asc = 4; if (desc < 4) desc = 4; continue; }
+        if (r->kind == RUN_RULE) { short m = ZS(S, 4), up = (r->size + 1) / 2, dn = r->size / 2; if (asc < m) asc = m; if (desc < m) desc = m; if (asc < up) asc = up; if (desc < dn) desc = dn; continue; }
         if (r->kind == RUN_IMAGE || r->kind == RUN_CONTROL) {
             if (r->font > asc) asc = r->font;
             if (r->size - r->font > desc) desc = r->size - r->font;
@@ -213,6 +230,7 @@ static void finish_line(State *S, int force, const Ctx *c)
     for (i = 0; i < S->nwait; i++) place_float(S, S->wait[i].node, &S->wait[i].c);
     S->nwait = 0;
     S->x = line_left(S);
+    S->lead = 0;
 }
 
 static void block_break(State *S, long gap, const Ctx *c)
@@ -225,7 +243,7 @@ static void block_break(State *S, long gap, const Ctx *c)
 static short gap_for(State *S, const Ctx *c)
 {
     short a, d, l;
-    MStyle s = style_of(c);
+    MStyle s = style_of(S, c);
     S->m->font_metrics(S->m->ctx, &s, &a, &d, &l);
     return (a + d + l) * 2 / 3;
 }
@@ -233,7 +251,7 @@ static short gap_for(State *S, const Ctx *c)
 /* A list marker hangs to the left of its item's first line */
 static void place_marker(State *S, const Ctx *c)
 {
-    MStyle s = style_of(c);
+    MStyle s = style_of(S, c);
     Run *r;
     long w;
     if (!S->marker_len) return;
@@ -242,7 +260,7 @@ static void place_marker(State *S, const Ctx *c)
     r->kind = RUN_GEN;
     r->text = add_gen(S, S->marker, S->marker_len);
     r->len = S->marker_len;
-    r->x = line_left(S) - (short)w - 6;
+    r->x = line_left(S) - (short)w - ZS(S, 6);
     r->width = (short)w;
     r->font = s.font; r->size = s.size; r->face = s.face & ~FACE_UNDERLINE;
     S->marker_len = 0;
@@ -265,10 +283,11 @@ static long make_room(State *S, const Ctx *c, long w)
             apply_gap(S);
             S->y = below;
         }
-        S->x = line_left(S);
+        S->x = line_left(S) + S->lead;
+        S->lead = 0;
     }
     if (S->space && S->x > line_left(S)) {
-        MStyle s = style_of(c);
+        MStyle s = style_of(S, c);
         sp = S->m->text_width(S->m->ctx, &s, " ", 1);
     }
     if (!c->pre && (S->space || S->brk) && S->x + sp + w > line_right(S) && S->x > line_left(S)) {
@@ -282,7 +301,7 @@ static long make_room(State *S, const Ctx *c, long w)
 /* Add one word (no spaces, unless pre) at the pen, wrapping first if it doesn't fit */
 static void add_word(State *S, const Ctx *c, int kind, long text, long len, const char *bytes)
 {
-    MStyle s = style_of(c);
+    MStyle s = style_of(S, c);
     long w = S->m->text_width(S->m->ctx, &s, bytes, len);
     long sp = make_room(S, c, w);
     Run *r;
@@ -293,8 +312,9 @@ static void add_word(State *S, const Ctx *c, int kind, long text, long len, cons
             ((sp && p->text + p->len + 1 == text && S->d->text[p->text + p->len] == ' ') || (!sp && p->text + p->len == text)) &&
             p->len + len + 1 < 30000) {
             p->len = (short)(text + len - p->text);
-            p->width += (short)(sp + w);
-            S->x += (short)(sp + w);
+            /* measured whole, as it will be drawn: a scaled font's widths add up differently word by word */
+            p->width = (short)S->m->text_width(S->m->ctx, &s, S->d->text + p->text, p->len);
+            S->x = p->x + p->width;
             S->space = S->brk = 0;
             reach(S);
             return;
@@ -324,7 +344,28 @@ static void flow_text(State *S, const Ctx *c, long off, long len)
         while (i < end) {
             long j = i;
             while (j < end && t[j] != '\n' && t[j] != '\r') j++;
-            if (j > i) add_word(S, c, RUN_TEXT, i, j - i, t + i);
+            /* a tab moves the pen to the next stop, every 8 spaces of the run's font from where the
+               line starts; no tab glyph is drawn (HTML 3.2) */
+            long a = i;
+            while (a < j) {
+                long b = a;
+                while (b < j && t[b] != '\t') b++;
+                if (b > a) add_word(S, c, RUN_TEXT, a, b - a, t + a);
+                if (b < j) {
+                    MStyle st = style_of(S, c);
+                    long tab = 8 * S->m->text_width(S->m->ctx, &st, " ", 1);
+                    if (tab < 1) tab = 1;
+                    long origin = line_left(S);
+                    long begun = S->L->nruns > S->line_first;
+                    long at = begun ? S->x : origin + S->lead;
+                    long next = origin + ((at - origin) / tab + 1) * tab;
+                    if (begun) S->x = (short)next;
+                    else S->lead = (short)(next - origin);      /* the line has no run yet: make_room places it */
+                    S->space = 0;
+                    reach(S);
+                }
+                a = b + 1;
+            }
             if (j < end) {
                 if (t[j] == '\r' && j + 1 < end && t[j + 1] == '\n') j++;
                 finish_line(S, 1, c);
@@ -345,26 +386,21 @@ static void flow_text(State *S, const Ctx *c, long off, long len)
 
 /* ------------------------------------------------------------ elements */
 
-static int font_from_face(const char *face)
+/* The first name in a FACE list that the System has, else the proportional font */
+static int font_from_face(const Metrics *m, const char *face)
 {
-    static const struct { const char *name; short font; } FAMILIES[] = {
-        { "helvetica", FONT_HELVETICA }, { "arial", FONT_HELVETICA }, { "geneva", FONT_GENEVA },
-        { "times", FONT_TIMES }, { "courier", FONT_COURIER }, { "monaco", FONT_MONACO },
-        { "chicago", FONT_CHICAGO }, { "new york", FONT_NEW_YORK }, { "palatino", FONT_PALATINO },
-    };
-    char word[32];
+    char word[40];
     const char *p = face;
     while (*p) {
-        int n = 0, k;
+        int n = 0, f;
         while (*p == ' ' || *p == ',') p++;
-        while (*p && *p != ',' && n < 31) { word[n++] = (*p >= 'A' && *p <= 'Z') ? *p + 32 : *p; p++; }
+        while (*p && *p != ',' && n < 39) word[n++] = *p++;
         while (n > 0 && word[n - 1] == ' ') n--;
         word[n] = 0;
-        for (k = 0; k < (int)(sizeof FAMILIES / sizeof FAMILIES[0]); k++)
-            if (!strcmp(word, FAMILIES[k].name)) return FAMILIES[k].font;
+        if (n && m->font_by_name && (f = m->font_by_name(m->ctx, word)) >= 0) return f;
         while (*p && *p != ',') p++;
     }
-    return -1;
+    return FONT_PROP;
 }
 
 static char align_attr(const char *v, char dflt)
@@ -402,6 +438,7 @@ static long flow_in(State *S, long node, const Ctx *c, short left, short right, 
     C.pending_gap = 0;
     C.line_first = S->L->nruns;
     C.space = C.brk = 0;
+    C.lead = 0;
     C.marker_len = 0;
     C.extent = 0;
     C.nfl = C.nwait = 0;
@@ -437,13 +474,16 @@ static void image_box(State *S, long node, const Ctx *c, short *total_w, short *
     const char *alt = html_attr(d, n, "alt"), *v;
     short w = -1, h = -1, nw = 0, nh = 0, a, de, l;
     int known = S->m->image_size && S->m->image_size(S->m->ctx, node, &nw, &nh);
-    MStyle s = style_of(c);
+    MStyle s = style_of(S, c);
 
     if ((v = html_attr(d, n, "width"))) {
         w = (short)atol(v);
         if (strchr(v, '%')) w = S->measure ? 1 : (short)((long)w * (S->right - S->left) / 100);
+        else w = ZS(S, w);
     }
-    if ((v = html_attr(d, n, "height")) && !strchr(v, '%')) h = (short)atol(v);
+    if ((v = html_attr(d, n, "height")) && !strchr(v, '%')) h = ZS(S, (short)atol(v));
+    nw = ZS(S, nw);             /* the picture is kept at its normal size, and drawn stretched */
+    nh = ZS(S, nh);
     if (known) {
         if (w < 0 && h < 0) { w = nw; h = nh; }
         else if (w < 0) w = nh ? (short)((long)nw * h / nh) : nw;
@@ -454,11 +494,11 @@ static void image_box(State *S, long node, const Ctx *c, short *total_w, short *
         /* not here yet and no size given: a frame around the placeholder icon (11 x 9)
            and the ALT text, or a small square */
         if (alt && *alt) {
-            if (w < 0) w = (short)S->m->text_width(S->m->ctx, &s, alt, strlen(alt)) + 8 + 14;
-            if (h < 0) h = a + de + 4 < 13 ? 13 : a + de + 4;
+            if (w < 0) w = (short)S->m->text_width(S->m->ctx, &s, alt, strlen(alt)) + ZS(S, 8 + 14);
+            if (h < 0) h = a + de + ZS(S, 4) < ZS(S, 13) ? ZS(S, 13) : a + de + ZS(S, 4);
         } else {
-            if (w < 0) w = 16;
-            if (h < 0) h = 16;
+            if (w < 0) w = ZS(S, 16);
+            if (h < 0) h = ZS(S, 16);
         }
     }
     if (w < 1) w = 1;
@@ -466,23 +506,24 @@ static void image_box(State *S, long node, const Ctx *c, short *total_w, short *
     v = html_attr(d, n, "border");
     *border = v ? (short)atol(v) : (c->link ? 1 : 0);
     if (*border < 0 || *border > 8) *border = 1;
+    *border = ZS(S, *border);
     *total_w = w + 2 * *border;
     *total_h = h + 2 * *border;
 }
 
-static short space_attr(const Doc *d, long node, const char *name)
+static short space_attr(const State *S, long node, const char *name)
 {
-    const char *v = html_attr(d, &d->nodes[node], name);
+    const char *v = html_attr(S->d, &S->d->nodes[node], name);
     short n = v ? (short)atol(v) : 0;
-    return n < 0 || n > 64 ? 0 : n;
+    return n < 0 || n > 64 ? 0 : ZS(S, n);
 }
 
 static void image(State *S, long node, const Ctx *c)
 {
     const Doc *d = S->d;
     const char *v = html_attr(d, &d->nodes[node], "align");
-    short border, hspace = space_attr(d, node, "hspace"), asc, a, de, l, total_w, total_h;
-    MStyle s = style_of(c);
+    short border, hspace = space_attr(S, node, "hspace"), asc, a, de, l, total_w, total_h;
+    MStyle s = style_of(S, c);
     long sp;
     Run *r;
 
@@ -526,7 +567,7 @@ static void place_float(State *S, long node, const Ctx *c)
     const Doc *d = S->d;
     const char *v = html_attr(d, &d->nodes[node], "align");
     int right = v && (v[0] | 32) == 'r', i, k;
-    short border, total_w, total_h, x, hspace = space_attr(d, node, "hspace"), vspace = space_attr(d, node, "vspace");
+    short border, total_w, total_h, x, hspace = space_attr(S, node, "hspace"), vspace = space_attr(S, node, "vspace");
     long y;
     Run *r;
     MLine *ln;
@@ -600,6 +641,7 @@ typedef struct {
     long node, tr;
     short row, col, cspan, rspan, min, max;
     long h;
+    short minh;                  /* HEIGHT in pixels (HTML 3.2 has it on a cell): its row is at least this tall */
     long lines, boxes, anchors;  /* where its content starts in the Layout's arrays */
     char dark, fill;             /* text white; and a fill: 0 none, 1 black, -1 white */
 } Cell;
@@ -695,7 +737,7 @@ static const char *cell_attr(const Doc *d, const Cell *cl, const char *name)
     return v ? v : html_attr(d, &d->nodes[cl->tr], name);
 }
 
-static void table_attrs(const Doc *d, const Node *n, short *border, short *pad, short *spacing)
+static void table_attrs(const State *S, const Doc *d, const Node *n, short *border, short *pad, short *spacing)
 {
     const char *v;
     *border = (v = html_attr(d, n, "border")) ? (*v ? (short)atoi(v) : 1) : 0;
@@ -704,6 +746,9 @@ static void table_attrs(const Doc *d, const Node *n, short *border, short *pad, 
     if (*border < 0 || *border > 16) *border = 1;
     if (*pad < 0 || *pad > 64) *pad = 1;
     if (*spacing < 0 || *spacing > 64) *spacing = 2;
+    *border = ZS(S, *border);
+    *pad = ZS(S, *pad);
+    *spacing = ZS(S, *spacing);
 }
 
 /* Spread a spanning cell's need over its columns */
@@ -735,6 +780,7 @@ static int build_grid(State *S, long node, const Ctx *c, Grid *g, short pad, sho
         cl->min = html_attr(d, cn, "nowrap") ? cl->max : measure(S, cl->node, &cc, MEASURE_MIN) + 2 * pad;
         if ((v = html_attr(d, cn, "width")) && cl->cspan == 1) {
             short w = (short)atoi(v);
+            if (!strchr(v, '%')) w = ZS(S, w);
             if (strchr(v, '%')) {
                 if (w > g->pct[cl->col]) g->pct[cl->col] = w;
             } else if (w > 0) {
@@ -827,8 +873,8 @@ static void table(State *S, long node, Ctx c)
     const char *v;
     int wpct = 0;
 
-    table_attrs(d, n, &border, &pad, &spacing);
-    if ((v = html_attr(d, n, "width"))) { wpx = (short)atoi(v); wpct = strchr(v, '%') != NULL; }
+    table_attrs(S, d, n, &border, &pad, &spacing);
+    if ((v = html_attr(d, n, "width"))) { wpct = strchr(v, '%') != NULL; wpx = (short)atoi(v); if (!wpct) wpx = ZS(S, wpx); }
     block_break(S, 0, &c);
 
     if (S->measure) {
@@ -909,6 +955,10 @@ static void table(State *S, long node, Ctx c)
         cl->boxes = L->nboxes;
         cl->anchors = L->nanchors;
         cl->h = flow_in(S, cl->node, &cc, g->cx[cl->col] + pad, g->cx[cl->col + cl->cspan] - spacing - pad, al, pad) + pad;
+        {
+            const char *hv = cell_attr(d, cl, "height");
+            cl->minh = hv && !strchr(hv, '%') && atoi(hv) > 0 ? ZS(S, atoi(hv) > 2000 ? 2000 : atoi(hv)) : 0;
+        }
     }
 
     rh = calloc(g->nrows + 1, sizeof(long));
@@ -916,14 +966,15 @@ static void table(State *S, long node, Ctx c)
     if (!rh || !ry) { free(rh); free(ry); free(g->cells); free(g); S->oom = 1; return; }
     for (i = 0; i < g->ncells; i++) {
         Cell *cl = &g->cells[i];
-        if (cl->rspan == 1 && cl->h > rh[cl->row]) rh[cl->row] = cl->h;
+        long ch = cl->h > cl->minh ? cl->h : cl->minh;
+        if (cl->rspan == 1 && ch > rh[cl->row]) rh[cl->row] = ch;
     }
     for (i = 0; i < g->ncells; i++) {
         Cell *cl = &g->cells[i];
-        long have = (cl->rspan - 1) * spacing;
+        long have = (cl->rspan - 1) * spacing, ch = cl->h > cl->minh ? cl->h : cl->minh;
         if (cl->rspan == 1) continue;
         for (r = cl->row; r < cl->row + cl->rspan; r++) have += rh[r];
-        if (cl->h > have) rh[cl->row + cl->rspan - 1] += cl->h - have;
+        if (ch > have) rh[cl->row + cl->rspan - 1] += ch - have;
     }
     ty = S->y;
     ry[0] = ty + border + spacing;
@@ -996,7 +1047,7 @@ static void walk(State *S, long node, Ctx c)
     case TAG_B: case TAG_STRONG: c.face |= FACE_BOLD; break;
     case TAG_I: case TAG_EM: case TAG_CITE: case TAG_VAR: case TAG_DFN: c.face |= FACE_ITALIC; break;
     case TAG_U: c.face |= FACE_UNDERLINE; break;
-    case TAG_TT: case TAG_CODE: case TAG_KBD: case TAG_SAMP: c.font = FONT_COURIER; break;
+    case TAG_TT: case TAG_CODE: case TAG_KBD: case TAG_SAMP: c.font = FONT_FIXED; break;
     case TAG_BIG: c.size_index++; break;
     case TAG_SMALL: case TAG_SUB: case TAG_SUP: c.size_index--; break;
     case TAG_FONT:
@@ -1004,7 +1055,7 @@ static void walk(State *S, long node, Ctx c)
             int rel = (v[0] == '+' || v[0] == '-'), num = atoi(v[0] == '+' ? v + 1 : v);
             c.size_index = rel ? 3 + num : num;
         }
-        if ((v = html_attr(d, n, "face"))) { int f = font_from_face(v); if (f >= 0) c.font = (short)f; }
+        if ((v = html_attr(d, n, "face"))) c.font = (short)font_from_face(S->m, v);
         break;
     case TAG_A:
         if (S->measure) break;  /* measuring: nothing to record */
@@ -1038,9 +1089,24 @@ static void walk(State *S, long node, Ctx c)
         {
             Run *r;
             if (S->L->nruns == S->line_first && (r = add_run(S))) {
+                /* HTML 3.2: SIZE is the thickness in pixels (2), WIDTH pixels or a percent of the line (all of
+                   it), ALIGN left, center (when narrower than the line), or right, NOSHADE a solid bar.
+                   size is the thickness, face 1 for NOSHADE. */
+                short full = line_right(S) - line_left(S), w = full, thick = 2, off;
+                const char *v;
+                char al = ALIGN_CENTER;
+                if ((v = html_attr(d, n, "size")) && atoi(v) > 0) thick = (short)(atoi(v) > 200 ? 200 : atoi(v));
+                if ((v = html_attr(d, n, "width")) && atoi(v) > 0) {
+                    w = strchr(v, '%') ? (short)((long)full * (atoi(v) > 100 ? 100 : atoi(v)) / 100) : ZS(S, atoi(v));
+                    if (w > full) w = full;
+                }
+                al = align_attr(html_attr(d, n, "align"), ALIGN_CENTER);
+                off = al == ALIGN_LEFT ? 0 : al == ALIGN_RIGHT ? full - w : (full - w) / 2;
                 r->kind = RUN_RULE;
-                r->x = line_left(S);
-                r->width = S->measure ? 0 : line_right(S) - line_left(S);
+                r->x = line_left(S) + off;
+                r->width = S->measure ? 0 : w;
+                r->size = ZS(S, thick);
+                r->face = html_attr(d, n, "noshade") ? 1 : 0;
                 finish_line(S, 1, &c);
             }
         }
@@ -1070,8 +1136,8 @@ static void walk(State *S, long node, Ctx c)
     case TAG_BLOCKQUOTE:
         block = 1;
         block_break(S, gap_for(S, &c), &c);
-        S->left += INDENT;
-        S->right -= INDENT;
+        S->left += ZS(S, INDENT);
+        S->right -= ZS(S, INDENT);
         break;
     case TAG_PRE:
         block = 1;
@@ -1085,7 +1151,7 @@ static void walk(State *S, long node, Ctx c)
             if (d->nodes[p].tag == TAG_UL || d->nodes[p].tag == TAG_OL || d->nodes[p].tag == TAG_DL) nested = 1;
         block = 1;
         block_break(S, nested ? 0 : gap_for(S, &c), &c);
-        if (n->tag != TAG_DL) S->left += INDENT;
+        if (n->tag != TAG_DL) S->left += ZS(S, INDENT);
         if (n->tag == TAG_OL) {
             long k, num = (v = html_attr(d, n, "start")) ? atol(v) : 1;
             for (k = n->first; k >= 0 && !S->oom; k = d->nodes[k].next) {
@@ -1120,7 +1186,7 @@ static void walk(State *S, long node, Ctx c)
         break;
     case TAG_DD:
         block_break(S, 0, &c);
-        S->left += INDENT;
+        S->left += ZS(S, INDENT);
         block = 1;
         break;
     case TAG_TABLE:
@@ -1191,11 +1257,13 @@ int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width)
     memset(&S, 0, sizeof S);
     memset(&sh, 0, sizeof sh);
     S.L = L; S.d = d; S.m = m; S.sh = &sh;
-    S.left = S.x = MARGIN;
-    S.right = width - MARGIN;
-    S.y = S.top = MARGIN;
+    S.zt = m->zoom > 9 ? m->zoom : 9;
+    S.zn = m->text_only ? 9 : S.zt;
+    S.left = S.x = ZS(&S, MARGIN);
+    S.right = width - ZS(&S, MARGIN);
+    S.y = S.top = ZS(&S, MARGIN);
     memset(&c, 0, sizeof c);
-    c.font = FONT_TIMES;
+    c.font = FONT_PROP;
     c.size_index = 3;
     L->width = width;
     walk(&S, 0, c);
@@ -1204,7 +1272,7 @@ int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width)
     L->height = S.y;
     for (i = 0; i < L->nlines; i++)
         if (L->lines[i].y + L->lines[i].height > L->height) L->height = L->lines[i].y + L->lines[i].height;
-    L->height += MARGIN;
+    L->height += ZS(&S, MARGIN);
     if (L->nlines) qsort(L->lines, L->nlines, sizeof(MLine), by_y);
     fit((void **)&L->lines, &L->cap_lines, L->nlines, sizeof(MLine));
     fit((void **)&L->runs, &L->cap_runs, L->nruns, sizeof(Run));

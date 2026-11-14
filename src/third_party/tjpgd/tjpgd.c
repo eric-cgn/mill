@@ -1151,3 +1151,25 @@ JRESULT jd_decomp (
 
 	return rc;
 }
+
+
+/*-----------------------------------------------------------------------*/
+/* Added for Mill: one MCU at a time, and a restart marker, so the caller */
+/* can decode as data arrives (src/core/jpeg.c)                          */
+/*-----------------------------------------------------------------------*/
+
+JRESULT jd_mcu (
+	JDEC* jd,
+	int (*outfunc)(JDEC*, void*, JRECT*),
+	unsigned int x,
+	unsigned int y
+)
+{
+	JRESULT rc = mcu_load(jd);
+	return rc != JDR_OK ? rc : mcu_output(jd, outfunc, x, y);
+}
+
+JRESULT jd_restart (JDEC* jd, uint16_t rstn)
+{
+	return restart(jd, rstn);
+}

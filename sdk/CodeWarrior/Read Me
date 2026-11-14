@@ -1,0 +1,28 @@
+Finger for CodeWarrior
+
+Tested with CodeWarrior Gold 4 (MW C/C++ 68K 1.1) on System 7.6.1.
+
+Finger.π is the project. Open it and choose Make from the Project menu.
+This makes Finger, the Plug-In, next to the project. Put it in Mill's
+"Mill Plug-Ins" folder.
+KIT-BEGIN-REPO-ONLY
+(In git and the .zip the project is a MacBinary file, Finger.π.bin; the disk
+image has it as it is.)
+KIT-END-REPO-ONLY
+
+The project's settings, to make one from scratch or for a later
+CodeWarrior:
+- Files: Finger.c, MillGlue.c, MacOS.lib, and ANSI (2i) C.A4.68K.Lib
+  (for strlen; a code resource takes the A4 libraries).
+- Access Paths: the SDK folder ("::" from here), so MillPlugIn.h is found.
+- Processor: 2-byte ints, 68K alignment.
+- Linker: Link Single Segment.
+- Project: Code Resource; File Name Finger; Resource Name Finger;
+  Header Type Standard; ResType MPlg; ResID 128; Creator MiLL; Type MPlg.
+
+The Standard header starts with a branch to main, so byte 0 is the entry.
+The glue names its entry main for CodeWarrior and sets up A4 for globals.
+CodeWarrior writes the 'MPlg' resource itself.
+
+For a Plug-In of your own, copy Finger.π, then remove Finger.c and add
+your own files.

@@ -53,21 +53,34 @@ char *forms_save(const Forms *F, const Doc *d);
    all still match (the page may have changed since); others are left as they are. */
 void forms_restore(Forms *F, const Doc *d, const char *state);
 
+/* One part of a multipart/form-data body: a field's name and text, as they're sent;
+   or, for a file, its field's name and the file's Mac path ("Disk:Folder:File") */
 typedef struct {
-    char *data;         /* the query string (GET) or the request body (POST) */
+    char *name, *value;
+    int file;
+} FormPart;
+
+typedef struct {
+    char *data;         /* the query string (GET) or the request body (POST); "" for multipart */
     long len;
     int post, multipart;
     char boundary[40];
     const char *action; /* FORM ACTION as written ("" for the page itself) */
+    FormPart *parts;    /* multipart: its parts, whose bytes are made as they're sent */
+    int nparts;
 } Submission;
 
-/* Reads a file chosen for upload: returns its length and a malloc'd copy, or -1 */
-typedef long (*file_reader)(void *ctx, const char *path, char **data);
-
 /* What submitting the form sends, by the field that submitted it (a submit button or an
-   image, at x,y), or -1 for Return in a text field. Text is sent as ISO 8859-1. */
-int forms_submit(const Forms *F, const Doc *d, long form, long by, short x, short y,
-                 file_reader read_file, void *ctx, Submission *out);
+   image, at x,y), or -1 for Return in a text field. Text is sent as ISO 8859-1. Files
+   aren't read: a multipart body is its parts (form_part_head). */
+int forms_submit(const Forms *F, const Doc *d, long form, long by, short x, short y, Submission *out);
+
+/* A part's head in the body: its boundary line and headers, and the blank line. For a
+   file, filename and type are as it's sent (with .bin, application/macbinary...); for
+   a field, NULL. Its length, or -1 if it won't fit. The part's contents follow, then
+   CR LF; after the last part, form_end. */
+long form_part_head(const Submission *s, const FormPart *p, const char *filename, const char *type, char *out, long size);
+long form_end(const Submission *s, char *out, long size);
 void submission_free(Submission *s);
 
 #endif

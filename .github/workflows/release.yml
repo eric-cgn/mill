@@ -1,5 +1,6 @@
 # Every push to main: if src/version.h names a version with no release yet, build Mill,
-# tag the commit vX.Y.Z, make a GitHub release with its .hqx, .bin, and .dsk, and
+# tag the commit vX.Y.Z, make a GitHub release with its .hqx, .bin, and .dsk (and the
+# Plug-In SDK's .dsk and .zip), and
 # rebuild the download site (mill.1in1e6.com) from every release. A push that keeps the
 # version does nothing. Run it by hand to rebuild the site alone.
 name: Release
@@ -44,6 +45,9 @@ jobs:
       - name: Release files
         if: steps.version.outputs.new == 'yes'
         run: python3 tools/release.py
+      - name: Plug-In SDK
+        if: steps.version.outputs.new == 'yes'
+        run: ./build.sh kit
       - name: Release
         if: steps.version.outputs.new == 'yes'
         env:

@@ -2,7 +2,7 @@
 '''Mill's download site (mill.1in1e6.com), plain HTML 3.2 for classic Macs, built from
 the release files in <site>/download (Mill-VERSION.hqx, .bin, .dsk) and src/changes.html.
 Only the newest few releases are listed (SHOWN).
-python3 tools/site.py site <site dir>     writes <site dir>/index.html, latest.txt, and icon.gif
+python3 tools/site.py site <site dir>     writes <site dir>/index.html, changes.html, latest.txt, and icon.gif
 python3 tools/site.py notes VERSION       prints a version's change log entries as text'''
 
 import html, os, re, shutil, sys
@@ -62,12 +62,15 @@ def site(out):
         if len(rel) > 1:
             p.append('<H2>Earlier versions</H2>')
             p.append('<UL>' + ''.join('<LI>%s: %s' % (v, ', '.join(links(v, f))) for v, f in rel[1:]) + '</UL>')
+    p.append('<P><A HREF="changes.html">Change log</A>')
     p.append('<HR><P>Source code: github.com/eric-cgn/mill')
     p.append('</BODY></HTML>')
     open(os.path.join(out, 'index.html'), 'w', encoding='latin-1').write('\n'.join(p) + '\n')
     if rel:
         latest(out, rel[0][0])
     shutil.copy(os.path.join(here, '..', 'art', 'icon.gif'), out)
+    # the change log, which Mill's About page links to: src/changes.html as it is
+    shutil.copy(os.path.join(here, '..', 'src', 'changes.html'), os.path.join(out, 'changes.html'))
 
 
 def latest(out, v):
