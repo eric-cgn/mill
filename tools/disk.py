@@ -163,6 +163,44 @@ def custom_icon_flag(image):
     sys.exit('the disk image has no root folder record')
 
 
+# Where the Finder shows the disk's icons (top, left, in the window) and the window (global rect):
+# Mill in the top left, the folders one row down from the next column, as an application folder
+# usually is
+PLACES = {'Mill': (12, 24), 'Mill Plug-Ins': (78, 104), 'Mill Plug-In SDK': (78, 194)}
+WINDOW = (70, 40, 230, 340)
+
+
+def place_icons(image):
+    """Give the root's items their places (and set "inited", so the Finder keeps them), and the
+    disk's window its size: hfsutils can't write these Finder fields"""
+    d = bytearray(open(image, 'rb').read())
+    blk, start = struct.unpack('>IH', d[1024 + 20:1024 + 24] + d[1024 + 28:1024 + 30])
+    first, count = struct.unpack('>HH', d[1024 + 150:1024 + 154])
+    cat = start * 512 + first * blk
+    placed = set()
+    for node in range(count * blk // 512):
+        n = cat + node * 512
+        if d[n + 8] != 0xFF:
+            continue
+        for rec in range(struct.unpack('>H', d[n + 10:n + 12])[0]):
+            off = struct.unpack('>H', d[n + 510 - 2 * rec:n + 512 - 2 * rec])[0]
+            klen = d[n + off]
+            parent = struct.unpack('>I', d[n + off + 2:n + off + 6])[0]
+            name = bytes(d[n + off + 7:n + off + 7 + d[n + off + 6]]).decode('mac_roman')
+            body = n + off + 1 + klen + (1 + klen) % 2
+            if parent == 1 and d[body] == 1:                        # the root folder: its window
+                d[body + 22:body + 30] = struct.pack('>4h', *WINDOW)
+            elif parent == 2 and name in PLACES and d[body] in (1, 2):
+                at = body + 14 if d[body] == 2 else body + 32         # fdLocation, or a folder's frLocation
+                fl = body + 12 if d[body] == 2 else body + 30         # fdFlags, frFlags
+                d[at:at + 4] = struct.pack('>2h', *PLACES[name])
+                d[fl:fl + 2] = struct.pack('>H', struct.unpack('>H', d[fl:fl + 2])[0] | 0x0100)
+                placed.add(name)
+    if placed != set(PLACES):
+        sys.exit('the disk image has no %s' % ', '.join(sorted(set(PLACES) - placed)))
+    open(image, 'wb').write(d)
+
+
 def disk_copy(raw, name):
     """A Disk Copy 4.2 image of an 800K raw disk: an 84-byte header (name, sizes, and the data
     and tag checksums), then the disk's 819200 bytes; no tags (their size and checksum are 0)"""
@@ -229,6 +267,7 @@ def main():
     finally:
         kit.hfs('humount')
     custom_icon_flag(out)
+    place_icons(out)
     open(image, 'wb').write(disk_copy(open(out, 'rb').read(), 'Mill'))
     print('%s' % image)
     print('%-42s %9s' % ('item', 'bytes'))
