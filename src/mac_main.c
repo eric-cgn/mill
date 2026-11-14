@@ -991,9 +991,6 @@ static void draw_popup(const Field *f, const Rect *box)
     for (i = 0; i < f->noptions; i++) if (f->selected[i]) { forms_option_label(&br->doc, f->options[i], label, sizeof label); break; }
     EraseRect(box);
     FrameRect(box);
-    MoveTo(box->left + 1, box->bottom);   /* a pop-up menu's shadow */
-    LineTo(box->right, box->bottom);
-    LineTo(box->right, box->top + 1);
     in.right -= CD(14);
     {
         RgnHandle save = clip_to(&in);
@@ -3587,7 +3584,7 @@ static void item_rect(DialogPtr d, short item, Rect *r)
     GetDialogItem(d, item, &type, &h, r);
 }
 
-/* The slot as a pop-up menu: a box with a shadow, as System 7 draws them */
+/* The slot as a pop-up menu: a box and the arrow, like the pop-ups on pages */
 static pascal void draw_slot(DialogPtr d, short item)
 {
     Rect r;
@@ -3597,12 +3594,22 @@ static pascal void draw_slot(DialogPtr d, short item)
     r.bottom -= 1;
     EraseRect(&r);
     FrameRect(&r);
-    MoveTo(r.left + 2, r.bottom);
-    LineTo(r.right, r.bottom);
-    LineTo(r.right, r.top + 2);
+    {
+        short i, x = r.right - 12;
+        for (i = 0; i < 4; i++) { MoveTo(x - (3 - i), r.top + 6 + i); LineTo(x + (3 - i), r.top + 6 + i); }
+    }
     slot_text(bd_slot, s);
-    MoveTo(r.left + 6, r.bottom - 5);
-    DrawString(s);
+    {
+        RgnHandle save = NewRgn();
+        Rect in = r;
+        in.right -= 18;
+        GetClip(save);
+        ClipRect(&in);
+        MoveTo(r.left + 6, r.bottom - 5);
+        DrawString(s);
+        SetClip(save);
+        DisposeRgn(save);
+    }
 }
 
 /* The ring around OK that says Return presses it */

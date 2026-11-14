@@ -211,7 +211,8 @@ static void finish_line(State *S, int force, const Ctx *c)
         if (r->kind == RUN_RULE) { short m = ZS(S, 4), up = (r->size + 1) / 2, dn = r->size / 2; if (asc < m) asc = m; if (desc < m) desc = m; if (asc < up) asc = up; if (desc < dn) desc = dn; continue; }
         if (r->kind == RUN_IMAGE || r->kind == RUN_CONTROL) {
             if (r->font > asc) asc = r->font;
-            if (r->size - r->font > desc) desc = r->size - r->font;
+            /* a control keeps a pixel of white below it, so the next line doesn't touch it */
+            if (r->size - r->font + (r->kind == RUN_CONTROL) > desc) desc = r->size - r->font + (r->kind == RUN_CONTROL);
             continue;
         }
         s.font = r->font; s.size = r->size; s.face = r->kind == RUN_MARK ? 0 : r->face;
