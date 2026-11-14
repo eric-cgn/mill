@@ -320,16 +320,18 @@ static void license_section(Out *o, const char *name, short ref)
    and for Web Fonts, from the license each carries */
 static void license_page(Out *o)
 {
-    short i;
+    short i, was = CurResFile();
     head(o, 200, HTML_MAC);
+    UseResFile(LMGetCurApRefNum());     /* Mill's own: a font file above it has a TEXT 128 too */
     if (!license_text(o, LICENSE_ID_MILL, 0)) { out_s(o, "<TITLE>Licenses</TITLE><H2>Licenses</H2>"); }
+    UseResFile(was);
     out_s(o, "<HR><H2>Plug-In files</H2>");
     for (i = 0; i < nplugs && !o->stopped; i++) {
         const Plug *p = &plugs[i];
         short ref;
         if (p->builtin) continue;
         ref = file_open_res(&p->spec, fsRdPerm);
-        license_section(o, p->name ? p->name : p->file, ref == -1 ? 0 : ref);
+        license_section(o, p->file, ref == -1 ? 0 : ref);   /* the name in the Finder */
         if (ref != -1) CloseResFile(ref);
     }
     for (i = 0; i < npack_files && !o->stopped; i++) license_section(o, pack_files[i].file, pack_files[i].ref);
