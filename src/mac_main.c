@@ -2633,6 +2633,40 @@ static long fetch_for_page(const char *url, char *buf, long size, char *why, int
 static Boolean coming_back;     /* load: Back or Forward, so the page's forms come back too */
 static Boolean forms_kept;      /* load: the page being left has had its forms kept already */
 
+/* The length of an address without its #fragment */
+static size_t doc_part(const char *url)
+{
+    const char *h = strchr(url, '#');
+    return h ? (size_t)(h - url) : strlen(url);
+}
+
+/* A link to a #name on the page already shown, or Back and Forward between two places on it:
+   the page is only scrolled, not asked for again */
+static Boolean same_page(const char *url, Boolean record, const char *from)
+{
+    const char *frag = strchr(url, '#');
+    size_t n = doc_part(url);
+    long i;
+    if (!br->have_page || strncmp(url, VIEW_SOURCE, strlen(VIEW_SOURCE)) == 0 || n != doc_part(br->page_url) ||
+        strncmp(url, br->page_url, n) != 0 || (record && !frag) || strlen(url) >= sizeof br->page_url)
+        return false;
+    coming_back = false;
+    forms_kept = false;     /* the page's fields stay as they are */
+    blur();
+    br->scroll_y = 0;
+    if (frag && frag[1]) {
+        for (i = 0; i < br->lay.nanchors; i++)
+            if (!strcmp(br->lay.anchors[i].name, frag + 1)) { br->scroll_y = br->lay.anchors[i].y; break; }
+        if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
+    }
+    strcpy(br->page_url, url);
+    show_url(url);
+    if (record) remember(url, from ? from : "");
+    update_scroll();
+    redraw();
+    return true;
+}
+
 static Boolean load(const char *url, Boolean record, const char *from, const char *content_type, Body *body)
 {
     /* view-source:address shows what address sends, as text */
@@ -2649,6 +2683,7 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     Boolean back = coming_back;
     Plug *making;   /* the Plug-In for the address, kept loaded from asking to showing */
 
+    if (!body && same_page(url, record, from)) return true;
     coming_back = false;
     blur();
     snprintf(referrer, sizeof referrer, "%s", from ? from : "");  /* from may be this window's page_url */
