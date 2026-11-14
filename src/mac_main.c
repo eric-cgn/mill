@@ -28,7 +28,7 @@
 
 enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
 enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_PAGE_SETUP = 6, FILE_PRINT, FILE_QUIT = 9 };
-enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_PREFERENCES = 7 };
+enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_PREFERENCES = 8 };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME, GO_STOP = 6 };
 enum { VIEW_LARGER = 1, VIEW_SMALLER, VIEW_PAGE_SOURCE = 4 };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
@@ -3778,6 +3778,8 @@ static void refresh_menus(void)
         if (br || da) EnableItem(file, FILE_CLOSE); else DisableItem(file, FILE_CLOSE);
         if (br && br->have_page) EnableItem(file, FILE_PRINT); else DisableItem(file, FILE_PRINT);
         for (i = EDIT_CUT; i <= EDIT_PASTE; i++) if (br || da) EnableItem(edit, i); else DisableItem(edit, i);
+        /* Select All: the address or the field being typed in (a password's text has no selection) */
+        if (br && !da && !(br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_PASSWORD)) EnableItem(edit, EDIT_SELECT_ALL); else DisableItem(edit, EDIT_SELECT_ALL);
         MenuHandle view = GetMenuHandle(MENU_VIEW);
         for (i = GO_BACK; i <= GO_RELOAD; i++) if (br) EnableItem(nav, i); else DisableItem(nav, i);
         if (br && br->loading) EnableItem(nav, GO_STOP); else DisableItem(nav, GO_STOP);
@@ -3843,6 +3845,13 @@ static void do_menu(long choice)
             if (item == EDIT_CUT) TECut(typing_te());
             if (item == EDIT_COPY) TECopy(typing_te());
             if (item == EDIT_PASTE) TEPaste(typing_te());
+            if (item == EDIT_SELECT_ALL && !(br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_PASSWORD)) {
+                if (br->focus >= 0) {
+                    RgnHandle save = clip_to(&br->focus_clip);
+                    TESetSelect(0, 32767, br->field_te);
+                    unclip(save);
+                } else TESetSelect(0, 32767, br->url_te);
+            }
         }
     } else if (menu == MENU_BOOKMARKS) {
         if (item == BM_ADD) { if (br) bookmark_dialog(-1); }
@@ -4128,7 +4137,7 @@ static void setup_menus(void)
     AppendMenu(m, "\pNew Window/N;Open Location.../L;Open File.../O;Close/W;(-;Page Setup...;Print.../P;(-;Quit/Q");
     InsertMenu(m, 0);
     m = NewMenu(MENU_EDIT, "\pEdit");
-    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;(-;Preferences...");
+    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;(-;Preferences...");
     InsertMenu(m, 0);
     m = NewMenu(MENU_VIEW, "\pView");
     AppendMenu(m, "\pLarger Text/+;Smaller Text/-;(-;Page Source");
