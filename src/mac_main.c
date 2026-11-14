@@ -1090,15 +1090,56 @@ static void draw_control(const Run *r, short top)
 
 /* ------------------------------------------------------------ the page view */
 
-/* A list bullet: a disc, a circle, or a square about half the text's size, above the baseline */
+/* Bullets: a disc d wide (d odd, so there is a middle pixel) is drawn from these row widths, made to look round in
+   1 bit; larger ones are worked out. A ring is the disc's outline, one pixel thick and joined at the diagonals. */
+static const unsigned char DISC_ROWS[7][13] = {
+    { 1, 3, 1 },
+    { 3, 5, 5, 5, 3 },
+    { 3, 5, 7, 7, 7, 5, 3 },
+    { 3, 7, 7, 9, 9, 9, 7, 7, 3 },
+    { 5, 9, 9, 11, 11, 11, 11, 11, 9, 9, 5 },
+    { 5, 9, 11, 11, 13, 13, 13, 13, 13, 11, 11, 9, 5 }
+};
+
+static Boolean in_disc(short x, short y, short d)
+{
+    if (x < 0 || y < 0 || x >= d || y >= d) return false;
+    if (d <= 13) {
+        short w = DISC_ROWS[(d - 3) / 2][y], from = (d - w) / 2;
+        return x >= from && x < from + w;
+    } else {
+        long dx = 2L * x - (d - 1), dy = 2L * y - (d - 1);
+        return dx * dx + dy * dy <= (long)d * d - d;
+    }
+}
+
+static Boolean in_ring(short x, short y, short d)
+{
+    short dx, dy;
+    if (!in_disc(x, y, d)) return false;
+    for (dx = -1; dx <= 1; dx++)
+        for (dy = -1; dy <= 1; dy++)
+            if ((d >= 5 || !dx || !dy) && !in_disc(x + dx, y + dy, d)) return true;   /* a corner counts too: no gaps in the ring */
+    return false;
+}
+
+/* A list bullet, drawn here (the font's is oval): a disc, a ring, or a square, r->width wide, its middle on
+   the middle of the text's x-height */
 static void draw_mark(const Run *r, short base)
 {
+    short d = r->width, x, y, left = PAGE_LEFT + r->x, top = base - (r->size * 23 + 50) / 100 - d / 2;
     Rect m;
-    short top = base - r->width * 2 / 3 - r->width / 2;
-    SetRect(&m, PAGE_LEFT + r->x, top, PAGE_LEFT + r->x + r->width, top + r->width);
-    if (r->face == MARK_SQUARE) { InsetRect(&m, 1, 1); PaintRect(&m); }
-    else if (r->face == MARK_CIRCLE) FrameOval(&m);
-    else PaintOval(&m);
+    if (r->face == MARK_SQUARE) {
+        SetRect(&m, left, top, left + d, top + d);
+        PaintRect(&m);
+        return;
+    }
+    for (y = 0; y < d; y++)
+        for (x = 0; x < d; x++) {
+            if (r->face == MARK_CIRCLE ? !in_ring(x, y, d) : !in_disc(x, y, d)) continue;
+            SetRect(&m, left + x, top + y, left + x + 1, top + y + 1);
+            PaintRect(&m);
+        }
 }
 
 static void draw_picture(const Run *r, short top)

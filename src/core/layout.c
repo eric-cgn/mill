@@ -270,11 +270,13 @@ static void place_marker(State *S, const Ctx *c)
     long w;
     if (!S->marker_len) return;
     if (S->marker_shape) {
-        short dm = (s.size + 1) / 2;
-        if (dm < 4) dm = 4;
+        /* about a third of the text's size, an odd number of pixels (a pixel in the middle), 3 at least, in a column where
+           a bullet character stood; all three shapes the same width */
+        short bw = (short)S->m->text_width(S->m->ctx, &s, "\245", 1), dm = (short)(2 * (((s.size * 36 - 100) / 2 + 50) / 100) + 1);
+        if (dm < 3) dm = 3;
         if (!(r = add_run(S))) return;
         r->kind = RUN_MARK;
-        r->x = line_left(S) - dm - ZS(S, 6);
+        r->x = line_left(S) - bw - ZS(S, 6) + (bw - dm) / 2;
         r->width = dm;
         r->font = s.font; r->size = s.size;
         r->face = (unsigned char)(S->marker_shape - 1);
