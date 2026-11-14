@@ -443,26 +443,35 @@ static void time_page(Inet *me, const char *title)
     put(me, "</H2>\n");
 }
 
-/* The Map control panel's time zone: the System keeps it in parameter RAM, as ReadLocation
-   reads it (ReadXPRam, 12 bytes at $E4: latitude, longitude, then a flags byte and gmtDelta,
-   seconds east of UTC in 24 bits). Returns the seconds east, DST included; *set is 0 when the
-   whole location is zero, which is how it is before the Map has been used (UTC). */
+/* The Map control panel's time zone, as ReadLocation reads it. Retro68 has no ReadLocation, and
+   Inside Macintosh gives it as the trap words 205F 203C 000C 00E4 A051: ReadXPRam, 12 bytes at
+   offset $E4 of extended parameter RAM, into a MachineLocation: latitude and longitude (Fract,
+   4 bytes each), then a long that is both dlsDelta (its top byte; bit 7 set when Date & Time has
+   daylight saving time on) and gmtDelta (its low 3 bytes: a signed number of seconds east of GMT).
+   gmtDelta is already the current offset, daylight saving time or not (Apple Q&A OPS 24), so
+   the dlsDelta byte is not added. Returns the seconds east of UTC; *set is 0 when latitude,
+   longitude, and gmtDelta are all zero, which is how Inside Macintosh says it is before the
+   Map has been used (UTC). The registers are loaded inside the asm: values put in them before it
+   do not survive the code the compiler puts between. */
 static long map_offset(short *set)
 {
     unsigned char loc[12];
-    register long d0 __asm__("d0") = (12L << 16) | 0xE4;
-    register void *a0 __asm__("a0") = loc;
-    long delta, i, any = 0;
+    long delta, i, any = 0, err;
     *set = 0;
     /* ReadXPRam, if this System has it (an unimplemented trap points where an unused one does) */
     if (GetTrapAddress(0xA051) == GetTrapAddress(0xA89F)) return 0;
-    __asm__ volatile (".short 0xA051" : "+d"(d0), "+a"(a0) : : "d1", "d2", "a1", "cc", "memory");
-    if (d0 != 0) return 0;
-    for (i = 0; i < 12; i++) if (i != 8) any |= loc[i];     /* latitude, longitude, and gmtDelta (not the DST byte) */
+    for (i = 0; i < 12; i++) loc[i] = 0;
+    __asm__ volatile (
+        "move.l %1,%%a0\n\t"
+        "move.l #0x000C00E4,%%d0\n\t"
+        ".short 0xA051\n\t"
+        "move.l %%d0,%0"
+        : "=r"(err) : "g"(loc) : "d0", "d1", "d2", "a0", "a1", "cc", "memory");
+    if ((short)err != 0) return 0;
+    for (i = 0; i < 12; i++) if (i != 8) any |= loc[i];     /* latitude, longitude, and gmtDelta (not the dlsDelta byte) */
     *set = any != 0;
     delta = ((long)loc[9] << 16) | ((long)loc[10] << 8) | loc[11];
     if (delta & 0x800000L) delta -= 0x1000000L;
-    if (loc[8] & 0x80) delta += 3600L;      /* daylight saving time is on */
     return delta;
 }
 
