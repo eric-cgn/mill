@@ -294,13 +294,12 @@ def about_text(cfg, fonts, a):
     '''What the suitcase is, and what each family comes from'''
     lines = ['%s %s' % (cfg['name'], cfg['version']), '',
              'Optional fonts for Mill, the web browser. Put this file in the "Mill Plug-Ins" folder',
-             'beside Mill, then choose its fonts in Mill\'s Settings, General. Mill runs the same',
-             'without it.', '']
+             'beside Mill. Mill uses them for sizes the System lacks, and lists them in Settings.', '']
     for f in fonts:
         sizes = ', '.join(str(z) for z in f['sizes'])
         real = [STYLE_NAMES[k] for k in sorted(f.get('styles', {})) if a.styles]
         lines += ['%s (%s point; regular%s):' % (f['family'], sizes, ''.join(', ' + r for r in real)), '  ' + f['from'] + '.']
-    lines += ['', '%s is made by Mill\'s tools/extras; its names are Mill\'s own, not the designs\'.' % cfg['name'], '',
+    lines += ['', 'The font names are Mill\'s own, not the designs\'.', '',
               'The fonts keep the license they came under, which requires its copyright notices and',
               'permission notice to stay with every copy: resource TXGZ 129 "License" of this file,',
               'shown on Mill\'s license page. In short:']

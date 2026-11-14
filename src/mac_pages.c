@@ -498,64 +498,157 @@ static void plugin_line(Out *o, const Plug *p, const char *key, const char *labe
     out_s(o, "</A> ");
     out_text(o, description);
     out_s(o, on ? " &middot; On" : " &middot; Off");
-    out_s(o, p->builtin ? ", built in" : ", file");
 }
 
-/* mill://plugins: the index of Plug-Ins, as Netscape's about:plugins listed them */
+/* A file's heading on mill://plugins: its name, then what it says about itself */
+static void plugin_heading(Out *o, const char *title, const char *version, const char *by, const char *description)
+{
+    out_s(o, "<P><B>");
+    out_text(o, title);
+    out_s(o, "</B>");
+    if (version && version[0]) { out_s(o, " "); out_text(o, version); }
+    if (by && by[0]) { out_s(o, " by "); out_text(o, by); }
+    if (description && description[0]) { out_s(o, "<BR>"); out_text(o, description); }
+}
+
+/* License and About under a file's heading */
+static void plugin_links(Out *o, const char *license_of, const char *about)
+{
+    char anchor[40];
+    license_anchor(license_of, anchor, sizeof anchor);
+    out_s(o, "<BR><A HREF=\"mill://license#");
+    out_s(o, anchor);
+    out_s(o, "\">License</A>");
+    if (about) {
+        out_s(o, " &middot; <A HREF=\"");
+        out_s(o, about);
+        out_s(o, "\">About</A>");
+    }
+}
+
+static void plugin_lines(Out *o, const Plug *p)
+{
+    short k;
+    if (p->status != PLUG_READY) { out_s(o, "<BR>Not loaded: "); out_s(o, plug_status[p->status]); }
+    for (k = 0; k < p->nproto; k++) {
+        char label[24];
+        snprintf(label, sizeof label, "%.20s:", p->protos[k].scheme);
+        plugin_line(o, p, p->protos[k].scheme, label, p->protos[k].description, plugin_enabled(p->protos[k].scheme));
+    }
+    for (k = 0; k < p->nformat; k++)
+        plugin_line(o, p, p->formats[k].key, p->formats[k].heading, p->formats[k].description, format_enabled(&p->formats[k]));
+}
+
+/* mill://plugins: one entry for what's built into Mill, then one for each file in the Plug-Ins
+   folder, Plug-Ins and font files alike, as Netscape's about:plugins listed them */
 static void plugins_page(Out *o)
 {
     short i, k;
     head(o, 200, HTML_MAC);
     out_s(o, "<TITLE>Plug-Ins</TITLE><H2>Plug-Ins</H2>");
+    plugin_heading(o, "Built-In", MILL_VERSION, MILL_PUBLISHER, "Part of Mill.");
+    plugin_links(o, "Mill", "mill://about");
+    for (i = 0; i < nplugs; i++) if (plugs[i].builtin) plugin_lines(o, &plugs[i]);
     for (i = 0; i < nplugs; i++) {
         const Plug *p = &plugs[i];
-        out_s(o, "<P><B>");
-        out_text(o, p->name ? p->name : p->file);
-        out_s(o, "</B>");
-        if (p->version) { out_s(o, " "); out_text(o, p->version); }
-        if (p->by && p->by[0]) { out_s(o, " by "); out_text(o, p->by); }
-        if (p->description && p->description[0]) { out_s(o, "<BR>"); out_text(o, p->description); }
-        {
-            char anchor[40];
-            license_anchor(p->builtin ? "Mill" : (p->name ? p->name : p->file), anchor, sizeof anchor);
-            out_s(o, "<BR><A HREF=\"mill://license#");
-            out_s(o, anchor);
-            out_s(o, "\">License</A>");
-            if (p->flags & millHasAbout && p->name) {
-                out_s(o, " &middot; <A HREF=\"plugin://");
-                out_s(o, p->name);
-                out_s(o, "/about\">About</A>");
-            }
-        }
-        if (!p->builtin) {
-            char path[256];
-            spec_to_path(&p->spec, path, sizeof path);
-            out_s(o, "<BR>File: ");
-            out_text(o, path);
-        }
-        if (p->status != PLUG_READY) { out_s(o, "<BR>Not loaded: "); out_s(o, plug_status[p->status]); }
-        for (k = 0; k < p->nproto; k++) {
-            char label[24];
-            snprintf(label, sizeof label, "%.20s:", p->protos[k].scheme);
-            plugin_line(o, p, p->protos[k].scheme, label, p->protos[k].description, plugin_enabled(p->protos[k].scheme));
-        }
-        for (k = 0; k < p->nformat; k++)
-            plugin_line(o, p, p->formats[k].key, p->formats[k].heading, p->formats[k].description, format_enabled(&p->formats[k]));
+        char path[256], about[80];
+        if (p->builtin) continue;
+        plugin_heading(o, p->file, p->version, p->by, p->description);
+        snprintf(about, sizeof about, "plugin://%s/about", p->name ? p->name : "");
+        plugin_links(o, p->file, (p->flags & millHasAbout) && p->name ? about : NULL);
+        spec_to_path(&p->spec, path, sizeof path);
+        out_s(o, "<BR>File: ");
+        out_text(o, path);
+        plugin_lines(o, p);
     }
     for (i = 0; i < npack_files; i++) {
-        char anchor[40];
-        short k;
+        char anchor[40], about[60];
         license_anchor(pack_files[i].file, anchor, sizeof anchor);
-        out_s(o, "<P><B>");
-        out_text(o, pack_files[i].file);
-        out_s(o, "</B><BR>Fonts:");
+        snprintf(about, sizeof about, "mill://fonts#%s", anchor);
+        char version[32] = "", path[256];
+        short n = 0;
+        Handle h;
+        {
+            short was = CurResFile();
+            UseResFile(pack_files[i].ref);
+            if ((h = Get1Resource('vers', 1))) {          /* the short version string, after 6 bytes */
+                unsigned char len = (*h)[6];
+                if (len < sizeof version) { memcpy(version, *h + 7, len); version[len] = 0; }
+                ReleaseResource(h);
+            }
+            UseResFile(was);
+        }
+        for (k = 0; k < npack_fams; k++) if (pack_fams[k].ref == pack_files[i].ref) n++;
+        plugin_heading(o, pack_files[i].file, version, MILL_PUBLISHER, NULL);
+        out_s(o, "<BR>Fonts: ");
         for (k = 0; k < npack_fams; k++)
-            if (pack_fams[k].ref == pack_files[i].ref) { out_s(o, " "); out_text(o, pack_fams[k].name); }
-        out_s(o, "<BR><A HREF=\"mill://license#");
-        out_s(o, anchor);
-        out_s(o, "\">License</A> &middot; file");
+            if (pack_fams[k].ref == pack_files[i].ref) {
+                out_text(o, pack_fams[k].name);
+                if (--n > 0) out_s(o, n == 1 ? " and " : ", ");
+            }
+        out_s(o, ".");
+        plugin_links(o, pack_files[i].file, about);
+        {
+            FCBPBRec fcb;
+            Str63 name;
+            FSSpec spec;
+            memset(&fcb, 0, sizeof fcb);
+            fcb.ioRefNum = pack_files[i].ref;
+            fcb.ioNamePtr = name;
+            if (PBGetFCBInfoSync(&fcb) == noErr) {        /* (no FSMakeFSSpec on System 6) */
+                spec.vRefNum = fcb.ioFCBVRefNum;
+                spec.parID = fcb.ioFCBParID;
+                memcpy(spec.name, name, name[0] + 1);
+                spec_to_path(&spec, path, sizeof path);
+                out_s(o, "<BR>File: ");
+                out_text(o, path);
+            }
+        }
     }
-    if (!nplugs && !npack_files) out_s(o, "<P>None.");
+}
+
+/* mill://fonts: each font file's own About text ('TEXT' 128), under the file's name */
+static void fonts_page(Out *o)
+{
+    short i, was = CurResFile();
+    head(o, 200, HTML_MAC);
+    out_s(o, "<TITLE>Fonts</TITLE><H2>Fonts</H2>");
+    for (i = 0; i < npack_files && !o->stopped; i++) {
+        char anchor[40];
+        Handle h;
+        license_anchor(pack_files[i].file, anchor, sizeof anchor);
+        out_s(o, "<HR><H3><A NAME=\"");
+        out_s(o, anchor);
+        out_s(o, "\">");
+        out_text(o, pack_files[i].file);
+        out_s(o, "</A></H3>");
+        UseResFile(pack_files[i].ref);
+        if ((h = Get1Resource('TEXT', 128))) {
+            /* the text's own lines are joined into paragraphs (a blank line between), and its
+               indented lines kept as lines, so it wraps to the window */
+            long n = GetHandleSize(h), at = 0, end;
+            Boolean indented = false;
+            HLock(h);
+            out_s(o, "<P>");
+            while (at < n) {
+                const char *t = *h;
+                for (end = at; end < n && t[end] != '\r' && t[end] != '\n'; end++) ;
+                if (end == at) { out_s(o, "<P>"); indented = false; }
+                else {
+                    if (t[at] == ' ') out_s(o, "<BR>&nbsp;&nbsp;");
+                    else if (indented) out_s(o, "<BR>");
+                    indented = t[at] == ' ';
+                    out_text_n(o, t + at, end - at);
+                    out_s(o, " ");
+                }
+                at = end + 1;
+            }
+            HUnlock(h);
+            ReleaseResource(h);
+        } else out_s(o, "<P>This file has no About text.");
+        UseResFile(was);
+    }
+    if (!npack_files) out_s(o, "<P>None.");
 }
 
 /* A font setting's row: a list of the fonts to choose from */
@@ -770,6 +863,7 @@ static void mill_request(const Url *u, const char *body, long len, Out *o)
     if (!strcmp(u->host, "about")) about(o, strstr(u->path, "check=1") != NULL);
     else if (!strcmp(u->host, "config")) config(o, body, len);
     else if (!strcmp(u->host, "plugins")) plugins_page(o);
+    else if (!strcmp(u->host, "fonts")) fonts_page(o);
     else if (!strcmp(u->host, "license")) license_page(o);
     else {
         head(o, 404, HTML_MAC);

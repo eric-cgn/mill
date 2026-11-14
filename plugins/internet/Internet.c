@@ -1,6 +1,6 @@
 /* Internet Services: a Plug-In for Mill with six protocols.
      finger://host/user         RFC 1288   the answer as text
-     whois://host/query         RFC 3912   the answer as text
+     whois://host/query         RFC 954    the answer as text
      dict://host/d:word[:db]    RFC 2229   definitions as HTML; m:word[:db[:strategy]] matches
      time://host/               RFC 868    the server's time, and a button to set this Mac's clock
      ftp://host/path            RFC 959    folders as pages, files; uploads with a name and password (ftp.c)
@@ -695,7 +695,7 @@ MillPlugIn *PlugInNew(const MillHost *host, short resFile, MillInfo *info)
     setting(&me->dictSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "dict.org", 0, 0);
     setting(&me->timeSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "time.nist.gov", 0, 0);
     protocol(&me->protocol[kFinger], "finger", "Finger", "Finger User Information Protocol (RFC 1288)", 0, 0);
-    protocol(&me->protocol[kWhois], "whois", "Whois", "Whois (RFC 3912)", 1, me->whoisSet);
+    protocol(&me->protocol[kWhois], "whois", "Whois", "Whois (RFC 954)", 1, me->whoisSet);
     protocol(&me->protocol[kDict], "dict", "Dict", "Dictionary Server Protocol (RFC 2229)", 1, me->dictSet);
     protocol(&me->protocol[kTime], "time", "Time", "Time Protocol (RFC 868)", 1, me->timeSet);
     me->protocol[kFtp] = *ftp_protocol();
