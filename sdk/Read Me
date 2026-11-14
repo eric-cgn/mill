@@ -24,6 +24,11 @@ License
   mill://plugins links to that section. Finger's .r file (for Rez) does it with its License file
   gzipped; any resource editor can do the same.
 
+About
+  plugin://NAME/about is the Plug-In's About page. Answer it yourself (millHasAbout), or put
+  plain text in the file as 'TEXT' 128 and Mill shows that. NAME is the Plug-In's name in
+  lower case with hyphens for spaces.
+
 Rules (MillPlugIn.h has the rest)
 - No int in the interface: short is 16 bits, long is 32.
 - Calls between Mill and a Plug-In use the pascal convention.

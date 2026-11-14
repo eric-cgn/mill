@@ -33,6 +33,12 @@
    each Plug-In file (anchor: its name in lower case, spaces as hyphens), and
    mill://plugins links each Plug-In to its section. Finger's .r file shows a Rez 'read'.
 
+   About: plugin://NAME/about is the Plug-In's About page, linked from mill://plugins. Make it
+   yourself (set millHasAbout and answer the address), or put plain text in the file as
+   'TEXT' 128 and Mill shows that instead: CR line ends, a blank line between paragraphs,
+   lines that start with a space kept as lines. NAME should be the Plug-In's name in lower
+   case with hyphens for spaces ("Internet Services" is internet-services).
+
    Lifetime: Mill opens each Plug-In at startup to read its MillInfo, then closes
    it and unloads its code. It opens the Plug-In again for its first request and
    keeps it loaded while any window shows a page it made or any request to it is
@@ -189,7 +195,7 @@ enum {
    all of it, strings and tables, before millOpen's call returns, so they may
    point into the Plug-In's code or data. */
 typedef struct MillInfo {
-    const char *name;       /* NAME in plugin://NAME/; must be unique, up to 31 characters */
+    const char *name;       /* NAME in plugin://NAME/ (see About above); unique, up to 31 characters */
     const char *version;    /* "1.0" */
     const char *copyright;
     const char *by;         /* who made it: "OneInAMillion Software" */

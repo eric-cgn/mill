@@ -5,7 +5,7 @@
      time://host/               RFC 868    the server's time, and a button to set this Mac's clock
      ftp://host/path            RFC 959    folders as pages, files; uploads with a name and password (ftp.c)
      gopher://host/             RFC 1436   menus as pages, text, files, searches (gopher.c)
-   Every address names its server. plugin://internet/about explains the addresses and has a
+   Every address names its server. plugin://internet-services/about explains the addresses and has a
    form for each, filled in with the protocol's Default server setting. */
 #include <string.h>
 #include <OSUtils.h>
@@ -539,7 +539,7 @@ static OSErr do_time(Inet *me, MillRequest *r)
     return noErr;
 }
 
-/* ---- plugin://internet/about, and the forms on it ---- */
+/* ---- plugin://internet-services/about, and the forms on it ---- */
 
 /* the Default server setting of a protocol, or its public server */
 static const char *default_server(Inet *me, const char *scheme, const char *dflt)
@@ -550,12 +550,12 @@ static const char *default_server(Inet *me, const char *scheme, const char *dflt
 }
 
 /* One protocol's form: a server field, a second field (named w), and a button; the page sends it
-   to plugin://internet/go, which answers with the full address */
+   to plugin://internet-services/go, which answers with the full address */
 static void about_form(Inet *me, const char *scheme, const char *dflt, const char *label, const char *button)
 {
     char hh[HOST];
     me->base.host->HtmlEscape(default_server(me, scheme, dflt), hh, sizeof hh);
-    put(me, "<FORM ACTION=\"plugin://internet/go\"><P><INPUT TYPE=HIDDEN NAME=p VALUE=");
+    put(me, "<FORM ACTION=\"plugin://internet-services/go\"><P><INPUT TYPE=HIDDEN NAME=p VALUE=");
     put(me, scheme);
     put(me, "><B>");
     put(me, scheme);
@@ -589,7 +589,7 @@ static OSErr do_about(Inet *me)
     return noErr;
 }
 
-/* plugin://internet/go?p=scheme&host=server&w=word, from a form on the about page: a redirect
+/* plugin://internet-services/go?p=scheme&host=server&w=word, from a form on the about page: a redirect
    to the address in full, which Mill follows (it only refuses a redirect into plugin://) */
 static OSErr do_go(Inet *me, MillRequest *r)
 {
@@ -691,16 +691,16 @@ MillPlugIn *PlugInNew(const MillHost *host, short resFile, MillInfo *info)
     me->methods.purge = 0;
     me->methods.format = 0;
     me->base.methods = &me->methods;
-    setting(&me->whoisSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "whois.iana.org", 0, 0);
-    setting(&me->dictSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "dict.org", 0, 0);
-    setting(&me->timeSet[0], "server", "Default server", "Fills in the form on plugin://internet/about", millText, "time.nist.gov", 0, 0);
+    setting(&me->whoisSet[0], "server", "Default server", "Fills in the form on plugin://internet-services/about", millText, "whois.iana.org", 0, 0);
+    setting(&me->dictSet[0], "server", "Default server", "Fills in the form on plugin://internet-services/about", millText, "dict.org", 0, 0);
+    setting(&me->timeSet[0], "server", "Default server", "Fills in the form on plugin://internet-services/about", millText, "time.nist.gov", 0, 0);
     protocol(&me->protocol[kFinger], "finger", "Finger", "Finger User Information Protocol (RFC 1288)", 0, 0);
     protocol(&me->protocol[kWhois], "whois", "Whois", "Whois (RFC 954)", 1, me->whoisSet);
     protocol(&me->protocol[kDict], "dict", "Dict", "Dictionary Server Protocol (RFC 2229)", 1, me->dictSet);
     protocol(&me->protocol[kTime], "time", "Time", "Time Protocol (RFC 868)", 1, me->timeSet);
     me->protocol[kFtp] = *ftp_protocol();
     me->protocol[kGopher] = *gopher_protocol();
-    info->name = "internet";
+    info->name = "internet-services";
     info->version = "1.0";
     info->copyright = "Copyright 2026 OneInAMillion Software";
     info->by = "OneInAMillion Software";

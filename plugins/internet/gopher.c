@@ -44,7 +44,7 @@ static void icon(GopherPlugIn *me, short id)
 {
     long a[1];
     a[0] = id;
-    H->Printf(me->r, "<IMG SRC=\"plugin://internet/rsrc?type=ics%%23&id=%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> ", a);
+    H->Printf(me->r, "<IMG SRC=\"plugin://internet-services/rsrc?type=ics%%23&id=%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> ", a);
 }
 
 static void header(GopherPlugIn *me, const char *type)

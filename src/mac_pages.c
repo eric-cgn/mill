@@ -500,6 +500,8 @@ static void plugin_line(Out *o, const Plug *p, const char *key, const char *labe
     out_s(o, on ? " &middot; On" : " &middot; Off");
 }
 
+static Boolean has_about_text(const Plug *p);
+
 /* A file's heading on mill://plugins: its name, then what it says about itself */
 static void plugin_heading(Out *o, const char *title, const char *version, const char *by, const char *description)
 {
@@ -555,7 +557,7 @@ static void plugins_page(Out *o)
         if (p->builtin) continue;
         plugin_heading(o, p->file, p->version, p->by, p->description);
         snprintf(about, sizeof about, "plugin://%s/about", p->name ? p->name : "");
-        plugin_links(o, p->file, (p->flags & millHasAbout) && p->name ? about : NULL);
+        plugin_links(o, p->file, p->name && ((p->flags & millHasAbout) || has_about_text(p)) ? about : NULL);
         spec_to_path(&p->spec, path, sizeof path);
         out_s(o, "<BR>File: ");
         out_text(o, path);
@@ -607,20 +609,20 @@ static void plugins_page(Out *o)
     }
 }
 
-/* plugin://NAME/about for a font file, NAME its name as an anchor ("web-fonts"): it has no code
-   to answer, so Mill shows the file's own About text ('TEXT' 128), its lines joined into
+/* A file's own About text ('TEXT' 128) as a page, for a font file (plugin://NAME/about, NAME its
+   name as an anchor: "web-fonts") or a Plug-In that doesn't answer /about itself: its lines joined into
    paragraphs (a blank line between) and its indented lines kept as lines, to wrap to the window */
-static void font_about(Out *o, short k)
+static void text_about(Out *o, const char *title, short res)
 {
     short was = CurResFile();
     Handle h;
     head(o, 200, HTML_MAC);
     out_s(o, "<TITLE>");
-    out_text(o, pack_files[k].file);
+    out_text(o, title);
     out_s(o, "</TITLE><H2>");
-    out_text(o, pack_files[k].file);
+    out_text(o, title);
     out_s(o, "</H2>");
-    UseResFile(pack_files[k].ref);
+    UseResFile(res);
     if ((h = Get1Resource('TEXT', 128))) {
         long n = GetHandleSize(h), at = 0, end;
         Boolean indented = false;
@@ -645,10 +647,42 @@ static void font_about(Out *o, short k)
     UseResFile(was);
 }
 
-/* A plugin:// address for a font file: true if it's one (and answered) */
+/* Whether a Plug-In's file has About text of its own ('TEXT' 128), for Mill to show */
+static Boolean has_about_text(const Plug *p)
+{
+    short ref, was = CurResFile();
+    Boolean has = false;
+    if (p->builtin || (ref = file_open_res(&p->spec, fsRdPerm)) == -1) return false;
+    UseResFile(ref);
+    SetResLoad(false);
+    has = Get1Resource('TEXT', 128) != NULL;
+    SetResLoad(true);
+    CloseResFile(ref);
+    UseResFile(was);
+    return has;
+}
+
+/* A plugin:// address Mill answers for the file: a font file's (it has no code), or the About
+   page of a Plug-In that doesn't make its own. True if it's one (and answered). */
 Boolean font_file_request(const Url *u, net_sink sink, void *ref)
 {
     short k;
+    Boolean about = !strcmp(u->path, "/about");
+    for (k = 0; k < nplugs; k++) {
+        const Plug *p = &plugs[k];
+        short res;
+        if (p->builtin || !p->name || strcmp(u->host, p->name) || (p->flags & millHasAbout) || !about) continue;
+        if ((res = file_open_res(&p->spec, fsRdPerm)) == -1) return false;
+        {
+            Out o;
+            o.sink = sink;
+            o.ref = ref;
+            o.stopped = 0;
+            text_about(&o, p->file, res);
+        }
+        CloseResFile(res);
+        return true;
+    }
     for (k = 0; k < npack_files; k++) {
         char anchor[40];
         license_anchor(pack_files[k].file, anchor, sizeof anchor);
@@ -657,7 +691,7 @@ Boolean font_file_request(const Url *u, net_sink sink, void *ref)
             o.sink = sink;
             o.ref = ref;
             o.stopped = 0;
-            if (!strcmp(u->path, "/about") || !strcmp(u->path, "/") || !u->path[0]) font_about(&o, k);
+            if (about || !strcmp(u->path, "/") || !u->path[0]) text_about(&o, pack_files[k].file, pack_files[k].ref);
             else {
                 head(&o, 404, HTML_MAC);
                 out_s(&o, "<TITLE>Not Found</TITLE><H2>Not Found</H2><P>A font file has only an About page.");

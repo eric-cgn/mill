@@ -10,7 +10,7 @@ example if it's there: both give finger:.
   dict://host/d:word         Dictionary Server Protocol (RFC 2229); m:word for matches
   time://host/               Time Protocol (RFC 868)
 
-plugin://internet/about has a form for each, filled in from Settings.
+plugin://internet-services/about has a form for each, filled in from Settings.
 
 "Set this Mac's clock" adds the difference shown to the Mac's time when it is
 clicked. The time zone is the Map control panel's.
