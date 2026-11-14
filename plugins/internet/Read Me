@@ -1,25 +1,32 @@
 Internet Services
 
-A Plug-In for Mill with four protocols. Put "Internet Services" in the
+A Plug-In for Mill with six protocols. Put "Internet Services" in the
 "Mill Plug-Ins" folder. If you also have the Finger example there, take it out:
-both give finger:.
+both give finger:. Without it, Mill has http:, https:, and file: only.
 
   finger://host/user         Finger (RFC 1288). finger://host/ asks about everyone.
   whois://host/query         Whois (RFC 3912). whois://host/ asks for a query.
   dict://host/d:word[:db]    Dictionary Server Protocol (RFC 2229): a definition.
   dict://host/m:word[:db[:strategy]]   the words that match; each links to its definition.
   time://host/               Time Protocol (RFC 868): the server's time and this Mac's.
+  ftp://host/path            File Transfer Protocol (RFC 959): folders and files.
+  gopher://host/             Gopher (RFC 1436): menus, text, files, and searches.
 
-Mill's addresses need a host, so "default" stands for a protocol's Default
-server setting (Settings, Protocols): whois://default/example.com,
-dict://default/d:windmill, time://default/. The defaults are whois.iana.org,
-dict.org, and time.nist.gov.
+Every address names its server. plugin://internet/about (About, at mill://plugins)
+explains the addresses and has a form for each protocol, filled in with its
+Default server setting (Settings, Protocols): whois.iana.org, dict.org, and
+time.nist.gov; finger has none. A form sends you to the address in full.
 
 time: shows the difference between the server's clock and this Mac's. "Set this
 Mac's clock" adds that difference to the Mac's time when it is clicked, so it is
 right however long the page has been open. Only the button on the Plug-In's own
-page works. System 6 has no time zone: the Time zone setting says how many hours
-the Mac's clock is from UTC (UTC-8, UTC+1), and is 0 (UTC) at first.
+page works. The time zone is the Map control panel's (System 6 and later keep it
+in parameter RAM). If it was never set it is UTC, and when the clocks are far
+apart the page says to set it first.
+
+ftp: and gopher: have their own settings (ftp.*, gopher.*), as when they were
+built into Mill.
 
 Build: ./build.sh (Retro68 in Docker) writes build/Internet Services.bin, a
-MacBinary file. The code is one 'MPlg' 128 resource; the licence is 'TEXT' 129.
+MacBinary file. The code is one 'MPlg' 128 resource (under 32K); the licence is
+'TEXT' 129.

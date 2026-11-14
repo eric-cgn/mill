@@ -203,8 +203,8 @@ static void about(Out *o, int check)
         "<H3>What Mill reads</H3><UL>"
         "<LI>HTML 3.2, which included text, lists, tables, images (and maps), and forms, as well as a few extras "
         "like bgcolor and font face. No applets, JavaScript, style sheets, or frames."
-        "<LI>URL schemes: http://, https:// (through a proxy), file://, gopher://, ftp://, and mill:// (built-ins), "
-        "and more with Plug-Ins"
+        "<LI>URL schemes: http://, https:// (through a proxy), file://, and mill:// (built-ins), "
+        "and more with Plug-Ins (Internet Services has ftp:// and gopher://)"
         "<LI>Character sets: UTF-8, ISO 8859-1, and Mac Roman"
         "<LI>Formats: GIF (static), JPEG (baseline), Netpbm, and gzip; more with Plug-Ins"
         "<LI>Pages up to 192K for rendering, but larger for downloads"
@@ -472,7 +472,8 @@ static void plugin_settings_save(const char *body, long len, char *note, int not
                 for (c = v; *c; c++) if ((unsigned char)*c < ' ') *c = ' ';  /* one line in the settings file */
                 if (st->kind == millNumber) {
                     long n = atol(v);
-                    if (v[0] < '0' || v[0] > '9' || n < st->min || n > st->max) {
+                    const char *d = v[0] == '-' ? v + 1 : v;      /* a minus, where the range goes below 0 */
+                    if (*d < '0' || *d > '9' || n < st->min || n > st->max) {
                         snprintf(note, note_size, "%s %s must be from %ld to %ld.", pp->heading, st->label, st->min, st->max);
                         return;
                     }
@@ -519,6 +520,11 @@ static void plugins_page(Out *o)
             out_s(o, "<BR><A HREF=\"mill://license#");
             out_s(o, anchor);
             out_s(o, "\">License</A>");
+            if (p->flags & millHasAbout && p->name) {
+                out_s(o, " &middot; <A HREF=\"plugin://");
+                out_s(o, p->name);
+                out_s(o, "/about\">About</A>");
+            }
         }
         if (!p->builtin) {
             char path[256];
