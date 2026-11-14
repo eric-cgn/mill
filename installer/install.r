@@ -34,7 +34,7 @@ resource 'DITL' (128) {
     {
         {222, 348, 244, 428}, Button { enabled, "Continue" },
         {222, 258, 244, 338}, Button { enabled, "Quit" },
-        {216, 336, 236, 420}, Button { enabled, "Choose" },
+        {220, 342, 240, 422}, Button { enabled, "Choose" },
         {0, 0, 256, 440}, UserItem { enabled }
     }
 };

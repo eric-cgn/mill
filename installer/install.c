@@ -303,15 +303,6 @@ static const char WELCOME[] =
     "Mill needs a Mac Plus or later, System 6.0.3 with MacTCP or later, and 700K of free memory.\r\r"
     "Freeware from OneInAMillion Software.";
 
-static void draw_welcome(void)
-{
-    FrameRect(&w1_box);
-    TextFont(kFontIDGeneva);
-    TextSize(10);
-    TEUpdate(&w1_view, w1_te);
-    big_font();
-}
-
 /* ---- the install choices ---- */
 
 static const struct { const char *text; short part; } LIST[ROWS] = {      /* part: -1 a heading, else 0 Mill, 1 Internet Services, 2 Web Fonts, 3 SDK */
@@ -322,7 +313,6 @@ static const char *const DESC[4] = {
     "The web browser.", "Finger, Whois, Dict, Time, FTP, and Gopher.", "Serif and Mono bitmaps at every HTML size.",
     "Files for writing Mill Plug-Ins."
 };
-static const char EASY[] = "Mill, with Internet Services and Web Fonts.";
 
 static short place_vol;             /* where the install folder is: a volume, the folder it's in, and its name; */
 static long place_parent, place_found;   /* or an existing install's own folder (place_found, else 0) */
@@ -398,11 +388,9 @@ static void draw_list(void)
         SetRect(&row, w2_list.left, y, w2_list.right, y + ROW);
         pascalize(s, LIST[i].text);
         if (LIST[i].part < 0) {
-            big_font();
-            TextFace(bold);
-            MoveTo(row.left + 6, y + 13);
+            small_font();
+            MoveTo(row.left + 6, y + 12);
             DrawString(s);
-            TextFace(0);
             continue;
         }
         small_font();
@@ -430,15 +418,18 @@ static void draw_install(void)
     pascalize(s, custom ? "Custom Install" : "Easy Install");
     MoveTo(w2_popup.left + 8, w2_popup.top + 15);
     DrawString(s);
-    MoveTo(w2_popup.right - 18, w2_popup.top + 7);
-    Line(8, 0); Line(-4, 5); Line(-4, -5);
+    {                                   /* the pop-up arrow: a solid triangle, rows 11, 9, 7, 5, 3, 1 wide */
+        short k, cx = w2_popup.right - 17;
+        Rect row;
+        for (k = 0; k < 6; k++) {
+            SetRect(&row, cx - 5 + k, w2_popup.top + 7 + k, cx + 6 - k, w2_popup.top + 8 + k);
+            PaintRect(&row);
+        }
+    }
     FrameRect(&w2_box);                                             /* the box: the description, or the list */
     small_font();
-    if (!custom) {
-        Rect in = w2_box;
-        InsetRect(&in, 6, 5);
-        TETextBox((Ptr)EASY, strlen(EASY), &in, teJustLeft);
-    } else draw_list();
+    if (!custom) TEUpdate(&w1_view, w1_te);
+    else draw_list();
     small_font();
     MoveTo(w2_box.left, w2_box.bottom + 14);                        /* what the selected item is */
     if (custom && sel >= 0) draw_fit(DESC[LIST[sel].part], w2_box.right - w2_box.left);
@@ -453,10 +444,13 @@ static void draw_install(void)
     SetRect(&frame, w2_box.left, w2_box.bottom + 58, 428, w2_box.bottom + 90);      /* where it goes */
     FrameRect(&frame);
     big_font();
-    SetRect(&lab, frame.left + 8, frame.top - 8, frame.left + 134, frame.top + 7);
-    EraseRect(&lab);
-    MoveTo(lab.left + 3, frame.top + 5);
-    DrawString("\pInstall Location");
+    {
+        short w = StringWidth("\pInstall Location");       /* the gap in the line: 5 pixels each side of the text */
+        SetRect(&lab, frame.left + 12, frame.top, frame.left + 12 + w + 10, frame.top + 1);
+        EraseRect(&lab);
+        MoveTo(lab.left + 5, frame.top + 5);
+        DrawString("\pInstall Location");
+    }
     small_font();
     folder_name(name);
     {
@@ -471,8 +465,8 @@ static void draw_install(void)
         strcat(line, vn);
         strcat(line, "\".");
     }
-    MoveTo(frame.left + 8, frame.top + 21);
-    draw_fit(line, 316 - 8);
+    MoveTo(frame.left + 8, frame.top + 20);
+    draw_fit(line, 330 - 8);
     big_font();
 }
 
@@ -501,7 +495,6 @@ static pascal void draw_all(DialogPtr d, short item)
 {
     (void)item;
     switch (stage) {
-    case S_WELCOME: draw_welcome(); break;
     case S_INSTALL: draw_install(); break;
     case S_PROGRESS: draw_progress(); break;
     default: draw_message();
@@ -543,18 +536,13 @@ static void set_stage(DialogPtr d, short st, const char *text)
 {
     stage = st;
     if (text) strcpy(message, text);
-    if (st == S_WELCOME) { ShowControl(w1_bar); } else HideControl(w1_bar);
+    if (st == S_INSTALL && !custom) ShowControl(w1_bar); else HideControl(w1_bar);
     if (st == S_INSTALL && custom) ShowControl(w2_bar); else HideControl(w2_bar);
     switch (st) {
-    case S_WELCOME:
-        place_control(d, B_PRIMARY, 222, 348, 244, 428, "Continue", true);
-        place_control(d, B_QUIT, 222, 258, 244, 338, "Quit", true);
-        place_control(d, B_CHOOSE, 0, 0, 0, 0, NULL, false);
-        break;
     case S_INSTALL:
         place_control(d, B_PRIMARY, 12, 348, 34, 428, "Install", true);
         place_control(d, B_QUIT, 46, 348, 68, 428, "Quit", true);
-        place_control(d, B_CHOOSE, 216, 336, 236, 420, "Choose\311", true);
+        place_control(d, B_CHOOSE, 220, 342, 240, 422, "Choose\311", true);
         break;
     case S_PROGRESS:
         place_control(d, B_PRIMARY, 0, 0, 0, 0, NULL, false);
@@ -602,7 +590,7 @@ static void set_custom(DialogPtr d, Boolean c)
     sel = -1;
     top = 0;
     SetControlValue(w2_bar, 0);
-    if (c) ShowControl(w2_bar); else HideControl(w2_bar);
+    if (c) { ShowControl(w2_bar); HideControl(w1_bar); } else { HideControl(w2_bar); ShowControl(w1_bar); }
     redraw(d);
 }
 
@@ -741,7 +729,7 @@ static pascal Boolean filter(DialogPtr d, EventRecord *e, short *item)
         SetPort(d);
         GlobalToLocal(&p);
         part = FindControl(p, d, &c);
-        if (part && stage == S_WELCOME && c == w1_bar) {
+        if (part && stage == S_INSTALL && !custom && c == w1_bar) {
             if (part == inThumb) { TrackControl(c, p, NULL); w1_scroll(GetControlValue(c)); }
             else TrackControl(c, p, (ControlActionUPP)w1_track);
             *item = CANVAS;
@@ -783,19 +771,20 @@ int main(void)
     c_choose = (GetDialogItem(d, B_CHOOSE, &type, &h, &r), (ControlHandle)h);
     GetDialogItem(d, CANVAS, &type, &h, &r);
     SetDialogItem(d, CANVAS, type, (Handle)(UserItemUPP)draw_all, &r);
-    /* the welcome's text and bar */
-    SetRect(&w1_box, MARGIN, MARGIN, 428, 204);
+    /* the Easy box's text and bar: the welcome */
+    SetRect(&w1_box, MARGIN, 44, MARGIN + 300, 156);
     w1_view = w1_box;
     w1_view.right -= BAR;
-    InsetRect(&w1_view, 6, 4);
-    TextFont(kFontIDGeneva);
-    TextSize(10);
+    InsetRect(&w1_view, 6, 5);
+    small_font();
     w1_te = TENew(&w1_view, &w1_view);
     TESetText((Ptr)WELCOME, strlen(WELCOME), w1_te);
     w1_line = (*w1_te)->lineHeight;
+    w1_view.bottom = w1_view.top + (w1_view.bottom - w1_view.top) / w1_line * w1_line;     /* whole lines only */
+    (*w1_te)->viewRect = w1_view;
     w1_max = (*w1_te)->nLines - (w1_view.bottom - w1_view.top) / w1_line;
     if (w1_max < 0) w1_max = 0;
-    SetRect(&r, w1_box.right - BAR, w1_box.top - 1, w1_box.right + 1, w1_box.bottom + 1);
+    SetRect(&r, w1_box.right - BAR, w1_box.top, w1_box.right, w1_box.bottom);
     w1_bar = NewControl(d, &r, "\p", false, 0, 0, w1_max, scrollBarProc, 0);
     HiliteControl(w1_bar, w1_max ? 0 : 255);
     /* the choices */
@@ -810,22 +799,22 @@ int main(void)
     SetRect(&w2_box, MARGIN, 44, MARGIN + 300, 156);
     w2_list = w2_box;
     InsetRect(&w2_list, 1, 1);
-    w2_list.right -= BAR;
-    SetRect(&r, w2_box.right - BAR, w2_box.top - 1, w2_box.right + 1, w2_box.bottom + 1);
+    w2_list.right = w2_box.right - BAR;
+    SetRect(&r, w2_box.right - BAR, w2_box.top, w2_box.right, w2_box.bottom);
     w2_bar = NewControl(d, &r, "\p", false, 0, 0, ROWS - (w2_list.bottom - w2_list.top) / ROW, scrollBarProc, 0);
     popup = NewMenu(200, "\p");
     AppendMenu(popup, "\pEasy Install;Custom Install");
     big_font();
     ShowWindow(d);
-    set_stage(d, S_WELCOME, NULL);
+    count_space();
+    set_stage(d, S_INSTALL, NULL);
     while (!done) {
         ModalDialog((ModalFilterUPP)filter, &item);
         if (item == B_QUIT) done = true;
         else if (item == CANVAS) { if (stage == S_INSTALL) install_click(d, click_pt); }
         else if (item == B_CHOOSE) { choose_place(); redraw(d); }
         else if (item == B_PRIMARY) {
-            if (stage == S_WELCOME) set_stage(d, S_INSTALL, NULL);
-            else if (stage == S_ERROR) set_stage(d, S_INSTALL, NULL);
+            if (stage == S_ERROR) set_stage(d, S_INSTALL, NULL);
             else if (stage == S_INSTALL) {
                 OSErr err;
                 SetCursor(*GetCursor(watchCursor));
