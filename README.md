@@ -33,7 +33,7 @@ On a Mac Plus running System 6.0.5.
 - Downloads, optional MacBinary decoding
 - HTTP proxy support
 - URL schemes: http:// (https:// w/ proxy), file://, and mill:// (built-ins)
-- Plug-Ins: finger://, whois://, dict://, time://, ftp://, and gopher:// (Internet Services), and more with the Plug-In SDK; Web Fonts
+- Plug-Ins: Internet Services (ftp, gopher, finger, whois, dict, time) and Web Fonts
 
 ## Download
 

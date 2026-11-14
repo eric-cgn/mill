@@ -269,7 +269,12 @@ static void alert_text(const char *text, OSErr err)
     memcpy(a + 1, text, a[0]);
     if (err) {
         NumToString(err, num);
-        if (a[0] + 1 + num[0] < 255) { a[++a[0]] = ' '; memcpy(a + a[0] + 1, num + 1, num[0]); a[0] += num[0]; }
+        /* "Installation failed (error -34)." */
+        if (a[0] + 10 + num[0] < 255) {
+            memcpy(a + a[0] + 1, " (error ", 8); a[0] += 8;
+            memcpy(a + a[0] + 1, num + 1, num[0]); a[0] += num[0];
+            a[++a[0]] = ')'; a[++a[0]] = '.';
+        }
     }
     ParamText(a, "\p", "\p", "\p");
     StopAlert(129, NULL);
@@ -320,7 +325,7 @@ static Boolean choose_place(void)
     if (PBGetWDInfoSync(&wd) != noErr) { place_vref = reply.vRefNum; dir = 0; } else { place_vref = wd.ioWDVRefNum; dir = wd.ioWDDirID; }
     pstr(mill, "Mill");
     if (!has_file(place_vref, dir, mill)) {
-        if (dir_of(place_vref, dir, reply.fName, &dir) != noErr) { alert_text("Can't make the folder.", 0); return false; }
+        if (dir_of(place_vref, dir, reply.fName, &dir) != noErr) { alert_text("Folder creation failed.", 0); return false; }
     }
     place_dir = dir;
     return true;
@@ -355,7 +360,7 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
     }
     if (sdk && !err) {
         n = Count1Resources('MBIN');
-        status(d, "Plug-In SDK");
+        status(d, "Mill Plug-In SDK");
         for (i = 1; i <= n && !err; i++) {
             Handle h = Get1IndResource('MBIN', i);
             short id;
@@ -413,7 +418,7 @@ int main(void)
             err = run_install(d, get_check(d, ITEM_MILL), get_check(d, ITEM_INET), get_check(d, ITEM_FONTS), get_check(d, ITEM_SDK));
             InitCursor();
             status(d, "");
-            if (err) alert_text("Couldn't install. Error", err);
+            if (err) alert_text("Installation failed", err);
             else { NoteAlert(130, NULL); done = true; }
             break;
         }

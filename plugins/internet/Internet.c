@@ -591,7 +591,7 @@ static OSErr do_go(Inet *me, MillRequest *r)
     long ql = q ? (long)strlen(++q) : 0, i, o = 0;
     if (h->From(r->ref) != millFromOwnPage) { h->Fail(r->ref, "Internet Services: Only its own page can send this."); return noErr; }
     if (!q || h->FormField(q, ql, "p", scheme, sizeof scheme) <= 0 || h->FormField(q, ql, "host", host, sizeof host) < 0) {
-        h->Fail(r->ref, "Internet Services: The form is missing something.");
+        h->Fail(r->ref, "Internet Services: The submitted data was invalid.");
         return noErr;
     }
     if (h->FormField(q, ql, "w", word, sizeof word) < 0) word[0] = 0;
@@ -695,7 +695,7 @@ MillPlugIn *PlugInNew(const MillHost *host, short resFile, MillInfo *info)
     info->version = "1.0";
     info->copyright = "Copyright 2026 OneInAMillion Software";
     info->by = "OneInAMillion Software";
-    info->description = "Finger, whois, dict, time, FTP, and Gopher.";
+    info->description = "FTP, Gopher, finger, whois, dict, and time.";
     info->flags = millHasAbout;
     info->protocolCount = kProtocols;
     info->protocols = me->protocol;

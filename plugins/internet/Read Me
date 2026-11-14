@@ -1,32 +1,18 @@
 Internet Services
 
-A Plug-In for Mill with six protocols. Put "Internet Services" in the
-"Mill Plug-Ins" folder. If you also have the Finger example there, take it out:
-both give finger:. Without it, Mill has http:, https:, and file: only.
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder. Take out the Finger
+example if it's there: both give finger:.
 
-  finger://host/user         Finger (RFC 1288). finger://host/ asks about everyone.
-  whois://host/query         Whois (RFC 3912). whois://host/ asks for a query.
-  dict://host/d:word[:db]    Dictionary Server Protocol (RFC 2229): a definition.
-  dict://host/m:word[:db[:strategy]]   the words that match; each links to its definition.
-  time://host/               Time Protocol (RFC 868): the server's time and this Mac's.
-  ftp://host/path            File Transfer Protocol (RFC 959): folders and files.
-  gopher://host/             Gopher (RFC 1436): menus, text, files, and searches.
+  ftp://host/path            File Transfer Protocol (RFC 959)
+  gopher://host/             Gopher (RFC 1436)
+  finger://host/user         Finger (RFC 1288)
+  whois://host/query         Whois (RFC 3912)
+  dict://host/d:word         Dictionary Server Protocol (RFC 2229); m:word for matches
+  time://host/               Time Protocol (RFC 868)
 
-Every address names its server. plugin://internet/about (About, at mill://plugins)
-explains the addresses and has a form for each protocol, filled in with its
-Default server setting (Settings, Protocols): whois.iana.org, dict.org, and
-time.nist.gov; finger has none. A form sends you to the address in full.
+plugin://internet/about has a form for each, filled in from Settings.
 
-time: shows the difference between the server's clock and this Mac's. "Set this
-Mac's clock" adds that difference to the Mac's time when it is clicked, so it is
-right however long the page has been open. Only the button on the Plug-In's own
-page works. The time zone is the Map control panel's (System 6 and later keep it
-in parameter RAM). If it was never set it is UTC, and when the clocks are far
-apart the page says to set it first.
+"Set this Mac's clock" adds the difference shown to the Mac's time when it is
+clicked. The time zone is the Map control panel's.
 
-ftp: and gopher: have their own settings (ftp.*, gopher.*), as when they were
-built into Mill.
-
-Build: ./build.sh (Retro68 in Docker) writes build/Internet Services.bin, a
-MacBinary file. The code is one 'MPlg' 128 resource (under 32K); the licence is
-'TEXT' 129.
+Build: ./build.sh writes build/Internet Services.bin.
