@@ -433,6 +433,21 @@ void fonts_choose(void)
    a line in it keeps, so a page doesn't shift between the suitcase's and the System's */
 typedef struct { short font, size, line_font, pack_ref; } Face;   /* pack_ref: the suitcase's file if its font is used, else 0 */
 
+/* Whether the System has a strike of the font at the size (not one scaled from another), remembered
+   for the last few asked, as text is measured a run at a time */
+static Boolean real_size(short font, short size)
+{
+    static struct { short font, size; Boolean real; } seen[8];
+    static short next;
+    short i;
+    for (i = 0; i < 8; i++) if (seen[i].size && seen[i].font == font && seen[i].size == size) return seen[i].real;
+    i = next++ & 7;
+    seen[i].font = font;
+    seen[i].size = size;
+    seen[i].real = RealFont(font, size);
+    return seen[i].real;
+}
+
 static Face face_of(const MStyle *s)
 {
     Face f;
@@ -444,6 +459,13 @@ static Face face_of(const MStyle *s)
     f.size = s->size;               /* the core's sizes are the ladder's already */
     f.line_font = f.font;
     f.pack_ref = 0;
+    if ((f.font == font_prop || f.font == font_fixed) && !pack_by_id(f.font) && !real_size(f.font, f.size)) {
+        /* the System has no strike of the page font at this size (Times 36, say): Web Fonts' if it has one,
+           rather than one QuickDraw scales up */
+        PackFam *alt = pack_by_name(f.font == font_fixed ? "Mill Mono" : "Mill Serif");
+        k = ladder_at(f.size);
+        if (alt && LADDER[k] == f.size && (alt->sizes & (1 << k))) { f.font = alt->id; f.pack_ref = alt->ref; return f; }
+    }
     if ((pf = pack_by_id(f.font))) {
         f.line_font = pack_fixed(pf) ? 22 : 20;        /* lines as tall as Courier's or Times's would be */
         k = ladder_at(f.size);
