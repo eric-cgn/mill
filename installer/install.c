@@ -1,4 +1,4 @@
-/* Install Mill 2.0: one window, Easy Install or Custom Install. The files are gzip-compressed
+/* Install Mill 2.0: a welcome window, then the install window (Easy or Custom). The files are gzip-compressed
    'MBIN' resources of this program, each a MacBinary file named (by the resource's name) for
    where it goes inside the folder: "Mill", "Mill Plug-Ins:Web Fonts". Plain File Manager calls,
    so it runs on System 6. */
@@ -8,8 +8,11 @@
 
 #include "../src/core/inflate.h"
 
-enum { DLG = 128, ITEM_INSTALL = 1, ITEM_QUIT, ITEM_EASY, ITEM_CUSTOM, ITEM_MILL, ITEM_INET, ITEM_FONTS, ITEM_SDK,
-       ITEM_STATUS, ITEM_RING };
+enum { W1 = 128, W2 = 129 };
+/* the welcome window's items, and the install window's (the order of their DITLs) */
+enum { W1_CONT = 1, W1_QUIT, W1_RING, W1_TITLE, W1_TEXT };
+enum { W2_INSTALL = 1, W2_QUIT, W2_RING, W2_POPUP, W2_DESC, W2_HEAD_APP, W2_MILL, W2_HEAD_PLUG, W2_INET, W2_FONTS,
+       W2_HEAD_DEV, W2_SDK, W2_LOC, W2_CHOOSE, W2_FOLDER, W2_DISK, W2_AVAIL, W2_NEED, W2_STATUS };
 enum { ID_MILL = 128, ID_INET = 129, ID_FONTS = 130, ID_SDK = 1000 };
 
 /* a file being written, from the MacBinary stream that comes out of inflate */
@@ -211,7 +214,31 @@ static OSErr install_one(Handle res)
     return r < 0 ? paramErr : noErr;
 }
 
-/* ---- the window ---- */
+/* ---- the windows ---- */
+
+static void set_text(DialogPtr d, short item, const char *text)
+{
+    short type;
+    Handle h;
+    Rect r;
+    Str255 s;
+    GetDialogItem(d, item, &type, &h, &r);
+    s[0] = (unsigned char)strlen(text);
+    memcpy(s + 1, text, s[0]);
+    SetDialogItemText(h, s);
+    EraseRect(&r);
+    DrawDialog(d);
+}
+
+static void set_pstr(DialogPtr d, short item, const char *label, ConstStr255Param name)
+{
+    char buf[200];
+    short n = (short)strlen(label);
+    memcpy(buf, label, n);
+    memcpy(buf + n, name + 1, name[0] > 150 ? 150 : name[0]);
+    buf[n + (name[0] > 150 ? 150 : name[0])] = 0;
+    set_text(d, item, buf);
+}
 
 static void ring(DialogPtr d, short item)
 {
@@ -227,16 +254,16 @@ static void ring(DialogPtr d, short item)
     SetPenState(&ps);
 }
 
-static pascal void draw_ring(DialogPtr d, short item) { (void)item; ring(d, ITEM_INSTALL); }
+static pascal void draw_ring1(DialogPtr d, short item) { (void)item; ring(d, W1_CONT); }
+static pascal void draw_ring2(DialogPtr d, short item) { (void)item; ring(d, W2_INSTALL); }
 
-static void set_check(DialogPtr d, short item, short on, short enabled)
+static void set_check(DialogPtr d, short item, short on)
 {
     short type;
     Handle h;
     Rect r;
     GetDialogItem(d, item, &type, &h, &r);
     SetControlValue((ControlHandle)h, on);
-    HiliteControl((ControlHandle)h, enabled ? 0 : 255);
 }
 
 static short get_check(DialogPtr d, short item)
@@ -248,20 +275,6 @@ static short get_check(DialogPtr d, short item)
     return GetControlValue((ControlHandle)h);
 }
 
-static void status(DialogPtr d, const char *text)
-{
-    short type;
-    Handle h;
-    Rect r;
-    Str255 s;
-    GetDialogItem(d, ITEM_STATUS, &type, &h, &r);
-    s[0] = (unsigned char)strlen(text);
-    memcpy(s + 1, text, s[0]);
-    SetDialogItemText(h, s);
-    EraseRect(&r);
-    DrawDialog(d);
-}
-
 static void alert_text(const char *text, OSErr err)
 {
     Str255 a, num;
@@ -269,66 +282,246 @@ static void alert_text(const char *text, OSErr err)
     memcpy(a + 1, text, a[0]);
     if (err) {
         NumToString(err, num);
-        /* "Installation failed (error -34)." */
-        if (a[0] + 10 + num[0] < 255) {
-            memcpy(a + a[0] + 1, " (error ", 8); a[0] += 8;
-            memcpy(a + a[0] + 1, num + 1, num[0]); a[0] += num[0];
-            a[++a[0]] = ')'; a[++a[0]] = '.';
-        }
+        if (a[0] + 1 + num[0] < 255) { a[++a[0]] = ' '; memcpy(a + a[0] + 1, num + 1, num[0]); a[0] += num[0]; }
     }
     ParamText(a, "\p", "\p", "\p");
-    StopAlert(129, NULL);
+    StopAlert(140, NULL);
 }
 
-static void radio(DialogPtr d, short on)
+/* ---- window 1: the welcome, with a text box that scrolls ---- */
+
+static TEHandle w1_te;
+static ControlHandle w1_bar;
+static Rect w1_box, w1_view;
+static short w1_line, w1_top, w1_max;       /* line height, lines scrolled, most lines to scroll */
+
+static void w1_scroll(short to)
+{
+    if (to < 0) to = 0;
+    if (to > w1_max) to = w1_max;
+    if (to == w1_top) return;
+    TEScroll(0, (w1_top - to) * w1_line, w1_te);
+    w1_top = to;
+    SetControlValue(w1_bar, to);
+}
+
+static pascal void w1_track(ControlHandle c, short part)
+{
+    short page = (w1_view.bottom - w1_view.top) / w1_line - 1;
+    (void)c;
+    if (part == inUpButton) w1_scroll(w1_top - 1);
+    else if (part == inDownButton) w1_scroll(w1_top + 1);
+    else if (part == inPageUp) w1_scroll(w1_top - page);
+    else if (part == inPageDown) w1_scroll(w1_top + page);
+}
+
+static pascal void w1_draw(DialogPtr d, short item)
+{
+    (void)item;
+    FrameRect(&w1_box);
+    TEUpdate(&w1_view, w1_te);
+    DrawControls(d);
+}
+
+static pascal Boolean w1_filter(DialogPtr d, EventRecord *e, short *item)
+{
+    if (e->what == keyDown || e->what == autoKey) {
+        char c = e->message & charCodeMask;
+        if (c == 13 || c == 3) { *item = W1_CONT; return true; }
+    }
+    if (e->what == mouseDown) {
+        Point p = e->where;
+        ControlHandle c;
+        short part;
+        SetPort(d);
+        GlobalToLocal(&p);
+        part = FindControl(p, d, &c);
+        if (part && c == w1_bar) {
+            if (part == inThumb) { TrackControl(c, p, NULL); w1_scroll(GetControlValue(c)); }
+            else TrackControl(c, p, (ControlActionUPP)w1_track);
+            *item = W1_TITLE;
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char WELCOME[] =
+    "Mill is a web browser for monochrome Macs. It reads HTML 3.2, and shows pictures, tables, and forms.\r\r"
+    "This installs Mill, its Internet Services Plug-In (Finger, Whois, Dict, Time, FTP, and Gopher), and Web Fonts. "
+    "Custom Install also has the Mill Plug-In SDK.\r\r"
+    "Mill needs a Mac Plus or later, System 6.0.3 with MacTCP or later, and 700K of free memory. "
+    "About 500K of disk space holds everything.\r\r"
+    "Freeware from OneInAMillion Software.";
+
+static Boolean welcome(void)
+{
+    DialogPtr d;
+    short item, type, lines;
+    Handle h;
+    Rect r;
+    Boolean go = false;
+    if (!(d = GetNewDialog(W1, NULL, (WindowPtr)-1))) return false;
+    GetDialogItem(d, W1_CONT, &type, &h, &r);
+    GetDialogItem(d, W1_RING, &type, &h, &r);
+    SetDialogItem(d, W1_RING, type, (Handle)(UserItemUPP)draw_ring1, &r);
+    GetDialogItem(d, W1_TEXT, &type, &h, &w1_box);
+    SetDialogItem(d, W1_TEXT, type, (Handle)(UserItemUPP)w1_draw, &w1_box);
+    SetPort(d);
+    TextFont(kFontIDGeneva);
+    TextSize(10);
+    w1_view = w1_box;
+    w1_view.right -= 16;
+    InsetRect(&w1_view, 5, 4);
+    w1_te = TENew(&w1_view, &w1_view);
+    TESetText((Ptr)WELCOME, strlen(WELCOME), w1_te);
+    w1_line = (*w1_te)->lineHeight;
+    lines = (*w1_te)->nLines;
+    w1_max = lines - (w1_view.bottom - w1_view.top) / w1_line;
+    if (w1_max < 0) w1_max = 0;
+    w1_top = 0;
+    SetRect(&r, w1_box.right - 16, w1_box.top, w1_box.right, w1_box.bottom);
+    r.top--; r.bottom++; r.right++;
+    w1_bar = NewControl(d, &r, "\p", true, 0, 0, w1_max, scrollBarProc, 0);
+    HiliteControl(w1_bar, w1_max ? 0 : 255);
+    TextFont(systemFont);
+    TextSize(12);
+    ShowWindow(d);
+    for (;;) {
+        ModalDialog((ModalFilterUPP)w1_filter, &item);
+        if (item == W1_CONT) { go = true; break; }
+        if (item == W1_QUIT) break;
+    }
+    TEDispose(w1_te);
+    DisposeDialog(d);
+    return go;
+}
+
+/* ---- window 2: what to install, and where ---- */
+
+static short place_vol;             /* where the install folder is: a volume, the folder it's in, and its name; */
+static long place_parent, place_found;   /* or an existing install's own folder (place_found, else 0) */
+static Str255 place_name, place_vol_name;
+static Boolean custom;
+static long size_of[4];             /* Mill, Internet Services, Web Fonts, SDK: bytes */
+static MenuHandle popup;
+
+static const char *const DESC[5] = {
+    "Mill, and its standard Plug-Ins: Internet Services and Web Fonts.",     /* Easy */
+    "The web browser.",
+    "Finger, Whois, Dict, Time, FTP, and Gopher.",
+    "Fonts for pages that name them.",
+    "Files for writing Mill Plug-Ins."
+};
+
+static void number_k(char *out, long k)
+{
+    Str255 s;
+    NumToString(k, s);
+    memcpy(out, s + 1, s[0]);
+    out[s[0]] = 'K';
+    out[s[0] + 1] = 0;
+}
+
+static void show_space(DialogPtr d)
+{
+    char line[80];
+    HParamBlockRec pb;
+    Str255 vn;
+    long need = 0, free_k = 0;
+    short i;
+    static const short CHK[3] = { W2_MILL, W2_INET, W2_FONTS };
+    for (i = 0; i < 3; i++) if (!custom || get_check(d, CHK[i])) need += size_of[i];
+    if (custom && get_check(d, W2_SDK)) need += size_of[3];
+    memset(&pb, 0, sizeof pb);
+    pb.volumeParam.ioNamePtr = vn;
+    pb.volumeParam.ioVRefNum = place_vol;
+    if (PBHGetVInfoSync(&pb) == noErr) {
+        free_k = ((long)(unsigned short)pb.volumeParam.ioVFrBlk * (pb.volumeParam.ioVAlBlkSiz / 512)) / 2;
+        memcpy(place_vol_name, vn, vn[0] + 1);
+    }
+    strcpy(line, "Disk space available: ");
+    number_k(line + strlen(line), free_k);
+    set_text(d, W2_AVAIL, line);
+    strcpy(line, "Approximate disk space needed: ");
+    number_k(line + strlen(line), (need + 1023) / 1024);
+    set_text(d, W2_NEED, line);
+    set_pstr(d, W2_DISK, "Disk: ", place_vol_name);
+}
+
+static void show_place(DialogPtr d)
+{
+    Str255 n;
+    if (place_found) {
+        CInfoPBRec c;
+        memset(&c, 0, sizeof c);
+        c.dirInfo.ioNamePtr = n;
+        c.dirInfo.ioVRefNum = place_vol;
+        c.dirInfo.ioDrDirID = place_found;
+        c.dirInfo.ioFDirIndex = -1;
+        if (PBGetCatInfoSync(&c) != noErr) memcpy(n, place_name, place_name[0] + 1);
+    } else memcpy(n, place_name, place_name[0] + 1);
+    set_pstr(d, W2_FOLDER, "Folder: ", n);
+    show_space(d);
+}
+
+static void item_text(DialogPtr d, short which) { set_text(d, W2_DESC, DESC[which]); }
+
+static void set_mode(DialogPtr d, Boolean c)
+{
+    static const short LIST[] = { W2_HEAD_APP, W2_MILL, W2_HEAD_PLUG, W2_INET, W2_FONTS, W2_HEAD_DEV, W2_SDK };
+    short i;
+    custom = c;
+    for (i = 0; i < 7; i++) { if (c) ShowDialogItem(d, LIST[i]); else HideDialogItem(d, LIST[i]); }
+    set_text(d, W2_DESC, c ? "Choose what to install." : DESC[0]);
+    show_space(d);
+    InvalRect(&d->portRect);
+}
+
+static pascal void popup_draw(DialogPtr d, short item)
 {
     short type;
     Handle h;
     Rect r;
-    GetDialogItem(d, ITEM_EASY, &type, &h, &r);
-    SetControlValue((ControlHandle)h, on == ITEM_EASY);
-    GetDialogItem(d, ITEM_CUSTOM, &type, &h, &r);
-    SetControlValue((ControlHandle)h, on == ITEM_CUSTOM);
+    const char *t = custom ? "Custom Install" : "Easy Install";
+    Str255 s;
+    GetDialogItem(d, item, &type, &h, &r);
+    FrameRect(&r);
+    MoveTo(r.left + 2, r.bottom); LineTo(r.right, r.bottom); LineTo(r.right, r.top + 2);     /* the shadow */
+    s[0] = (unsigned char)strlen(t);
+    memcpy(s + 1, t, s[0]);
+    MoveTo(r.left + 8, r.top + 15);
+    DrawString(s);
+    MoveTo(r.right - 18, r.top + 7);                /* the arrows */
+    Line(8, 0); Line(-4, 5); Line(-4, -5);
 }
 
-static void mode(DialogPtr d, Boolean custom)
-{
-    radio(d, custom ? ITEM_CUSTOM : ITEM_EASY);
-    if (!custom) {
-        set_check(d, ITEM_MILL, 1, 0);
-        set_check(d, ITEM_INET, 1, 0);
-        set_check(d, ITEM_FONTS, 1, 0);
-        set_check(d, ITEM_SDK, 0, 0);
-    } else {
-        set_check(d, ITEM_MILL, get_check(d, ITEM_MILL), 1);
-        set_check(d, ITEM_INET, get_check(d, ITEM_INET), 1);
-        set_check(d, ITEM_FONTS, get_check(d, ITEM_FONTS), 1);
-        set_check(d, ITEM_SDK, get_check(d, ITEM_SDK), 1);
-    }
-}
-
-/* Where: Standard File's folder and the name typed. An existing Mill's folder (one with "Mill" in
-   it) is used as it is; else a folder of that name in the one shown, made if it isn't there. */
-static Boolean choose_place(void)
+static void choose_place(void)
 {
     SFReply reply;
     Point where;
     WDPBRec wd;
-    long dir;
     Str255 mill;
+    long dir;
     where.h = 90;
     where.v = 70;
-    SFPutFile(where, "\pInstall Mill in:", "\pMill", NULL, &reply);
-    if (!reply.good) return false;
+    SFPutFile(where, "\pInstall Mill in:", place_name, NULL, &reply);
+    if (!reply.good) return;
     memset(&wd, 0, sizeof wd);
     wd.ioVRefNum = reply.vRefNum;
-    if (PBGetWDInfoSync(&wd) != noErr) { place_vref = reply.vRefNum; dir = 0; } else { place_vref = wd.ioWDVRefNum; dir = wd.ioWDDirID; }
+    if (PBGetWDInfoSync(&wd) != noErr) { place_vol = reply.vRefNum; dir = 2; } else { place_vol = wd.ioWDVRefNum; dir = wd.ioWDDirID; }
     pstr(mill, "Mill");
-    if (!has_file(place_vref, dir, mill)) {
-        if (dir_of(place_vref, dir, reply.fName, &dir) != noErr) { alert_text("Folder creation failed.", 0); return false; }
-    }
-    place_dir = dir;
-    return true;
+    place_parent = dir;
+    place_found = has_file(place_vol, dir, mill) ? dir : 0;      /* the folder shown holds Mill: use it as it is */
+    memcpy(place_name, reply.fName, reply.fName[0] + 1);
+}
+
+/* The folder to install in, made if need be */
+static OSErr resolve_place(void)
+{
+    place_vref = place_vol;
+    if (place_found) { place_dir = place_found; return noErr; }
+    return dir_of(place_vol, place_parent, place_name, &place_dir);
 }
 
 static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts, Boolean sdk)
@@ -336,9 +529,10 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
     static const struct { short id; char *what; } ONE[3] = { { ID_MILL, "Mill" }, { ID_INET, "Internet Services" }, { ID_FONTS, "Web Fonts" } };
     Boolean want[3];
     short i, n;
-    OSErr err = noErr;
+    OSErr err = resolve_place();
     Str255 name;
     long dir;
+    if (err) return err;
     want[0] = mill; want[1] = inet; want[2] = fonts;
     /* retired names from earlier versions */
     pstr(name, "Mill Fonts");
@@ -353,14 +547,14 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
     for (i = 0; i < 3 && !err; i++) {
         Handle h;
         if (!want[i]) continue;
-        status(d, ONE[i].what);
+        set_text(d, W2_STATUS, ONE[i].what);
         if (!(h = Get1Resource('MBIN', ONE[i].id))) return resNotFound;
         err = install_one(h);
         ReleaseResource(h);
     }
     if (sdk && !err) {
         n = Count1Resources('MBIN');
-        status(d, "Mill Plug-In SDK");
+        set_text(d, W2_STATUS, "Plug-In SDK");
         for (i = 1; i <= n && !err; i++) {
             Handle h = Get1IndResource('MBIN', i);
             short id;
@@ -376,13 +570,89 @@ static OSErr run_install(DialogPtr d, Boolean mill, Boolean inet, Boolean fonts,
     return err;
 }
 
-int main(void)
+static void install_window(void)
 {
     DialogPtr d;
-    short item, type;
+    short item, type, i;
     Handle h;
     Rect r;
-    Boolean custom = false, done = false;
+    Boolean done = false;
+    SysEnvRec env;
+    Handle sz;
+    if (!(d = GetNewDialog(W2, NULL, (WindowPtr)-1))) return;
+    SysEnvirons(1, &env);
+    place_vol = env.sysVRefNum;
+    place_parent = 2;
+    place_found = 0;
+    pstr(place_name, "Mill");
+    if ((sz = Get1Resource('ISIZ', 128)) && GetHandleSize(sz) >= 16) for (i = 0; i < 4; i++) size_of[i] = ((long *)*sz)[i];
+    GetDialogItem(d, W2_RING, &type, &h, &r);
+    SetDialogItem(d, W2_RING, type, (Handle)(UserItemUPP)draw_ring2, &r);
+    GetDialogItem(d, W2_POPUP, &type, &h, &r);
+    SetDialogItem(d, W2_POPUP, type, (Handle)(UserItemUPP)popup_draw, &r);
+    popup = NewMenu(200, "\p");
+    AppendMenu(popup, "\pEasy Install;Custom Install");
+    set_check(d, W2_MILL, 1);
+    set_check(d, W2_INET, 1);
+    set_check(d, W2_FONTS, 1);
+    set_check(d, W2_SDK, 0);
+    ShowWindow(d);
+    SetPort(d);
+    set_mode(d, false);
+    show_place(d);
+    while (!done) {
+        ModalDialog(NULL, &item);
+        switch (item) {
+        case W2_QUIT: done = true; break;
+        case W2_POPUP: {
+            Point p;
+            long c;
+            GetDialogItem(d, W2_POPUP, &type, &h, &r);
+            p.v = r.top;
+            p.h = r.left;
+            LocalToGlobal(&p);
+            InsertMenu(popup, -1);
+            CheckItem(popup, 1, !custom);
+            CheckItem(popup, 2, custom);
+            c = PopUpMenuSelect(popup, p.v, p.h, custom ? 2 : 1);
+            DeleteMenu(200);
+            if (HiWord(c) && (LoWord(c) == 2) != custom) {
+                set_mode(d, LoWord(c) == 2);
+                EraseRect(&r);
+                DrawDialog(d);
+            }
+            break;
+        }
+        case W2_MILL: case W2_INET: case W2_FONTS: case W2_SDK:
+            set_check(d, item, !get_check(d, item));
+            item_text(d, item == W2_MILL ? 1 : item == W2_INET ? 2 : item == W2_FONTS ? 3 : 4);
+            show_space(d);
+            break;
+        case W2_CHOOSE:
+            choose_place();
+            show_place(d);
+            break;
+        case W2_INSTALL: {
+            OSErr err;
+            Boolean m = !custom || get_check(d, W2_MILL), n = !custom || get_check(d, W2_INET);
+            Boolean f = !custom || get_check(d, W2_FONTS), s = custom && get_check(d, W2_SDK);
+            if (!m && !n && !f && !s) break;
+            SetCursor(*GetCursor(watchCursor));
+            err = run_install(d, m, n, f, s);
+            InitCursor();
+            set_text(d, W2_STATUS, "");
+            if (err) alert_text("Couldn't install. Error", err);
+            else { NoteAlert(141, NULL); done = true; }
+            break;
+        }
+        }
+    }
+    DisposeMenu(popup);
+    DisposeDialog(d);
+}
+
+int main(void)
+{
     InitGraf(&qd.thePort);
     InitFonts();
     InitWindows();
@@ -391,39 +661,6 @@ int main(void)
     InitDialogs(NULL);
     InitCursor();
     FlushEvents(everyEvent, 0);
-    if (!(d = GetNewDialog(DLG, NULL, (WindowPtr)-1))) return 1;
-    GetDialogItem(d, ITEM_RING, &type, &h, &r);
-    SetDialogItem(d, ITEM_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
-    set_check(d, ITEM_MILL, 1, 0);
-    set_check(d, ITEM_INET, 1, 0);
-    set_check(d, ITEM_FONTS, 1, 0);
-    set_check(d, ITEM_SDK, 0, 0);
-    mode(d, false);
-    ShowWindow(d);
-    SetPort(d);
-    while (!done) {
-        ModalDialog(NULL, &item);
-        switch (item) {
-        case ITEM_QUIT: done = true; break;
-        case ITEM_EASY: custom = false; mode(d, false); break;
-        case ITEM_CUSTOM: custom = true; mode(d, true); break;
-        case ITEM_MILL: case ITEM_INET: case ITEM_FONTS: case ITEM_SDK:
-            set_check(d, item, !get_check(d, item), 1);
-            break;
-        case ITEM_INSTALL: {
-            OSErr err;
-            if (custom && !get_check(d, ITEM_MILL) && !get_check(d, ITEM_INET) && !get_check(d, ITEM_FONTS) && !get_check(d, ITEM_SDK)) break;
-            if (!choose_place()) break;
-            SetCursor(*GetCursor(watchCursor));
-            err = run_install(d, get_check(d, ITEM_MILL), get_check(d, ITEM_INET), get_check(d, ITEM_FONTS), get_check(d, ITEM_SDK));
-            InitCursor();
-            status(d, "");
-            if (err) alert_text("Installation failed", err);
-            else { NoteAlert(130, NULL); done = true; }
-            break;
-        }
-        }
-    }
-    DisposeDialog(d);
+    if (welcome()) install_window();
     return 0;
 }

@@ -35,6 +35,13 @@ def main():
         path = os.path.join(out, 'payload', '%d.gz' % rid)
         open(path, 'wb').write(z)
         r.append("data 'MBIN' (%d, %s) { $$read(%s) };" % (rid, rez_string(name), rez_string(path)))
+    # what each part takes on a disk, for the installer's "space needed": Mill, Internet Services, Web Fonts, SDK
+    def need(mb):
+        import struct
+        d, rl = struct.unpack('>II', mb[83:91])
+        return (d + 1023) // 1024 * 1024 + (rl + 1023) // 1024 * 1024
+    sizes = [need(items[i][2]) for i in range(3)] + [sum(need(mb) for _, _, mb in items[3:])]
+    r.append("data 'ISIZ' (128) { $\"%s\" };" % ''.join('%08X' % n for n in sizes))
     open(os.path.join(out, 'payload.r'), 'w').write('\n'.join(r) + '\n')
     print('%d files, %d bytes compressed' % (len(items), total))
 
