@@ -581,6 +581,17 @@ static void test_html32(void)
     html_free(&d);
     (void)buf;
 
+    /* a Roman numeral list is indented more, for the wider markers */
+    h = "<OL TYPE=a><LI>aa</OL><OL TYPE=i><LI>bb</OL><OL TYPE=I START=7><LI>cc<LI VALUE=14>dd</OL>";
+    CHECK(html_parse(&d, h, strlen(h)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 400) == 0);
+    a = find(&L, &d, "aa"); b = find(&L, &d, "bb"); c = find(&L, &d, "cc");
+    CHECK(a && b && c && b->x > a->x && c->x == b->x);
+    a = find(&L, &d, "dd");
+    CHECK(a && a->x == c->x);
+    layout_free(&L);
+    html_free(&d);
+
     /* COMPACT: no gaps around a list; DL COMPACT sets a definition beside a term that fits the indent */
     {
         const char *plain = "x<UL><LI>one</UL>y", *compact = "x<UL COMPACT><LI>one</UL>y";
@@ -1854,7 +1865,7 @@ static void test_update(void)
     CHECK(update_compare("1.10b2", "1.9.5") > 0);
     CHECK(update_compare("1.10b2", "1.10b3") < 0);
     /* the decisions the About page makes: newer, the same, older */
-    CHECK(update_compare("1.9.2", "1.9.1") > 0 && update_compare("1.9.1", "1.9.1") == 0 && update_compare("1.9", "1.9.1") < 0);
+    CHECK(update_compare("2.0", "1.9.2") > 0 && update_compare("1.9.2", "1.9.1") > 0 && update_compare("1.9.1", "1.9.1") == 0 && update_compare("1.9", "1.9.1") < 0);
 }
 
 static void test_format(void)

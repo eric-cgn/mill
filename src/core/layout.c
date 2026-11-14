@@ -1242,7 +1242,12 @@ static void walk(State *S, long node, Ctx c)
             if (d->nodes[p].tag == TAG_UL || d->nodes[p].tag == TAG_OL || d->nodes[p].tag == TAG_DL) nested = 1;
         block = 1;
         block_break(S, nested || compact ? 0 : gap_for(S, &c), &c);
-        if (n->tag != TAG_DL) S->left += ZS(S, compact ? 16 : INDENT);
+        if (n->tag != TAG_DL) {
+            /* room for the markers: a Roman numeral is wider than the usual indent */
+            const char *t = n->tag == TAG_OL ? html_attr(d, n, "type") : NULL;
+            short ind = t && (*t == 'i' || *t == 'I') ? 40 : INDENT;
+            S->left += ZS(S, compact ? ind - 8 : ind);
+        }
         if (n->tag == TAG_OL) {
             long k, num = (v = html_attr(d, n, "start")) ? atol(v) : 1;
             S->lstyle = ol_style(html_attr(d, n, "type"), '1');
