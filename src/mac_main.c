@@ -93,7 +93,8 @@ typedef struct Browser {
     Pic *pics;
     short npics;
     short *pic_of;              /* IMG node -> index in pics + 1, or 0 */
-    long focus;                 /* the field being typed in, or -1 for the address */
+    long focus;                 /* the field being typed in, -1 for the address, or -2 for the page */
+    long sel_a, sel_b;          /* with -2, the page's text selected: Doc.text offsets, either order */
     Boolean focus_shown;        /* the focused field was on screen at the last draw */
     Rect focus_clip;            /* and where */
     unsigned long refresh_at;   /* client pull: the TickCount to load again at, 0 for none */
@@ -1473,6 +1474,36 @@ static Boolean pic_area(short which, Rect *area)
     return any;
 }
 
+/* How wide a text run's first n characters are */
+static short run_width(const Run *r, long n)
+{
+    MStyle s;
+    s.font = r->font; s.size = r->size; s.face = r->face;
+    return (short)qd_width(NULL, &s, br->doc.text + r->text, n);
+}
+
+/* Invert the page's text between Doc.text offsets a and b where it shows */
+static void sel_invert(long a, long b)
+{
+    long i, k, s, e;
+    if (a > b) { s = a; a = b; b = s; }
+    for (i = layout_line_at(&br->lay, br->scroll_y); i < br->lay.nlines && br->lay.lines[i].y < br->scroll_y + br->view_r.bottom; i++) {
+        const MLine *ln = &br->lay.lines[i];
+        Rect rc;
+        rc.top = br->view_r.top + (short)(ln->y - br->scroll_y);
+        rc.bottom = rc.top + ln->height;
+        for (k = ln->first; k < ln->first + ln->count; k++) {
+            const Run *r = &br->lay.runs[k];
+            s = a > r->text ? a : r->text;
+            e = b < r->text + r->len ? b : r->text + r->len;
+            if (r->kind != RUN_TEXT || s >= e) continue;
+            rc.left = PAGE_LEFT + r->x + run_width(r, s - r->text);
+            rc.right = PAGE_LEFT + r->x + run_width(r, e - r->text);
+            InvertRect(&rc);
+        }
+    }
+}
+
 /* Draw the page's visible part; with only >= 0, just the runs showing that picture */
 static void draw_page(short only)
 {
@@ -1573,6 +1604,7 @@ static void draw_page(short only)
                 TextMode(srcOr);
             }
         }
+        if (only < 0 && br->focus < -1) sel_invert(br->sel_a, br->sel_b);
     }
     unclip(save);
     draw_status();  /* the message stays over the page */
@@ -1788,7 +1820,7 @@ static void activate(WindowPtr w, Boolean on)
     if (!x) return;
     use(x);
     te = x->focus >= 0 && x->forms.fields[x->focus].type != FIELD_PASSWORD ? x->field_te : x->url_te;
-    if (on) TEActivate(te); else TEDeactivate(te);
+    if (x->focus > -2) { if (on) TEActivate(te); else TEDeactivate(te); }
     HiliteControl(x->vscroll, on ? 0 : 255);
     HiliteControl(x->hscroll, on ? 0 : 255);
     draw_grow();
@@ -1824,6 +1856,10 @@ static void blur(void)
         TEDeactivate(br->field_te);
         br->focus = -1;
         br->focus_shown = false;
+    }
+    if (br->focus < -1) {
+        br->focus = -1;
+        if (br->sel_a != br->sel_b) { br->sel_a = br->sel_b; draw_view(); }
     }
     TEActivate(br->url_te);
 }
@@ -4479,6 +4515,91 @@ static void context_menu(Point p, const Run *r)
     }
 }
 
+/* The page takes the keyboard from the address or a field, its selection cleared */
+static void page_focus(void)
+{
+    RgnHandle save;
+    hide_status();
+    if (br->focus > -2) { blur(); TEDeactivate(br->url_te); br->focus = -2; }
+    save = clip_to(&br->view_r);
+    sel_invert(br->sel_a, br->sel_b);
+    unclip(save);
+    br->sel_a = br->sel_b = 0;
+}
+
+/* The Doc.text offset in the page's text nearest p, or -1 if there's none on its line */
+static long sel_at(Point p)
+{
+    long y = br->scroll_y + (p.v - br->view_r.top), i, k;
+    short x = p.h - PAGE_LEFT, n, w0 = 0, w1;
+    const Run *best = NULL;
+    for (i = layout_line_at(&br->lay, y); i < br->lay.nlines && br->lay.lines[i].y <= y; i++) {
+        const MLine *ln = &br->lay.lines[i];
+        if (y >= ln->y + ln->height) continue;
+        for (k = ln->first; k < ln->first + ln->count; k++) {
+            const Run *r = &br->lay.runs[k];
+            if (r->kind == RUN_TEXT && r->x <= x && (!best || r->x > best->x)) best = r;
+        }
+    }
+    if (!best) return -1;
+    for (n = 0; n < best->len; n++, w0 = w1)
+        if ((w1 = run_width(best, n + 1)) + w0 > 2 * (x - best->x)) break;
+    return best->text + n;
+}
+
+/* Select text from p while the button is down; the page scrolls at the view's edges */
+static void drag_select(Point p)
+{
+    Rect v = br->view_r;
+    unsigned long t = 0;
+    long at;
+    RgnHandle save;
+    page_focus();
+    br->sel_a = br->sel_b = sel_at(p);
+    while (StillDown()) {
+        GetMouse(&p);
+        if (TickCount() - t > 2) {
+            t = TickCount();
+            scroll_to(br->scroll_y + (p.v <= v.top ? -16 : p.v >= v.bottom - 1 ? 16 : 0));
+            scroll_x_to(br->scroll_x + (p.h <= v.left ? -16 : p.h >= v.right - 1 ? 16 : 0));
+        }
+        if (p.v < v.top) p.v = v.top;
+        if (p.v >= v.bottom) p.v = v.bottom - 1;
+        if ((at = sel_at(p)) < 0) continue;
+        if (br->sel_a < 0) br->sel_a = br->sel_b = at;
+        save = clip_to(&v);
+        sel_invert(br->sel_b, at);
+        unclip(save);
+        br->sel_b = at;
+    }
+    if (br->sel_a < 0) br->sel_a = br->sel_b = 0;
+}
+
+/* Copy the page's selected text: a return where a line starts again at the left, a space for a gap */
+static void copy_sel(void)
+{
+    long a = br->sel_a < br->sel_b ? br->sel_a : br->sel_b, b = br->sel_a + br->sel_b - a, k, n = 0, s, e;
+    short px = 0;
+    char *buf = malloc(b - a + br->lay.nruns), *lm = (char *)0xAB0;
+    if (!buf) return;
+    for (k = 0; k < br->lay.nruns; k++) {
+        const Run *r = &br->lay.runs[k];
+        s = a > r->text ? a : r->text;
+        e = b < r->text + r->len ? b : r->text + r->len;
+        if (r->kind != RUN_TEXT || s >= e) continue;
+        if (n && r->x != px) buf[n++] = r->x < px ? '\r' : ' ';
+        memcpy(buf + n, br->doc.text + s, e - s);
+        n += e - s;
+        px = r->x + r->width;
+    }
+    ZeroScrap();
+    PutScrap(n, 'TEXT', buf);
+    __asm__("" : "+a"(lm));         /* TEScrpLength and TEScrpHandle, hidden from GCC */
+    PtrToXHand(buf, *(Handle *)(lm + 4), n);     /* TextEdit's scrap too, for pasting here */
+    *(short *)lm = n;
+    free(buf);
+}
+
 /* A click on the page: a link opens and an image waiting to load loads, when the button
    comes up over it; held down, or with Control, it's the menu */
 static void page_click(Point p, EventRecord *ev)
@@ -4497,8 +4618,9 @@ static void page_click(Point p, EventRecord *ev)
             if (now.h - p.h >= HYSTERESIS || p.h - now.h >= HYSTERESIS ||
                 now.v - p.v >= HYSTERESIS || p.v - now.v >= HYSTERESIS) { moved = true; break; }
         }
-        if (moved) while (StillDown()) {}
+        if (moved) { drag_select(p); return; }
         if (!StillDown()) {
+            page_focus();
             GetMouse(&now);
             if (r && run_at(now) == r) {
                 char target[300];
@@ -5260,6 +5382,10 @@ static void do_menu(long choice)
             net_keep_close(NULL, NULL);     /* logged in as someone: they go too */
             if (br) set_status("Logins and cookies cleared.");
         }
+        else if (br && (br->focus < -1 || (br == full && br->focus < 0))) {   /* the page */
+            if (item == EDIT_COPY && br->sel_a != br->sel_b) copy_sel();
+            if (item == EDIT_SELECT_ALL && br->have_page) { page_focus(); br->sel_b = br->doc.text_len; draw_view(); }
+        }
         else if (br && !(br == full && typing_te() == br->url_te)) {   /* not the hidden address */
             if (item == EDIT_CUT) TECut(typing_te());
             if (item == EDIT_COPY) TECopy(typing_te());
@@ -5394,7 +5520,7 @@ static void full_screen(Boolean on)
     Rect r;
     if (on == (br == full) || (on && full)) return;
     SetPort(w);
-    blur();
+    if (br->focus >= 0) blur();
     if (on) {
         r = w->portRect;
         LocalToGlobal((Point *)&r.top);
@@ -5601,6 +5727,7 @@ static void do_key(EventRecord *ev)
         type_in_field(c, ev);
         return;
     }
+    if (br->focus < -1) blur();
     if (c == '\r' || c == 3) { go_typed(); return; }
     TEKey(c, br->url_te);
     te_show_caret(br->url_te);
