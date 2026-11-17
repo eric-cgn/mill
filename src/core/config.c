@@ -69,8 +69,8 @@ static void number(const ConfigIO *io, const char *body, long len, const char *n
 static void general(const ConfigIO *io, const char *body, long len, char *note, int note_size, char *typed, char *rules,
                     int size)
 {
-    static const char *const boxes[] = { "welcome", "scale_text_only", "load_images", "cookies", "decode_macbinary",
-                                         "upload_ext" };
+    static const char *const boxes[] = { "welcome", "scale_text_only", "full_screen_bars", "load_images", "cookies",
+                                         "decode_macbinary", "upload_ext" };
     char home[256], v[160], *c;
     Url check;
     unsigned k;

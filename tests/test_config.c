@@ -68,6 +68,7 @@ static void start(void)
     put("file_types", "*/* * TEXT/ttxt");
     put("welcome", "yes");
     put("scale_text_only", "no");
+    put("full_screen_bars", "yes");
     put("load_images", "yes");
     put("cookies", "no");
     put("decode_macbinary", "yes");
@@ -81,7 +82,7 @@ static void start(void)
 }
 
 static const char *const all[] = { "homepage", "image_memory", "history", "keep_alive", "font_prop", "font_fixed",
-                                   "user_agent", "upload_as", "file_types", "welcome", "scale_text_only", "load_images",
+                                   "user_agent", "upload_as", "file_types", "welcome", "scale_text_only", "full_screen_bars", "load_images",
                                    "cookies", "decode_macbinary", "upload_ext", "net_check", "ping_host",
                                    "print_headers", "print_backgrounds", "bm0", "bm1" };
 
@@ -127,19 +128,21 @@ int main(void)
                 "&font_fixed=Monaco&user_agent=New&upload_as=BinHex&file_types=", note) == 1);
     assert(!note[0]);
     assert(!strcmp(get("welcome"), "no") && !strcmp(get("load_images"), "no") && !strcmp(get("decode_macbinary"), "no"));
+    assert(!strcmp(get("full_screen_bars"), "no"));
     assert(!strcmp(get("homepage"), "http://new/") && !strcmp(get("upload_as"), "BinHex") && !strcmp(get("file_types"), ""));
     others_unchanged(" homepage image_memory history keep_alive font_prop font_fixed user_agent upload_as file_types"
-                     " welcome scale_text_only load_images cookies decode_macbinary upload_ext ");
+                     " welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext ");
     assert(!strcmp(get("print_headers"), "yes") && !strcmp(get("print_backgrounds"), "no"));
     assert(!strcmp(get("net_check"), "no"));
 
     /* General with its boxes ticked */
     start();
     keep();
-    assert(save("section=general&scale_text_only=yes&cookies=yes&upload_ext=yes", note) == 1 && !note[0]);
+    assert(save("section=general&scale_text_only=yes&full_screen_bars=yes&cookies=yes&upload_ext=yes", note) == 1 && !note[0]);
+    assert(!strcmp(get("full_screen_bars"), "yes"));
     assert(!strcmp(get("scale_text_only"), "yes") && !strcmp(get("cookies"), "yes") && !strcmp(get("upload_ext"), "yes"));
     assert(!strcmp(get("welcome"), "no"));
-    others_unchanged(" welcome scale_text_only load_images cookies decode_macbinary upload_ext ");
+    others_unchanged(" welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext ");
 
     /* Printing: its own two boxes and nothing else, even if the body has others' fields */
     start();
