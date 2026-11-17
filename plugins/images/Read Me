@@ -1,0 +1,38 @@
+Image Formats
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder.
+
+  MacPaint    .mac, .pntg, or Finder type PNTG
+  PICT        Version 1 and 2, .pict or .pct, or Finder type PICT
+  XBM         X10 and X11 bitmaps, .xbm
+  BMP         Windows 3 and OS/2 bitmaps, .bmp
+  Netpbm      PBM, PGM, and PPM, plain or raw
+  PNG         All color types and depths, .png or Finder type PNGf
+
+Images show in pages and on their own, read as they arrive. Mill scales
+and dithers them, and makes large ones smaller to fit its memory.
+
+PICT version 1 is drawn by QuickDraw. Version 2 needs Color QuickDraw,
+so only its images are shown, not its lines, shapes, or text. BMP: 1,
+4, 8, or 24 bits, RLE4 and RLE8.
+
+PNG: gray, palette, and truecolor, 1 to 16 bits, with or without
+alpha, interlaced or not. A pixel at least half opaque is blended onto
+white; one less shows the page. Mill draws a picture's pixel or the
+page, nothing between, so a soft edge on a dark table cell keeps a light
+fringe. Gamma is ignored: Mill dithers to black and white, so exact
+tones matter less than speed. CRCs are not checked, for speed (damage
+mostly shows in the compressed data anyway); to check them, turn on
+Check CRCs under PNG in Mill's settings. Memory: 36K for decompressing
+and two rows, about 40K for a 200 x 150 picture.
+An interlaced one also keeps a quarter of its pixels until its last
+pass: past 64K of them (512 x 512, or 362 x 362 with transparency) it
+is too large, and shows broken.
+
+Written from the published specifications (Apple Technical Notes 86 and
+171, Inside Macintosh volumes I and V, Imaging With QuickDraw, Xlib's
+XReadBitmapFile, the Windows 3.1 SDK, the OS/2 2.0 Presentation Manager
+reference, Netpbm's format pages, and the PNG 1.0 specification, RFC 2083,
+with RFC 1950). PNG's decompression is Mill's own.
+
+Build: ./build.sh writes build/Image Formats.bin.

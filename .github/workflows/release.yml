@@ -1,6 +1,6 @@
 # Every push to main: if src/version.h names a version with no release yet, build Mill and
 # its installer, tag the commit vX.Y.Z, make a GitHub release with Install Mill (.hqx and .bin)
-# and the Mill disk image, and
+# and the Mill Program Disk image (Mill ready to run), and
 # rebuild the download site (mill.1in1e6.com) from every release. A push that keeps the
 # version does nothing. Run it by hand to rebuild the site alone.
 name: Release
@@ -75,12 +75,12 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - name: The three newest releases' files
+      - name: The three newest releases' files (Mill's own, tagged vX.Y.Z)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p site/download
-          gh release list --limit 100 --exclude-pre-releases --json tagName,createdAt -q 'sort_by(.createdAt) | reverse | .[:3][] | .tagName' | while read -r tag; do
+          gh release list --limit 100 --exclude-pre-releases --json tagName,createdAt -q 'map(select(.tagName | test("^v[0-9]"))) | sort_by(.createdAt) | reverse | .[:3][] | .tagName' | while read -r tag; do
             gh release download "$tag" --dir site/download --pattern 'Install-Mill-*' --pattern 'Mill-*'
           done
       - name: Page

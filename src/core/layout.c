@@ -9,7 +9,7 @@
 #define MAX_COLS 64
 #define WIDE 30000   /* "no wrapping" when measuring */
 
-/* HTML font sizes 1..7 in points, Netscape's ladder */
+/* HTML font sizes 1..7 in points, one to one, for fixed text too ([0] is unused) */
 static const short SIZES[8] = { 9, 9, 10, 12, 14, 18, 24, 36 };
 
 /* A size or distance at the page's zoom (zn over 9), in whole pixels; one that's there stays at least 1 */
@@ -35,11 +35,27 @@ typedef struct {
     char dark;              /* on a dark background: text goes white */
 } Ctx;
 
-typedef struct { long node; short min, max; } Measured;
+/* A table measured for an enclosing table: its narrowest and widest, and each cell's (two
+   shorts a cell, or NULL without the memory), for when it's laid out */
+typedef struct { long node; short min, max; short *cells; long ncells; } Measured;
+
+/* What's been measured in a style: the width of a space, and the height of a line */
+#define STYLES 8
+typedef struct { MStyle s; short space, asc, desc, lead; char has_space, has_line, has_adds, adds; } Styled;
+
+/* A word's width in a style, from the page's text: measured once, then looked up in the
+   pair of slots its letters and style pick (a new word takes the older one's place). A
+   table's cells are laid out three times, narrowest, widest, and for real, and words repeat. */
+#define WORDS 512
+typedef struct { long text; short len, width; MStyle s; } Word;
+
 typedef struct {
     Measured *tables; long n, cap;
     int shown;              /* the progress last reported */
     int stopped;            /* progress said to stop */
+    Styled styles[STYLES], *last; int nstyles, next_style;
+    struct { const char *face; short font; } faces[4]; int nfaces;     /* FONT FACE= lists looked up */
+    Word *words;            /* WORDS of them, or NULL without the memory: then measured each time */
 } Shared;
 
 /* A floating image (ALIGN=LEFT or RIGHT): text keeps to the side of edge until y reaches bottom */
@@ -69,6 +85,8 @@ typedef struct {
     char lstyle;            /* this list's TYPE: OL '1' 'a' 'A' 'i' 'I'; UL 'd' disc, 'c' circle, 's' square */
     short basefont;         /* BASEFONT SIZE, what FONT SIZE=+n and -n count from (3) */
     int measure;
+    char lazy;              /* measuring for the widest: the line's last run has grown by words whose widths were
+                               added up, and is measured whole when it's done (settle) */
     short extent;           /* right edge of the widest line so far */
     Float fl[MAX_FLOATS]; int nfl;      /* this flow's floats (a table cell has its own) */
     Waiting wait[MAX_FLOATS]; int nwait;
@@ -98,17 +116,99 @@ static int grow(void **p, long *cap, long need, long size)
     return 0;
 }
 
-static MStyle style_of(const State *S, const Ctx *c)
+__attribute__((optimize("O2"))) static MStyle style_of(const State *S, const Ctx *c)
 {
     MStyle s;
     s.font = c->pre ? FONT_FIXED : c->font;
-    /* PRE is the fixed font at 10, or 9 when made smaller (FONT SIZE=1 or 2, SMALL): these are
-       steps on the size ladder from the fixed font's size setting, 10 by default (Courier
-       or Mill Mono there: 5 pixels a character, so 80 columns fit a Plus's full-width
-       window, as text files and gopher menus need) */
-    s.size = zoom_px(S->zt, c->pre ? (c->size_index < 3 ? 9 : 10) : SIZES[c->size_index < 1 ? 1 : c->size_index > 7 ? 7 : c->size_index]);
+    /* PRE follows the ladder like other text: Mill's own text pages use SIZE=2, 10 points,
+       where Courier and Mill Mono are 6 pixels a character, so 80 columns fit a Plus's window */
+    s.size = zoom_px(S->zt, SIZES[c->size_index < 1 ? 1 : c->size_index > 7 ? 7 : c->size_index]);
     s.face = c->face | (c->link ? FACE_UNDERLINE : 0) | (c->dark ? FACE_INVERSE : 0);
     return s;
+}
+
+/* ------------------------------------------------------------ measuring, remembered */
+
+static int same_style(const MStyle *a, const MStyle *b)
+{
+    return a->font == b->font && a->size == b->size && a->face == b->face;
+}
+
+/* (mostly the style asked for last) */
+static Styled *styled(State *S, const MStyle *s)
+{
+    Shared *sh = S->sh;
+    Styled *y = sh->last;
+    int i;
+    if (y && same_style(&y->s, s)) return y;
+    for (i = 0; i < sh->nstyles; i++) if (same_style(&sh->styles[i].s, s)) return sh->last = &sh->styles[i];
+    y = sh->nstyles < STYLES ? &sh->styles[sh->nstyles++] : &sh->styles[sh->next_style++ % STYLES];
+    y->s = *s;
+    y->has_space = y->has_line = y->has_adds = 0;
+    return sh->last = y;
+}
+
+static int adds_up(State *S, const MStyle *s)
+{
+    Styled *y;
+    if (!S->m->adds_up) return 0;
+    y = styled(S, s);
+    if (!y->has_adds) {
+        y->adds = S->m->adds_up(S->m->ctx, s) != 0;
+        y->has_adds = 1;
+    }
+    return y->adds;
+}
+
+static short space_width(State *S, const MStyle *s)
+{
+    Styled *y = styled(S, s);
+    if (!y->has_space) {
+        y->space = (short)S->m->text_width(S->m->ctx, s, " ", 1);
+        y->has_space = 1;
+    }
+    return y->space;
+}
+
+static void line_metrics(State *S, const MStyle *s, short *a, short *d, short *l)
+{
+    Styled *y = styled(S, s);
+    if (!y->has_line) {
+        S->m->font_metrics(S->m->ctx, s, &y->asc, &y->desc, &y->lead);
+        y->has_line = 1;
+    }
+    *a = y->asc;
+    *d = y->desc;
+    *l = y->lead;
+}
+
+/* A word of the page's text (len bytes at text) */
+/* (as the cache's words are short, compared here rather than with memcmp) */
+static int same_text(const char *a, const char *b, short n)
+{
+    while (n-- > 0) if (*a++ != *b++) return 0;
+    return 1;
+}
+
+__attribute__((optimize("O2"))) static long word_width(State *S, const MStyle *s, long text, long len)
+{
+    const char *t = S->d->text + text;
+    const unsigned char *p = (const unsigned char *)t, *e = p + len;
+    unsigned short h = (unsigned short)(len + s->font + s->size * 3 + s->face * 5);   /* 16 bits: quicker on a 68000 */
+    long i;
+    Word *w;
+    if (!S->sh->words || len > 0x7FFF) return S->m->text_width(S->m->ctx, s, t, len);
+    while (p < e) h = (unsigned short)((h << 5) + h + *p++);
+    w = &S->sh->words[(h ^ h >> 7) & (WORDS - 2)];
+    if (w->len == len && same_style(&w->s, s) && same_text(S->d->text + w->text, t, (short)len)) return w->width;
+    if (w[1].len == len && same_style(&w[1].s, s) && same_text(S->d->text + w[1].text, t, (short)len)) return w[1].width;
+    if ((i = S->m->text_width(S->m->ctx, s, t, len)) < -32768 || i > 32767) return i;
+    w[1] = w[0];            /* the pair's older word makes way */
+    w->width = (short)i;
+    w->text = text;
+    w->len = (short)len;
+    w->s = *s;
+    return w->width;
 }
 
 short layout_shift(short size, unsigned char face)
@@ -151,6 +251,25 @@ static void reach(State *S)
 
 /* ------------------------------------------------------------ lines */
 
+/* Measuring for the widest, every paragraph is a line, and each word would have its run
+   measured again, whole, from the paragraph's start. Instead the words' widths are added up
+   while the run grows, and it's measured whole once, when it's done: before anything else is
+   placed or the line ends. So the widest line is what it would have been, word by word: a
+   run's width only grows as words are added, and a sum stays far from the right edge, WIDE,
+   where a line would wrap (see add_word). */
+static void settle(State *S)
+{
+    Run *p;
+    MStyle s;
+    if (!S->lazy) return;
+    S->lazy = 0;
+    p = &S->L->runs[S->L->nruns - 1];
+    s.font = p->font; s.size = p->size; s.face = p->face;
+    p->width = (short)S->m->text_width(S->m->ctx, &s, S->d->text + p->text, p->len);
+    S->x = p->x + p->width;
+    reach(S);
+}
+
 static void apply_gap(State *S)
 {
     if (S->pending_gap && S->y > S->top) S->y += S->pending_gap;
@@ -158,32 +277,36 @@ static void apply_gap(State *S)
 }
 
 /* Where the next line will go: past any gap waiting before it */
-static long next_y(const State *S)
+__attribute__((optimize("O2"))) static long next_y(const State *S)
 {
     return S->pending_gap && S->y > S->top ? S->y + S->pending_gap : S->y;
 }
 
 /* The margins of the line at the pen, narrowed by the floats beside it */
-static short line_left(const State *S)
+__attribute__((optimize("O2"))) static short line_left(const State *S)
 {
-    long y = next_y(S);
+    long y;
     short l = S->left;
     int i;
+    if (!S->nfl) return l;
+    y = next_y(S);
     for (i = 0; i < S->nfl; i++) if (!S->fl[i].right && S->fl[i].bottom > y && S->fl[i].edge > l) l = S->fl[i].edge;
     return l;
 }
 
-static short line_right(const State *S)
+__attribute__((optimize("O2"))) static short line_right(const State *S)
 {
-    long y = next_y(S);
+    long y;
     short r = S->right;
     int i;
+    if (!S->nfl) return r;
+    y = next_y(S);
     for (i = 0; i < S->nfl; i++) if (S->fl[i].right && S->fl[i].bottom > y && S->fl[i].edge < r) r = S->fl[i].edge;
     return r;
 }
 
 /* Move the pen below floats: on the left, the right, or both (side 'l', 'r', 'a') */
-static void clear_floats(State *S, char side)
+__attribute__((optimize("O2"))) static void clear_floats(State *S, char side)
 {
     int i;
     for (i = 0; i < S->nfl; i++)
@@ -192,17 +315,19 @@ static void clear_floats(State *S, char side)
 
 static void place_float(State *S, long node, const Ctx *c);
 
-static void finish_line(State *S, int force, const Ctx *c)
+__attribute__((optimize("O2"))) static void finish_line(State *S, int force, const Ctx *c)
 {
     short left = line_left(S), right = line_right(S);
     Layout *L = S->L;
-    long count = L->nruns - S->line_first, i;
+    long count, i;
     short asc = 0, desc = 0, lead = 0, used, shift = 0;
     MLine *ln;
+    settle(S);
+    count = L->nruns - S->line_first;
     if (count == 0 && !force) return;
     if (count == 0) {
         MStyle s = style_of(S, c);
-        S->m->font_metrics(S->m->ctx, &s, &asc, &desc, &lead);
+        line_metrics(S, &s, &asc, &desc, &lead);
     }
     for (i = S->line_first; i < L->nruns; i++) {
         Run *r = &L->runs[i];
@@ -216,27 +341,36 @@ static void finish_line(State *S, int force, const Ctx *c)
             continue;
         }
         s.font = r->font; s.size = r->size; s.face = r->kind == RUN_MARK ? 0 : r->face;
-        S->m->font_metrics(S->m->ctx, &s, &a, &d, &l);
+        line_metrics(S, &s, &a, &d, &l);
         up_by = layout_shift(r->size, r->face);     /* SUP and SUB take more of the line above or below */
         if (up_by > 0) a += up_by; else d -= up_by;
         if (a > asc) asc = a;
         if (d > desc) desc = d;
         if (l > lead) lead = l;
     }
-    used = S->x - left;
-    if (S->align == ALIGN_CENTER) shift = (right - left - used) / 2;
-    else if (S->align == ALIGN_RIGHT) shift = right - left - used;
-    if (shift > 0) for (i = S->line_first; i < L->nruns; i++) if (L->runs[i].kind != RUN_RULE) L->runs[i].x += shift;
     apply_gap(S);
-    if (grow((void **)&L->lines, &L->cap_lines, L->nlines + 1, sizeof(MLine))) { S->oom = 1; return; }
-    ln = &L->lines[L->nlines++];
-    ln->y = S->y;
-    ln->ascent = asc;
-    ln->height = asc + desc + lead;
-    ln->first = S->line_first;
-    ln->count = count;
-    if (ln->height > L->tallest) L->tallest = ln->height;
-    S->y += ln->height;
+    if (S->measure) {
+        /* measuring: only how wide it was matters (and how tall, for tallest); the line and
+           its runs are thrown away now rather than when the measuring ends */
+        short h = asc + desc + lead;
+        if (h > L->tallest) L->tallest = h;
+        S->y += h;
+        L->nruns = S->line_first;
+    } else {
+        used = S->x - left;
+        if (S->align == ALIGN_CENTER) shift = (right - left - used) / 2;
+        else if (S->align == ALIGN_RIGHT) shift = right - left - used;
+        if (shift > 0) for (i = S->line_first; i < L->nruns; i++) if (L->runs[i].kind != RUN_RULE) L->runs[i].x += shift;
+        if (grow((void **)&L->lines, &L->cap_lines, L->nlines + 1, sizeof(MLine))) { S->oom = 1; return; }
+        ln = &L->lines[L->nlines++];
+        ln->y = S->y;
+        ln->ascent = asc;
+        ln->height = asc + desc + lead;
+        ln->first = S->line_first;
+        ln->count = count;
+        if (ln->height > L->tallest) L->tallest = ln->height;
+        S->y += ln->height;
+    }
     S->line_first = L->nruns;
     S->space = 0;
     S->brk = 0;
@@ -258,7 +392,7 @@ static short gap_for(State *S, const Ctx *c)
 {
     short a, d, l;
     MStyle s = style_of(S, c);
-    S->m->font_metrics(S->m->ctx, &s, &a, &d, &l);
+    line_metrics(S, &s, &a, &d, &l);
     return (a + d + l) * 2 / 3;
 }
 
@@ -295,15 +429,15 @@ static void place_marker(State *S, const Ctx *c)
 }
 
 /* Room for something w wide at the pen: wraps first if it doesn't fit and the line
-   may break here. Returns the space to leave before it. */
-static long make_room(State *S, const Ctx *c, long w)
+   may break here. Returns the space to leave before it, in st (c's style, or NULL). */
+__attribute__((optimize("O2"))) static long make_room(State *S, const Ctx *c, const MStyle *st, long w)
 {
     long sp = 0;
     int i;
     if (S->L->nruns == S->line_first) {
         /* a line not yet begun starts at the margin, which a list, a quote, or a float may
            have moved; if what comes first won't fit beside the floats, it goes below them */
-        for (i = 0; i < MAX_FLOATS && !c->pre && w > line_right(S) - line_left(S); i++) {
+        for (i = 0; i < MAX_FLOATS && S->nfl && !c->pre && w > line_right(S) - line_left(S); i++) {
             long below = -1, y = next_y(S);
             int k;
             for (k = 0; k < S->nfl; k++) if (S->fl[k].bottom > y && (below < 0 || S->fl[k].bottom < below)) below = S->fl[k].bottom;
@@ -315,8 +449,9 @@ static long make_room(State *S, const Ctx *c, long w)
         S->lead = 0;
     }
     if (S->space && S->x > line_left(S)) {
-        MStyle s = style_of(S, c);
-        sp = S->m->text_width(S->m->ctx, &s, " ", 1);
+        MStyle s;
+        if (!st) { s = style_of(S, c); st = &s; }
+        sp = space_width(S, st);
     }
     if (!c->pre && (S->space || S->brk) && S->x + sp + w > line_right(S) && S->x > line_left(S)) {
         finish_line(S, 0, c);
@@ -326,31 +461,50 @@ static long make_room(State *S, const Ctx *c, long w)
     return sp;
 }
 
-/* Add one word (no spaces, unless pre) at the pen, wrapping first if it doesn't fit */
-static void add_word(State *S, const Ctx *c, int kind, long text, long len, const char *bytes)
+/* Add one word (no spaces, unless pre) of text in style st (c's) at the pen, wrapping first
+   if it doesn't fit */
+__attribute__((optimize("O2"))) static void add_word(State *S, const Ctx *c, const MStyle *st, long text, long len)
 {
-    MStyle s = style_of(S, c);
-    long w = S->m->text_width(S->m->ctx, &s, bytes, len);
-    long sp = make_room(S, c, w);
+    const MStyle s = *st;
+    long w = word_width(S, &s, text, len), sp;
     Run *r;
+    /* a run whose width is a sum is measured before a word could take the line near WIDE */
+    if (S->lazy && S->x + space_width(S, &s) + w >= WIDE / 2) settle(S);
+    sp = make_room(S, c, &s, w);
     /* extend the previous run when it's the same style and the text continues after one space */
-    if (S->L->nruns > S->line_first && kind == RUN_TEXT && !S->fresh) {
+    if (S->L->nruns > S->line_first && !S->fresh) {
         Run *p = &S->L->runs[S->L->nruns - 1];
         if (p->kind == RUN_TEXT && p->font == s.font && p->size == s.size && p->face == s.face && p->link == c->link &&
             ((sp && p->text + p->len + 1 == text && S->d->text[p->text + p->len] == ' ') || (!sp && p->text + p->len == text)) &&
             p->len + len + 1 < 30000) {
             p->len = (short)(text + len - p->text);
+            S->space = S->brk = 0;
+            if (adds_up(S, &s)) {
+                /* as wide as it was, the space, and the word: what measuring it whole would say */
+                p->width = (short)(p->width + sp + w);
+                S->x = p->x + p->width;
+                reach(S);
+                return;
+            }
+            if (S->measure == MEASURE_MAX && S->x + sp + w < WIDE / 2) {
+                /* added up for now (see settle) */
+                S->x += (short)(sp + w);
+                p->width = S->x - p->x;
+                S->lazy = 1;
+                return;
+            }
             /* measured whole, as it will be drawn: a scaled font's widths add up differently word by word */
+            S->lazy = 0;
             p->width = (short)S->m->text_width(S->m->ctx, &s, S->d->text + p->text, p->len);
             S->x = p->x + p->width;
-            S->space = S->brk = 0;
             reach(S);
             return;
         }
     }
+    settle(S);
     S->fresh = 0;
     if (!(r = add_run(S))) return;
-    r->kind = kind;
+    r->kind = RUN_TEXT;
     r->text = text;
     r->len = (short)len;
     r->x = S->x + (short)sp;
@@ -359,16 +513,17 @@ static void add_word(State *S, const Ctx *c, int kind, long text, long len, cons
     r->link = c->link;
     S->x += (short)(sp + w);
     S->space = 0;
-    S->brk = kind == RUN_GEN;
+    S->brk = 0;
     reach(S);
 }
 
 static int is_space(char ch) { return ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t'; }
 
-static void flow_text(State *S, const Ctx *c, long off, long len)
+__attribute__((optimize("O2"))) static void flow_text(State *S, const Ctx *c, long off, long len)
 {
     const char *t = S->d->text;
     long i = off, end = off + len;
+    MStyle s = style_of(S, c);      /* the same for every word */
     if (c->pre) {
         while (i < end) {
             long j = i;
@@ -379,10 +534,10 @@ static void flow_text(State *S, const Ctx *c, long off, long len)
             while (a < j) {
                 long b = a;
                 while (b < j && t[b] != '\t') b++;
-                if (b > a) add_word(S, c, RUN_TEXT, a, b - a, t + a);
+                if (b > a) add_word(S, c, &s, a, b - a);
                 if (b < j) {
-                    MStyle st = style_of(S, c);
-                    long tab = 8 * S->m->text_width(S->m->ctx, &st, " ", 1);
+                    settle(S);
+                    long tab = 8 * space_width(S, &s);
                     if (tab < 1) tab = 1;
                     long origin = line_left(S);
                     long begun = S->L->nruns > S->line_first;
@@ -408,7 +563,7 @@ static void flow_text(State *S, const Ctx *c, long off, long len)
         if (is_space(t[i])) { S->space = 1; i++; continue; }
         j = i;
         while (j < end && !is_space(t[j])) j++;
-        add_word(S, c, RUN_TEXT, i, j - i, t + i);
+        add_word(S, c, &s, i, j - i);
         i = j;
     }
 }
@@ -512,7 +667,9 @@ static void children(State *S, long node, const Ctx *c)
    at y; returns where they end */
 static long flow_in(State *S, long node, const Ctx *c, short left, short right, char align, long y)
 {
-    State C = *S;
+    State C;
+    settle(S);
+    C = *S;
     C.left = C.x = left;
     C.right = right;
     C.align = align;
@@ -571,7 +728,7 @@ static void image_box(State *S, long node, const Ctx *c, short *total_w, short *
         else if (w < 0) w = nh ? (short)((long)nw * h / nh) : nw;
         else if (h < 0) h = nw ? (short)((long)nh * w / nw) : nh;
     }
-    S->m->font_metrics(S->m->ctx, &s, &a, &de, &l);
+    line_metrics(S, &s, &a, &de, &l);
     if (w < 0 || h < 0) {
         /* not here yet and no size given: a frame around the placeholder icon (11 x 9)
            and the ALT text, or a small square */
@@ -619,14 +776,14 @@ static void image(State *S, long node, const Ctx *c)
     image_box(S, node, c, &total_w, &total_h, &border);
 
     /* where it sits against the text: bottom on the baseline unless ALIGN says otherwise */
-    S->m->font_metrics(S->m->ctx, &s, &a, &de, &l);
+    line_metrics(S, &s, &a, &de, &l);
     asc = total_h;
     if (v) {
         if ((v[0] | 32) == 'm' || (v[0] | 32) == 'a') asc = (total_h + a) / 2;
         else if ((v[0] | 32) == 't' || (v[0] | 32) == 'l' || (v[0] | 32) == 'r') asc = a;
     }
 
-    sp = make_room(S, c, total_w + 2 * hspace);
+    sp = make_room(S, c, &s, total_w + 2 * hspace);
     if (!(r = add_run(S))) return;
     r->kind = RUN_IMAGE;
     r->text = node;
@@ -703,7 +860,7 @@ static void control(State *S, long node, const Ctx *c)
         if (S->m->control_size) return;
         w = 80; h = 16; asc = 12;  /* no platform to ask (tests) */
     }
-    sp = make_room(S, c, w);
+    sp = make_room(S, c, NULL, w);
     if (!(r = add_run(S))) return;
     r->kind = RUN_CONTROL;
     r->text = node;
@@ -843,23 +1000,37 @@ static void spread(short *cols, short n, short need)
     for (i = 0; i < n; i++) cols[i] += extra / n + (i == n - 1 ? extra % n : 0);
 }
 
-/* Collect the cells and measure each column's narrowest and widest */
-static int build_grid(State *S, long node, const Ctx *c, Grid *g, short pad, short spacing)
+static Measured *memo(Shared *sh, long node);
+
+/* Collect the cells and measure each column's narrowest and widest. A table measured
+   before, for an enclosing one, has its cells' sizes kept: else, with keep, they're kept
+   in a new array there. */
+static int build_grid(State *S, long node, const Ctx *c, Grid *g, short pad, short spacing, short **keep)
 {
     const Doc *d = S->d;
+    const Measured *mm = memo(S->sh, node);
+    const short *known;
     long i;
     short k;
     memset(g, 0, sizeof *g);
     g->caption = -1;
     collect(S, g, node);
+    known = mm && mm->cells && mm->ncells == g->ncells ? mm->cells : NULL;
+    if (keep && !known && g->ncells) *keep = malloc(g->ncells * 2 * sizeof(short));
     for (i = 0; i < g->ncells && !S->oom; i++) {
         Cell *cl = &g->cells[i];
         const Node *cn = &d->nodes[cl->node];
         Ctx cc = cell_ctx(cn, *c);
         const char *v;
         if (cl->row + cl->rspan > g->nrows) cl->rspan = g->nrows - cl->row;
-        cl->max = measure(S, cl->node, &cc, MEASURE_MAX) + 2 * pad;
-        cl->min = html_attr(d, cn, "nowrap") ? cl->max : measure(S, cl->node, &cc, MEASURE_MIN) + 2 * pad;
+        if (known) {
+            cl->max = known[2 * i];
+            cl->min = known[2 * i + 1];
+        } else {
+            cl->max = measure(S, cl->node, &cc, MEASURE_MAX) + 2 * pad;
+            cl->min = html_attr(d, cn, "nowrap") ? cl->max : measure(S, cl->node, &cc, MEASURE_MIN) + 2 * pad;
+            if (keep && *keep) { (*keep)[2 * i] = cl->max; (*keep)[2 * i + 1] = cl->min; }
+        }
         if ((v = html_attr(d, cn, "width")) && cl->cspan == 1) {
             short w = (short)atoi(v);
             if (!strchr(v, '%')) w = ZS(S, w);
@@ -966,16 +1137,18 @@ static void table(State *S, long node, Ctx c)
         if (!mm) {
             Measured m;
             if (!(g = malloc(sizeof *g))) { S->oom = 1; return; }
-            if (build_grid(S, node, &c, g, pad, spacing)) { free(g->cells); free(g); return; }
+            m.cells = NULL;
+            if (build_grid(S, node, &c, g, pad, spacing, &m.cells)) { free(m.cells); free(g->cells); free(g); return; }
             overhead = 2 * border + (g->ncols + 1) * spacing;
             sums(g, &smin, &smax);
             m.node = node;
             m.min = (short)(smin + overhead);
             m.max = (short)(smax + overhead);
+            m.ncells = g->ncells;
             if (wpx > 0 && !wpct && wpx > m.min) m.max = wpx;
             free(g->cells);
             free(g);
-            if (grow((void **)&S->sh->tables, &S->sh->cap, S->sh->n + 1, sizeof(Measured))) { S->oom = 1; return; }
+            if (grow((void **)&S->sh->tables, &S->sh->cap, S->sh->n + 1, sizeof(Measured))) { free(m.cells); S->oom = 1; return; }
             S->sh->tables[S->sh->n++] = m;
             mm = &S->sh->tables[S->sh->n - 1];
         }
@@ -985,7 +1158,7 @@ static void table(State *S, long node, Ctx c)
     }
 
     if (!(g = malloc(sizeof *g))) { S->oom = 1; return; }
-    if (build_grid(S, node, &c, g, pad, spacing) || !g->ncells) { free(g->cells); free(g); return; }
+    if (build_grid(S, node, &c, g, pad, spacing, NULL) || !g->ncells) { free(g->cells); free(g); return; }
     overhead = 2 * border + (g->ncols + 1) * spacing;
     sums(g, &smin, &smax);
 
@@ -1118,6 +1291,7 @@ static void walk(State *S, long node, Ctx c)
     int block = 0;
 
     if (S->sh->stopped || S->oom) return;  /* out of memory: the page ends here */
+    if (n->tag != TAG_TEXT) settle(S);
     if (S->m->progress && d->nnodes > 0 && node * 100 / d->nnodes > S->sh->shown) {
         /* nodes are in page order, so how far through them is how far along */
         S->sh->shown = (int)(node * 100 / d->nnodes);
@@ -1149,7 +1323,18 @@ static void walk(State *S, long node, Ctx c)
             int rel = (v[0] == '+' || v[0] == '-'), num = atoi(v[0] == '+' ? v + 1 : v), sz = rel ? S->basefont + num : num;
             c.size_index = sz < 1 ? 1 : sz > 7 ? 7 : sz;
         }
-        if ((v = html_attr(d, n, "face"))) c.font = (short)font_from_face(S->m, v);
+        if ((v = html_attr(d, n, "face"))) {
+            /* the same few lists over and over, and each name asked for is a search of the fonts */
+            Shared *sh = S->sh;
+            int i;
+            for (i = 0; i < sh->nfaces && strcmp(sh->faces[i].face, v); i++) {}
+            if (i == sh->nfaces) {
+                i = sh->nfaces < 4 ? sh->nfaces++ : 3;
+                sh->faces[i].face = v;
+                sh->faces[i].font = (short)font_from_face(S->m, v);
+            }
+            c.font = sh->faces[i].font;
+        }
         break;
     case TAG_A:
         if (S->measure) break;  /* measuring: nothing to record */
@@ -1382,9 +1567,12 @@ int layout_doc(Layout *L, const Doc *d, const Metrics *m, short width)
     c.font = FONT_PROP;
     c.size_index = 3;
     L->width = width;
+    sh.words = calloc(WORDS, sizeof(Word));
     walk(&S, 0, c);
     finish_line(&S, 0, &c);
+    for (i = 0; i < sh.n; i++) free(sh.tables[i].cells);
     free(sh.tables);
+    free(sh.words);
     L->height = S.y;
     for (i = 0; i < L->nlines; i++)
         if (L->lines[i].y + L->lines[i].height > L->height) L->height = L->lines[i].y + L->lines[i].height;

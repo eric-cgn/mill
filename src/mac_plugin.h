@@ -10,28 +10,34 @@
 #include "core/url.h"
 #include "mac_net.h"
 
-#define BUILTINS 7     /* http, https, file, gif, jpeg, netpbm, gzip: Plug.builtin 1 to 7 */
+#define BUILTINS 5     /* http, https, file, gif, jpeg: Plug.builtin 1 to 5 */
 
-enum { PLUG_READY, PLUG_NEWER, PLUG_CONFLICT, PLUG_SKIPPED, PLUG_FAILED };
+/* PLUG_NEWER and PLUG_OLDER: its 'MIfc' gives another interface (none: older), so none of
+   its code was loaded */
+enum { PLUG_READY, PLUG_NEWER, PLUG_CONFLICT, PLUG_SKIPPED, PLUG_FAILED, PLUG_OLDER };
 
 typedef struct Plug Plug;
 
 /* One protocol, as Mill keeps it (its own copy of what the Plug-In said) */
 typedef struct {
     char *scheme, *heading, *description;
+    long block;         /* MillProtocol.blockSize: 0 if it can't seek */
     short nset;
     MillSetting *sets;
     Plug *plug;
 } PlugProto;
 
-/* One format, likewise */
-typedef struct {
+/* One format, likewise. One whose key a later one has is replaced by it (MillPlugIn.h,
+   Formats): never used, nor its settings shown. */
+typedef struct PlugFormat PlugFormat;
+struct PlugFormat {
     char *key, *heading, *description, *types, *extensions, *fileTypes;
     long gives;
     short nset;
     MillSetting *sets;
     Plug *plug;
-} PlugFormat;
+    PlugFormat *replaced_by, *replaces;
+};
 
 struct Plug {
     char *name, *version, *copyright, *by, *description;
@@ -47,6 +53,7 @@ struct Plug {
     short builtin;          /* which, from 1; 0 for a file */
     FSSpec spec;
     short res;              /* its file's resources while loaded */
+    Boolean shared;         /* res is a font file's, open all along: never closed here */
     Handle code;
     void *self;
 };
@@ -80,6 +87,8 @@ typedef struct {
     short forget;       /* a kept login SavedLogin gave for key didn't work */
 } PluginAsked;
 const PluginAsked *plugin_asked(void);
+/* ...and when it called EndedEarly: what it wrote is cut off */
+#define PLUGIN_CUT (-30003)
 /* What was typed for keys (NULL: nothing), offered by SavedLogin for the requests that
    follow until it's cleared */
 void plugin_login_typed(const char *keys, const char *user, const char *pass);
@@ -91,9 +100,18 @@ Boolean plugin_tidying(void);
 extern Keyring keyring;
 
 struct Body;
+/* window: the window asking, which may keep one connection between requests (see
+   mac_net.h); page: whether it's for the window's page, which may replace the kept one,
+   else (an image, a file saved) it only borrows it. A GET whose kept connection had gone
+   before it answered is asked again, once, on a new one. */
 OSErr plugin_request(const Url *u, const char *url, const char *headers, const char *content_type,
                      struct Body *body, net_sink sink, void *ref,
-                     const char *from_owner, char owner[32], char key[256]);
+                     const char *from_owner, char owner[32], char key[256], const void *window, Boolean page);
+/* The window shows url now: its kept connection is closed if it's to another server */
+void plugin_page_shown(const void *window, const char *url);
+/* Memory is short: kept connections are closed, but while window loads url, not its own
+   to url's server, which the request would only open again. Whether any was closed. */
+Boolean plugin_keep_room(const void *window, const char *url);
 
 /* Keep the Plug-In for url's scheme loaded (a window shows a page it made); the
    Plug-In, to drop later, or NULL */
@@ -104,6 +122,17 @@ void plugin_drop(Plug *p);
 int plugin_setting_name(const char *scheme, const char *key, char *name);
 /* Whether a protocol is on: Mill's own "Enable" setting, SCHEME.enable, on unless "no" */
 Boolean plugin_enabled(const char *scheme);
+/* Parts of files (MillPlugIn.h): the block size of u's protocol, 0 if it can't seek; and
+   whether Mill may read parts there: it can seek, and its Support Random Access is on
+   (file: always) */
+long plugin_block_size(const Url *u);
+Boolean plugin_random_access(const Url *u);
+/* Whether the file in the reply to url (its head: len bytes, through the blank line) can
+   be read in parts, the "seekable" a format is told: url is file:, or its protocol can
+   seek and its Support Random Access is on; and the reply said Accept-Ranges: bytes and
+   the file's size. If so, the size goes in *size and the protocol's block size (the
+   parts to ask for) in *block. */
+Boolean plugin_seekable(const char *url, const char *head, long len, long *size, long *block);
 /* ---- formats ---- */
 
 /* The format for a reply: by its content type, or, when there's none or it's
@@ -112,26 +141,92 @@ Boolean plugin_enabled(const char *scheme);
 PlugFormat *format_for(const char *type, const char *name, OSType ftype, long wants);
 /* Whether a format is on (Mill's own "Enable" setting: KEY.enable) */
 Boolean format_enabled(const PlugFormat *f);
+/* The format a key names (the one in use, not one it replaced), or NULL */
+PlugFormat *format_by_key(const char *key);
+/* Formats with one key: each replaced by the last of them (plugins_init, once all are read) */
+void formats_overlap(void);
 /* The content type for a file name, or a Finder type (TypeForName) */
 long type_for_name(const char *name, char *out, long size);
 long type_for_finder(OSType t, char *out, long size);
 
-/* A decode: a format, and any formats its stream goes on to. Bytes at the end of the
-   chain (a stream or elements nothing reads) go to out. aw, ah: WIDTH and HEIGHT, -1 if
-   not given. encoding: "gzip" for Content-Encoding, else "" or NULL. */
+/* A run: a format reading the reply, then any formats for what it gives (a stream's
+   output, an archive's member), each told what Mill does with it through a sink. A
+   run's format is asked to begin once it has its first bytes (FIRST_BYTES, or all
+   there is); its answer goes to sink->ask. */
 typedef struct FmtRun FmtRun;
-typedef Boolean (*fmt_out)(const char *data, long len, void *ref);
-FmtRun *format_begin(PlugFormat *f, const char *type, const char *encoding, const char *url, short aw, short ah,
-                     long wants, fmt_out out, void *out_ref);
-/* Each piece: 0 to go on, 1 when it needs no more, < 0 when it can't go on */
+
+/* What sink->ask answers */
+enum { FMT_GO, FMT_STOP, FMT_SAVE, FMT_PULL };
+typedef struct {
+    short depth;                /* 0: the reply itself; 1 and on: a member's bytes, or a stream's */
+    PlugFormat *f;
+    short answer, pull;         /* millFormatBegin's (pull only when seekable) */
+    const char *reason;         /* the format's reason, or "" */
+    long size;                  /* -1 if not known */
+    Boolean seekable;
+    const char *path;           /* the member path it was given ("" lists) */
+    const MillEntry *member;    /* depth > 0: the member it reads, or NULL for a stream's */
+} FmtAsk;
+
+typedef struct {
+    void *ref;
+    /* bytes at the end of the chain: a page, text, a stream nothing reads (NULL: none wanted) */
+    Boolean (*out)(const char *p, long n, void *ref);
+    /* a format began: FMT_GO, FMT_STOP, FMT_SAVE (its input goes to save), or FMT_PULL
+       (depth 0: the input stops, and Mill calls format_pull) */
+    short (*ask)(void *ref, const FmtAsk *a);
+    /* a listing's member, for the folder path names ("" or ending in '/'): false to stop */
+    Boolean (*entry)(void *ref, const MillEntry *e, const char *path);
+    /* a member nothing shows: true if it's to be saved (then its bytes go to save; *forks
+       set for both forks of a Mac file); NULL: never */
+    Boolean (*save_member)(void *ref, const MillEntry *e, Boolean *forks);
+    Boolean (*save)(const char *p, long n, void *ref);
+} FmtSink;
+
+/* Where a pull reads: n bytes at offset into p, the count (fewer at the end), or -1; in
+   blocks of block bytes (the protocol's), the last kept */
+typedef struct {
+    long size, block;
+    long (*read)(void *ref, unsigned long at, char *p, long n);
+    void *ref;
+} FmtSource;
+
+/* A run of f (NULL: no format, the bytes are the page, after encoding) for a reply of
+   type from url (its whole address); path is the member path (after "#/", decoded,
+   without an anchor), pos a hint from the last listing. aw, ah: WIDTH and HEIGHT, -1 if
+   not given. encoding: "gzip" for Content-Encoding, undone first. size: -1 if not known. */
+FmtRun *format_begin(PlugFormat *f, const char *type, const char *encoding, const char *url, const char *path,
+                     unsigned long pos, Boolean has_pos, short aw, short ah, long wants, long size, Boolean seekable,
+                     const FmtSink *sink);
+/* Each piece of the reply: 0 to go on, 1 when it needs no more, < 0 when it can't go on
+   (-2: no such member) */
 int format_data(FmtRun *r, const char *p, long n);
+/* The reply is all in: its format decides now if its first bytes never filled */
+void format_input_end(FmtRun *r);
+/* After FMT_PULL: the format lists or gives its member, reading src */
+OSErr format_pull(FmtRun *r, FmtSource *src);
 /* The end (cut: millCut...): the picture, if the chain made one, into *pic (0, -1 for
-   none, IMAGE_NO_MEMORY); the chain is freed */
-int format_end(FmtRun *r, short cut, Bitmap1 *pic);
-/* The type the chain gives at its end, if it's bytes (a stream's, or "text/html") */
+   none, IMAGE_NO_MEMORY), and the type at its end (format_out_type) into type (64
+   bytes), if not NULL; the chain is freed */
+int format_end(FmtRun *r, short cut, Bitmap1 *pic, char *type);
+/* The type the chain gives at its end, if it's bytes for the page ("text/html", a
+   member's type), or a picture member's type when the page is to be that picture */
 const char *format_out_type(const FmtRun *r);
 
 /* Memory is short: loaded Plug-Ins give back what they can; whether any did */
 Boolean plugins_purge(long wanted);
+
+/* ---- fonts ---- */
+
+/* The Plug-In in a font file that draws families of its own (MillPlugIn.h, Fonts), never in
+   plugs: mac_init.c reads its families when it opens the font file. Its code is loaded
+   when a run of text first needs it. */
+typedef struct { char name[32]; short min, max; } PlugFont;
+#define PLUG_FONTS 4
+extern Plug font_plug;
+extern PlugFont plug_fonts[PLUG_FONTS];
+extern short nplug_fonts;
+/* millFont, loading the Plug-In if it isn't: noErr, or why not */
+OSErr plugin_font(MillFontParams *p);
 
 #endif

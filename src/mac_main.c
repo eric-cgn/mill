@@ -8,11 +8,14 @@
 #include "core/charset.h"
 #include "core/cookie.h"
 #include "core/filetypes.h"
+#include "core/fmt.h"
+#include "core/fontsize.h"
 #include "core/form.h"
 #include "core/html.h"
 #include "core/imagemap.h"
 #include "core/image.h"
 #include "core/layout.h"
+#include "core/resume.h"
 #include "core/url.h"
 #include "mac_icons.h"
 #include "mac_local.h"
@@ -28,7 +31,7 @@
 
 enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
 enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_PAGE_SETUP = 6, FILE_PRINT, FILE_QUIT = 9 };
-enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_PREFERENCES = 8 };
+enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_PREFERENCES = 8, EDIT_CLEAR_LOGINS };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME, GO_STOP = 6 };
 enum { VIEW_LARGER = 1, VIEW_SMALLER, VIEW_PAGE_SOURCE = 4 };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
@@ -38,12 +41,13 @@ enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the s
 #define MAX_PAGE (192L * 1024)
 #define MIN_PAGE (24L * 1024)   /* when memory's short, pages are cut shorter, down to this */
 #define HISTORY MILL_HISTORY_MAX    /* history_size() says how many are kept */
-#define FILE_MSG "Web pages can't open this Mac's files or Mill's own pages. Type the address to go there."
+#define FILE_MSG "Web pages can\325t open this Mac\325s files or Mill\325s own pages. Type the address to go there."
 #define FORM_MSG "Forms can only send to the same kind of address as their page."
 #define ALERT_MEMORY 202
 #define ALERT_UNSENT 203
 #define ALERT_NO_MEMORY 204
 #define ALERT_FAILED 205
+#define ALERT_RESUME 207
 enum { UNSENT_STAY = 1, UNSENT_LEAVE };
 
 /* One per distinct picture on the page (the same SRC at the same size is fetched once) */
@@ -357,13 +361,12 @@ static Boolean pack_fixed(PackFam *f)
 
 static int font_number(const char *name);
 
-/* The name used when a setting is empty or names a font that's gone: the System's Times and
-   Courier, or Mill Serif and Mill Mono where the System doesn't have them */
+/* The name used when a setting is empty or names a font that's gone: Web Fonts' Mill Serif and
+   Mill Mono, or the System's Times and Courier without it */
 const char *font_default(int fixed)
 {
-    const char *sys = fixed ? "Courier" : "Times", *pack = fixed ? "Mill Mono" : "Mill Serif";
-    if (font_number(sys) >= 0 || !pack_by_name(pack)) return sys;
-    return pack;
+    const char *mill = fixed ? "Mill Mono" : "Mill Serif";
+    return pack_by_name(mill) ? mill : fixed ? "Courier" : "Times";
 }
 
 static short name_pstr(const char *name, Str255 p)
@@ -417,6 +420,8 @@ static short zscale(short z, long v)
 #define CT(v) zscale(qd_m.zoom, (v))
 #define CD(v) zscale(dist_zoom(), (v))
 
+static void faces_forget(void);
+
 void fonts_choose(void)
 {
     int n = font_number(setting("font_prop", ""));
@@ -426,12 +431,16 @@ void fonts_choose(void)
     n = font_number(setting("font_fixed", ""));
     font_fixed = n >= 0 ? n : font_number(font_default(1));
     if (font_fixed < 0) font_fixed = 22;
+    faces_forget();                 /* the page fonts' stand-ins go with them */
 }
 
 /* A text style as the Font Manager is to get it: font, size, whether the font is the
-   suitcase's (its file then has to be current), and the System's font whose line height
-   a line in it keeps, so a page doesn't shift between the suitcase's and the System's */
-typedef struct { short font, size, line_font, pack_ref; } Face;   /* pack_ref: the suitcase's file if its font is used, else 0 */
+   suitcase's (its file then has to be current), and whether its style is real only in an
+   outline (Times Bold where Times has plain bitmaps). Or one the font Plug-In draws (plug:
+   its family, from 1), measured and drawn with millFont, its lines as the Plug-In says
+   (asc, desc, lead); QuickDraw draws it in font if the Plug-In can't. adds: its widths add up (a line is the sum
+   of its pieces), so layout needn't measure a growing run again. */
+typedef struct { short font, size, pack_ref, plug, asc, desc, lead; Boolean outline, adds; } Face;   /* pack_ref: the suitcase's file if its font is used, else 0 */
 
 /* Whether the System has a strike of the font at the size (not one scaled from another), remembered
    for the last few asked, as text is measured a run at a time */
@@ -448,31 +457,208 @@ static Boolean real_size(short font, short size)
     return seen[i].real;
 }
 
+/* A family's real styles: the entries of its FOND's association table (Inside Macintosh: Text,
+   "Font Family Resources": a size, 0 for an outline, a style, and a font ID) with a style, whose
+   FONT, NFNT, or 'sfnt' is there; outlines only with TrueType. Remembered for a few families. */
+#define STYLED_MAX 24
+typedef struct { Boolean known; short font, ref, n; struct { unsigned char size, style; } e[STYLED_MAX]; } Styled;
+static Styled styled_seen[4];
+static short styled_next;
+
+static Boolean strike_there(short id, Boolean outline)
+{
+    Boolean there;
+    SetResLoad(false);
+    if (outline) there = GetResource('sfnt', id) != NULL;
+    else there = GetResource('NFNT', id) != NULL || GetResource('FONT', id) != NULL;
+    SetResLoad(true);
+    return there;
+}
+
+static const Styled *styled_of(short font, short ref)
+{
+    Styled *st;
+    Handle h;
+    short i, n, was = -1, id[STYLED_MAX];
+    for (i = 0; i < 4; i++) if (styled_seen[i].known && styled_seen[i].ref == ref && styled_seen[i].font == font) return &styled_seen[i];
+    st = &styled_seen[styled_next++ & 3];
+    st->known = true;
+    st->font = font;
+    st->ref = ref;
+    st->n = 0;
+    if (ref) { was = CurResFile(); UseResFile(ref); }
+    if ((h = ref ? Get1Resource('FOND', font) : GetResource('FOND', font))) {
+        const unsigned char *p = (const unsigned char *)*h;
+        long size = GetHandleSize(h), count, k;
+#define W(o) ((short)((p[o] << 8) | p[(o) + 1]))
+        count = size >= 54 ? (long)W(52) + 1 : 0;
+        for (k = 0; k < count && 54 + k * 6 + 6 <= size && st->n < STYLED_MAX; k++) {
+            short sz = W(54 + k * 6), style = W(56 + k * 6);
+            if (style <= 0 || style > 255 || sz < 0 || sz > 255 || (sz == 0 && !sys_outlines)) continue;
+            st->e[st->n].size = (unsigned char)sz;
+            st->e[st->n].style = (unsigned char)style;
+            id[st->n++] = W(58 + k * 6);
+        }
+#undef W
+        for (k = n = 0; k < st->n; k++)    /* (looking may move the FOND: its entries are copied first) */
+            if (strike_there(id[k], st->e[k].size == 0)) st->e[n++] = st->e[k];
+        st->n = n;
+    }
+    if (was >= 0) UseResFile(was);
+    return st;
+}
+
+/* 1 if the family has a bitmap of the size in the style, 2 an outline */
+static int styled_has(short font, short ref, short size, int style)
+{
+    const Styled *st = styled_of(font, ref);
+    short i;
+    int w = 0;
+    for (i = 0; i < st->n; i++)
+        if (st->e[i].style == style) {
+            if (st->e[i].size == size) return 1;
+            if (st->e[i].size == 0) w = 2;
+        }
+    return w;
+}
+
+/* The strikes text in a font can be drawn from: the System's font (sys) or a font file's
+   family (pack, its sizes on the ladder), with the font Plug-In's outlines of that family
+   from min to max (min 0: none). small: the run is 10 point or less (sys_has). */
+typedef struct { short sys; PackFam *pack; short min, max; Boolean small; } Strikes;
+enum { HAS_SYS = 1, HAS_PACK, HAS_OUTLINE, HAS_PLUG };     /* HAS_OUTLINE: the System's, the style real in an outline only;
+                                                              HAS_PLUG: the font Plug-In's */
+
+static Boolean pack_has(PackFam *pf, short size)
+{
+    short k = ladder_at(size);
+    return LADDER[k] == size && (pf->sizes & (1 << k));
+}
+
+/* For font_pick: a real strike of the size in the style. The System's: any size RealFont
+   answers for (a bitmap, or an outline at every size with TrueType), and a style's bitmap,
+   or its outline, unless it's bold and the run 10 point or less: a bold outline drawn 1 bit
+   deep has a plain one's stems there (Times Bold at 9 and 10), so QuickDraw makes bold, a
+   pixel wider, from the plain strike. Asked of the run's size, not each one tried, so bold
+   10 isn't drawn at 11. A font file's: its bitmaps, and its outlines in every style (the Plug-In
+   makes the ones it lacks). */
+static int sys_has(void *ctx, short size, int style)
+{
+    short font = ((Strikes *)ctx)->sys;
+    if (!style) return real_size(font, size) ? HAS_SYS : 0;
+    switch (styled_has(font, 0, size, style)) {
+    case 1: return HAS_SYS;
+    case 2: return (style & FACE_BOLD) && ((Strikes *)ctx)->small ? 0 : HAS_OUTLINE;
+    }
+    return 0;
+}
+
+static int pack_has_style(void *ctx, short size, int style)
+{
+    Strikes *st = ctx;
+    if (style ? styled_has(st->pack->id, st->pack->ref, size, style) == 1 : pack_has(st->pack, size)) return HAS_PACK;
+    return st->min && size >= st->min && size <= st->max ? HAS_PLUG : 0;
+}
+
+/* The font Plug-In's family of the name, or -1 */
+static short plug_font_of(const char *name)
+{
+    short i;
+    for (i = 0; i < nplug_fonts; i++) if (same_name(plug_fonts[i].name, name)) return i;
+    return -1;
+}
+
+/* The font Plug-In can draw its family k at the size in the style: it's loaded, and has the
+   memory to begin. Its lines' ascent, descent, and leading at the size go in f. */
+static Boolean plug_ready(short k, short size, int style, Face *f)
+{
+    MillFontParams p;
+    memset(&p, 0, sizeof p);
+    p.what = millFontOpen;
+    p.font = k;
+    p.size = size;
+    p.face = (short)style;
+    if (plugin_font(&p) != noErr) return false;
+    f->asc = p.ascent;
+    f->desc = p.descent;
+    f->lead = p.leading;
+    return true;
+}
+
+/* The size and strike a run is drawn in (font_pick): one of the size, or near it, in the
+   run's style, then plain; else the size asked for, scaled by the Font Manager. A font
+   file's family (Mill Serif, Mill Mono) is its strikes alone, the System's font its own
+   alone. Measured at it too, so lines are as tall as the size drawn. Remembered, as text is
+   measured a run at a time. */
+static struct { short font, size; unsigned char style; Face f; } faces_seen[16];
+static short faces_next;
+
+static void faces_forget(void)
+{
+    memset(faces_seen, 0, sizeof faces_seen);
+    memset(styled_seen, 0, sizeof styled_seen);
+}
+
 static Face face_of(const MStyle *s)
 {
     Face f;
     PackFam *pf;
-    short k;
-    if (s->font == FONT_PROP) f.font = font_prop;
-    else if (s->font == FONT_FIXED) f.font = font_fixed;
-    else f.font = s->font;
-    f.size = s->size;               /* the core's sizes are the ladder's already */
-    f.line_font = f.font;
-    f.pack_ref = 0;
-    if ((f.font == font_prop || f.font == font_fixed) && !pack_by_id(f.font) && !real_size(f.font, f.size)) {
-        /* the System has no strike of the page font at this size (Times 36, say): Web Fonts' if it has one,
-           rather than one QuickDraw scales up */
-        PackFam *alt = pack_by_name(f.font == font_fixed ? "Mill Mono" : "Mill Serif");
-        k = ladder_at(f.size);
-        if (alt && LADDER[k] == f.size && (alt->sizes & (1 << k))) { f.font = alt->id; f.pack_ref = alt->ref; return f; }
+    Strikes st;
+    short i, font;
+    unsigned char style = s->face & (FACE_BOLD | FACE_ITALIC);
+    int w;
+    if (s->font == FONT_PROP) font = font_prop;
+    else if (s->font == FONT_FIXED) font = font_fixed;
+    else font = s->font;
+    for (i = 0; i < 16; i++)
+        if (faces_seen[i].size && faces_seen[i].font == font && faces_seen[i].size == s->size && faces_seen[i].style == style) return faces_seen[i].f;
+    memset(&f, 0, sizeof f);
+    f.font = font;
+    if ((pf = pack_by_id(font))) {
+        short k = plug_font_of(pf->name);
+        st.pack = pf;
+        st.min = k >= 0 ? plug_fonts[k].min : 0;
+        st.max = k >= 0 ? plug_fonts[k].max : 0;
+        f.size = font_pick(s->size, style, pack_has_style, &st, &w);    /* the core's sizes, the ladder's times the zoom */
+        if (w == HAS_PLUG && !plug_ready(k, f.size, style, &f)) {
+            st.min = 0;                                /* no memory for it: the nearest bitmap */
+            f.size = font_pick(s->size, style, pack_has_style, &st, &w);
+        }
+        f.font = pf->id;                               /* (no strike near: the Font Manager scales the suitcase's) */
+        f.pack_ref = pf->ref;
+        if (w == HAS_PLUG) f.plug = k + 1;
+    } else {
+        st.sys = font;
+        st.small = s->size <= 10;
+        f.size = font_pick(s->size, style, sys_has, &st, &w);
     }
-    if ((pf = pack_by_id(f.font))) {
-        f.line_font = pack_fixed(pf) ? 22 : 20;        /* lines as tall as Courier's or Times's would be */
-        k = ladder_at(f.size);
-        if (LADDER[k] == f.size && (pf->sizes & (1 << k))) f.pack_ref = pf->ref;   /* zoomed sizes off the ladder: scaled */
-        else f.font = f.line_font;                     /* a size it has no strike of: the System's */
-    }
+    f.outline = w == HAS_OUTLINE;
+    /* a bitmap strike (no TrueType: one RealFont answers for is a bitmap) or the Plug-In's
+       outline: whole pixels a character, so a run is as wide as its pieces (qd_adds_up) */
+    f.adds = w == HAS_PACK || w == HAS_PLUG || (w == HAS_SYS && !sys_outlines);
+    i = faces_next++ & 15;
+    faces_seen[i].font = font;
+    faces_seen[i].size = s->size;
+    faces_seen[i].style = style;
+    faces_seen[i].f = f;
     return f;
+}
+
+/* With TrueType, the Font Manager takes a bitmap over an outline (plain Times 24, made bold by
+   QuickDraw, over Times Bold's outline) unless outlines are preferred (Inside Macintosh: Text,
+   SetOutlinePreferred): so they are, while a run whose style is real only in an outline is
+   measured or drawn, and put back after (false, the default; Mill sets it nowhere else), so
+   widths agree. */
+static Boolean outline_enter(const Face *f)
+{
+    if (!f->outline) return false;
+    SetOutlinePreferred(true);
+    return true;
+}
+
+static void outline_leave(Boolean set)
+{
+    if (set) SetOutlinePreferred(false);
 }
 
 /* The Font Manager looks for a font from the current resource file down, and the suitcase
@@ -557,21 +743,52 @@ int font_list(int fixed, char (*names)[FONT_NAME_MAX], int max)
     return n;
 }
 
+/* The port's font, size, and style, each set only if it isn't already: text is measured
+   a word at a time, mostly in the style before */
+static void text_style(short font, short size, short face)
+{
+    GrafPtr port = qd.thePort;
+    if (port->txFont != font) TextFont(font);
+    if (port->txSize != size) TextSize(size);
+    if ((unsigned char)port->txFace != face) TextFace(face);
+}
+
 static void use_face(const Face *f, const MStyle *s)
 {
-    TextFont(f->font);
-    TextSize(f->size);
-    TextFace(s->face & FACE_QD);
+    text_style(f->font, f->size, s->face & FACE_QD);
+}
+
+/* A run in the font Plug-In's family: its width, or drawn (pen: the baseline's start), and
+   the width; -1 if the Plug-In can't (no memory), and QuickDraw measures or draws it */
+static long plug_run(const Face *f, const MStyle *s, const char *text, long len, short what, short h, short v)
+{
+    MillFontParams p;
+    memset(&p, 0, sizeof p);
+    p.what = what;
+    p.font = f->plug - 1;
+    p.size = f->size;
+    p.face = s->face & (FACE_BOLD | FACE_ITALIC);
+    p.text = (const unsigned char *)text;
+    p.len = len;
+    p.pen.h = h;
+    p.pen.v = v;
+    p.mode = (s->face & FACE_INVERSE) && !plain_cells ? srcBic : srcOr;
+    return plugin_font(&p) == noErr ? p.width : -1;
 }
 
 static long qd_width(void *ctx, const MStyle *s, const char *text, long len)
 {
     short was, w;
+    long pw;
+    Boolean ol;
     Face f = face_of(s);
     (void)ctx;
+    if (f.plug && (pw = plug_run(&f, s, text, len, millFontWidth, 0, 0)) >= 0) return pw;
     was = font_enter(&f);
     use_face(&f, s);
+    ol = outline_enter(&f);
     w = TextWidth((Ptr)text, 0, (short)len);
+    outline_leave(ol);
     font_leave(was);
     return w;
 }
@@ -579,15 +796,24 @@ static long qd_width(void *ctx, const MStyle *s, const char *text, long len)
 static void qd_metrics(void *ctx, const MStyle *s, short *a, short *d, short *l)
 {
     FontInfo fi;
+    Boolean ol;
+    short was;
     Face f = face_of(s);
     (void)ctx;
-    /* A line is as tall as the System's own font would make it (the Font Manager scales
-       one it has no strike of this size for), even where Web Fonts draws it, so a page
-       doesn't shift; the few glyphs taller than that just reach into the line above. */
-    TextFont(f.line_font);
-    TextSize(f.size);
-    TextFace(s->face & FACE_QD);
+    /* A line is as tall as the font that draws it: the font Plug-In's outlines as it says,
+       else the strike's own (a font file's family's, from its file) */
+    if (f.plug) {
+        *a = f.asc;
+        *d = f.desc;
+        *l = f.lead;
+        return;
+    }
+    was = font_enter(&f);
+    use_face(&f, s);
+    ol = outline_enter(&f);
     GetFontInfo(&fi);
+    outline_leave(ol);
+    font_leave(was);
     *a = fi.ascent;
     *d = fi.descent;
     *l = fi.leading;
@@ -724,7 +950,8 @@ static Boolean pics_collect(void)
         short k, aw, ah;
         Pic *p;
         if (n->tag != TAG_IMG || !(src = html_attr(&br->doc, n, "src")) || url_resolve(br->page_url, src, url, sizeof url)) continue;
-        if (kind_of(url) != kind && !plugin_url(url)) continue;  /* no pictures from another kind of address */
+        /* no pictures from another kind of address (but Mill's own listing icons, for its listings) */
+        if (kind_of(url) != kind && !plugin_url(url) && strncmp(url, "mill://icon/", 12)) continue;
         aw = px_attr(n, "width");
         ah = px_attr(n, "height");
         for (k = 0; k < br->npics; k++) if (br->pics[k].aw == aw && br->pics[k].ah == ah && !strcmp(br->pics[k].url, url)) break;
@@ -767,7 +994,7 @@ static int qd_image_size(void *ctx, long node, short *w, short *h)
 /* ------------------------------------------------------------ form controls */
 
 #define LINE_H CT(11)   /* a line of Geneva 9, which every control uses, at the zoom */
-#define CHOOSE "Choose..."
+#define CHOOSE "Choose\311"
 
 #define AREA_BAR CD(16)          /* a text area's scroll bar, wide as the Mac's */
 
@@ -867,7 +1094,13 @@ static int qd_control_size(void *ctx, long node, short *w, short *h, short *asc)
 
 static short zoom_step;         /* page zoom, 0 (normal) to 6: the size ladder's step; every window */
 /* The zoom distances and pictures have: the text's, unless only the text is scaled */
-static Metrics qd_m = { qd_width, qd_metrics, qd_image_size, qd_control_size, NULL, NULL, qd_font_by_name };
+static int qd_adds_up(void *ctx, const MStyle *s)
+{
+    (void)ctx;
+    return face_of(s).adds;
+}
+
+static Metrics qd_m = { qd_width, qd_metrics, qd_image_size, qd_control_size, NULL, NULL, qd_font_by_name, 0, 0, qd_adds_up };
 static short dist_zoom(void) { return qd_m.text_only || qd_m.zoom < 9 ? 9 : qd_m.zoom; }
 
 /* Where a control is in the window right now; false if it isn't laid out */
@@ -1040,7 +1273,7 @@ static void draw_list(const Field *f, const Rect *box)
         DrawText(label, 0, strlen(label));
         if (f->selected[i]) InvertRect(&row);
     }
-    if (f->noptions > rows) { MoveTo(box->right - CD(10), box->bottom - CD(3)); DrawText("...", 0, 3); }
+    if (f->noptions > rows) { MoveTo(box->right - CD(10), box->bottom - CD(3)); DrawText("\311", 0, 1); }
 }
 
 static void draw_control(const Run *r, short top)
@@ -1283,15 +1516,29 @@ static void draw_page(short only)
                     MStyle rs;
                     Face f;
                     short was;
+                    long pw;
+                    Boolean ol;
                     rs.font = r->font; rs.size = r->size; rs.face = r->face;
                     f = face_of(&rs);
                     use_face(&f, &rs);
                     short up = layout_shift(r->size, r->face);
                     if ((r->face & FACE_INVERSE) && !plain_cells) TextMode(srcBic);  /* white, on a dark cell */
                     MoveTo(PAGE_LEFT + r->x, base - up);
-                    was = font_enter(&f);
-                    DrawText(r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text, 0, r->len);
-                    font_leave(was);
+                    if (f.plug && (pw = plug_run(&f, &rs, r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text,
+                                                 r->len, millFontDraw, PAGE_LEFT + r->x, base - up)) >= 0) {
+                        if (r->face & FACE_UNDERLINE) {         /* QuickDraw's place for it, a pixel under the baseline */
+                            if ((r->face & FACE_INVERSE) && !plain_cells) PenMode(patBic);
+                            MoveTo(PAGE_LEFT + r->x, base - up + 1);
+                            LineTo(PAGE_LEFT + r->x + (short)pw - 1, base - up + 1);
+                            PenNormal();
+                        }
+                    } else {
+                        was = font_enter(&f);
+                        ol = outline_enter(&f);
+                        DrawText(r->kind == RUN_GEN ? br->lay.gen + r->text : br->doc.text + r->text, 0, r->len);
+                        outline_leave(ol);
+                        font_leave(was);
+                    }
                     if (r->face & FACE_STRIKE) {
                         short sy = base - up - (r->size + 2) / 3;
                         if ((r->face & FACE_INVERSE) && !plain_cells) PenMode(patBic);
@@ -1390,7 +1637,7 @@ static int laying_out(void *ctx, int percent)
 {
     char msg[32];
     (void)ctx;
-    sprintf(msg, "Laying out... %d%%", percent);
+    sprintf(msg, "Laying out\311 %d%%", percent);
     set_status(msg);
     return layout_stops && stop_asked();
 }
@@ -1405,7 +1652,7 @@ static int relayout(void)
     int err;
     if (!br->have_page) return 0;
     layout_free(&br->lay);
-    set_status("Laying out...");
+    set_status("Laying out\311");
     br->have_page = false;   /* nothing draws the layout while it's being made */
     layout_stops = br->loading && !stopped;
     qd_m.progress = laying_out;
@@ -1744,7 +1991,38 @@ typedef struct {
     char encoding[16];  /* Content-Encoding */
     char inner[64];     /* what a page's format gives (gzip's inside; a format's HTML) */
     Boolean failed;     /* the format couldn't read it */
+    Boolean closed;     /* the connection closed early: only the start came (EndedEarly) */
     Boolean as_text;    /* View Source: its own bytes, as text, whatever it is */
+    /* Archives (Mill 2.1): the format's answer, a member, a listing */
+    char path[256];     /* the member path after "#/", decoded ("" lists, or none) */
+    Boolean deciding;   /* the format hasn't answered yet: the reply's bytes are kept too */
+    Boolean raw_lost;   /* ...but they didn't all fit */
+    Boolean pull;       /* Mill reads the source itself (format_pull) once the reply ends */
+    Boolean browse;     /* Browse chosen: the page is the listing, at the address with "#/" */
+    Boolean after;      /* "Browse after saving" checked */
+    Boolean cancelled;  /* Cancel in the archive dialog */
+    Boolean range_failed;   /* a part was asked for and the whole came */
+    Boolean listing;    /* the page is a listing Mill made */
+    Boolean member;     /* the address has "#/": inside an archive */
+    Boolean decided;    /* the first bytes were in, and Mill decided what to do */
+    Boolean member_saving;  /* a member (not the reply) is being saved */
+    Boolean not_found;  /* no such member */
+    /* Download resume (Mill 2.1): the part file, "part." and the name (core/resume.h) */
+    Boolean part_asked; /* what to do about a part file is decided */
+    Boolean resume_later;   /* Resume chosen once this reply had begun: asked for again */
+    Boolean resume;     /* going on in the part file, from resume_from of the stream */
+    Boolean resume_mb;  /* ...which holds MacBinary's forks, as rmb has them */
+    Boolean restart;    /* the reply to the Range wasn't the part: from the start again */
+    Boolean restarted;  /* ...and it was */
+    long resume_from;
+    MacBinary rmb;
+    Boolean ranged;     /* a Range is asked for: range_first to range_last (-1: the end) */
+    long range_first, range_last;
+    PlugFormat *fmt;    /* the reply's format */
+    short src_ref;      /* file: the file, open for reading, or 0 */
+    long src_size;
+    struct Listing *list;
+    FmtSink sink;
 } Response;
 
 static void response_init(Response *r)
@@ -1757,6 +2035,7 @@ static void response_init(Response *r)
 }
 
 static Boolean leaving;      /* a new page is loading, and the one shown can go */
+static const char *loading;  /* the address a page is loading from (load's), NULL if none */
 
 /* The pictures of the page being left go back to waiting, letting go of their bits
    (or their hold on the picture memory's); whether any were showing */
@@ -1787,6 +2066,10 @@ static Boolean make_room(void)
     GrafPtr old;
     if (kept_release()) return true;
     if (plugins_purge(16384)) return true;
+    if (net_close_wait(false)) return true;         /* so does each one closing */
+    /* each kept connection holds 16K; but not the one the page loading will use, which
+       its request would only open again (and log in again) */
+    if (plugin_keep_room(br, loading)) return true;
     if (!leaving || !br->have_page) return false;
     GetPort(&old);
     SetPort(br->win);
@@ -1934,49 +2217,15 @@ static void read_head(Response *r)
     }
 }
 
-/* What Mill shows: HTML, text, GIF, and JPEG (and pages that don't say) */
-/* The address without its last extension: what's inside a .gz */
-static void inside_name(const char *url, char *out, int size)
-{
-    char *dot;
-    snprintf(out, size, "%s", url);
-    out[strcspn(out, "?#")] = 0;
-    if ((dot = strrchr(out, '.')) && !strchr(dot, '/')) *dot = 0;
-}
-
-/* What a stream format (gzip) gives: the reply's own type for Content-Encoding, else the
-   type of the name inside */
-static void inside_type(const Response *r, char *out, int size)
-{
-    char name[300];
-    if (r->encoding[0]) { snprintf(out, size, "%s", r->mime); return; }
-    inside_name(r->url, name, sizeof name);
-    type_for_name(name, out, size);
-}
+static void pstr_of(const char *c, Str255 p);
+static const char *request_headers(const Url *u, const char *referer);
 
 static Boolean gzipped(const Response *r) { return r->encoding[0] && prefix_ci(r->encoding, "gzip", 4); }
 
-/* Whether Mill shows a reply (else it's saved): text, a picture or HTML a format makes,
-   and gzip with one of those inside */
-static Boolean showable(const Response *r)
+static Boolean ask_where_named(const char *name, FSSpec *spec)
 {
-    PlugFormat *f;
-    char inner[64];
-    const char *mime = r->mime;
-    if (gzipped(r) && !format_for("application/gzip", NULL, 0, millGivesStream)) return false;
-    if (!mime[0] || prefix_ci(mime, "text/", 5)) return true;
-    if (format_for(mime, r->url, 0, millGivesPicture | millGivesElements)) return true;
-    if ((f = format_for(mime, r->url, 0, millGivesStream)) == NULL) return false;
-    inside_type(r, inner, sizeof inner);
-    return prefix_ci(inner, "text/", 5) || format_for(inner, NULL, 0, millGivesPicture | millGivesElements) != NULL;
-}
-
-static Boolean ask_where(const char *url, FSSpec *spec)
-{
-    char name[64];
     Str255 p;
     Boolean chosen;
-    filetype_name(url, name, sizeof name);
     p[0] = (unsigned char)strlen(name);
     memcpy(p + 1, name, p[0]);
     InitCursor();
@@ -1985,11 +2234,70 @@ static Boolean ask_where(const char *url, FSSpec *spec)
     return chosen;
 }
 
+static Boolean ask_where(const char *url, FSSpec *spec)
+{
+    char name[64];
+    filetype_name(url, name, sizeof name);
+    return ask_where_named(name, spec);
+}
+
+/* ---- download resume: the part file ---- */
+
+enum { PART_NONE, PART_REPLACE, PART_RESUME, PART_CANCEL };
+enum { RA_RESUME = 1, RA_REPLACE, RA_CANCEL };
+
+/* Return and Enter are Resume; Escape and Command-period are Cancel */
+static pascal Boolean resume_filter(DialogPtr d, EventRecord *e, short *item)
+{
+    (void)d;
+    if (e->what == keyDown || e->what == autoKey) {
+        char c = e->message & charCodeMask;
+        if (c == '\r' || c == 3) { *item = RA_RESUME; return true; }
+        if (c == 27 || (c == '.' && (e->modifiers & cmdKey))) { *item = RA_CANCEL; return true; }
+    }
+    return false;
+}
+
+/* Saving url as spec: what to do about a part file there. Mill's alert when the
+   protocol can seek (Support Random Access doesn't matter here); else it's replaced. */
+static short ask_part(const char *url, const FSSpec *spec)
+{
+    FSSpec part;
+    Url u;
+    long d, rs;
+    short item;
+    saver_part_spec(spec, &part);
+    switch (resume_ask(file_lengths(&part, &d, &rs) == noErr, !url_parse(url, &u) && plugin_block_size(&u) > 0)) {
+    case RESUME_FRESH: return PART_NONE;
+    case RESUME_REPLACE: return PART_REPLACE;
+    }
+    InitCursor();
+    item = CautionAlert(ALERT_RESUME, (ModalFilterUPP)resume_filter);
+    watch_cursor();
+    return item == RA_RESUME ? PART_RESUME : item == RA_REPLACE ? PART_REPLACE : PART_CANCEL;
+}
+
 /* Start saving the body to a file instead of keeping it; false if it won't be */
 static Boolean start_save(Response *r)
 {
     char name[64], type[4], creator[4];
+    if (r->raw_lost) { r->declined = true; return false; }     /* the start is gone: never a file without it */
     if (!r->have_spec && !ask_where(r->url, &r->spec)) { r->declined = true; return false; }
+    if (!r->part_asked) {
+        short part = ask_part(r->url, &r->spec);
+        r->part_asked = true;
+        if (part == PART_CANCEL) { r->declined = r->cancelled = true; return false; }
+        /* this reply is from the start: asked for again, from the part file's end */
+        if (part == PART_RESUME) { r->resume_later = r->declined = r->cancelled = true; return false; }
+    }
+    if (r->resume) {
+        /* the part asked for, appended; or the whole, and it starts again */
+        if (!resume_appends(r->code)) { r->restart = r->declined = r->cancelled = true; return false; }
+        r->saving = true;
+        r->deciding = false;
+        if (saver_resume(&r->saver, &r->spec, r->resume_mb, &r->rmb, r->resume_from) != noErr) return false;
+        return saver_write(&r->saver, r->buf + r->body, r->len - r->body) == noErr;
+    }
     {
         /* rules look at the name as the server gave it */
         const char *q = r->url + strcspn(r->url, "?#"), *seg = q;
@@ -1997,8 +2305,9 @@ static Boolean start_save(Response *r)
         snprintf(name, sizeof name, "%.*s", (int)(q - seg), seg);
     }
     filetype_find(file_type_rules(), r->mime, name, type, creator);
-    saver_begin(&r->saver, &r->spec, type, creator, decode_macbinary());
+    saver_begin(&r->saver, &r->spec, type, creator, decode_macbinary(), true);
     r->saving = true;
+    r->deciding = false;
     return saver_write(&r->saver, r->buf + r->body, r->len - r->body) == noErr;
 }
 
@@ -2016,77 +2325,663 @@ static Boolean keep(Response *r, const char *data, long len)
     return true;
 }
 
-/* A page's format's bytes (gzip's inside, a format's HTML) are the page */
+/* A page's format's bytes (gzip's inside, a format's HTML, a member) are the page */
 static Boolean decoded(const char *data, long len, void *ref) { return keep(ref, data, len); }
 
-/* Once the headers are in: a picture goes to its format as it comes, and so does a page
-   a format has to read first (gzip, a format giving HTML). False to stop. */
-static Boolean start_format(Response *r)
+/* ---- archives: reading a source by parts (Mill 2.1) ---- */
+
+static void source_close(Response *r)
 {
-    PlugFormat *f = NULL;
-    Boolean gz = gzipped(r);
-    long wants, n;
-    char *rest = NULL, inner[64];
-    int got = 0;
-    if (r->as_text) return true;    /* the original bytes, not what a format makes of them */
-    if (r->picture) {
-        wants = millGivesPicture | millGivesStream;
-        if (!gz && !(f = format_for(r->mime, r->url, 0, wants))) return true;  /* Mill's own icons: kept whole */
-    } else {
-        wants = millGivesStream | millGivesElements;
-        if (!gz && !(f = format_for(r->mime, r->url, 0, wants))) return true;
-        if (f && !(f->gives & millGivesElements)) {
-            /* a picture inside is shown as a picture, by the picture's own page */
-            inside_type(r, inner, sizeof inner);
-            if (format_for(inner, NULL, 0, millGivesPicture)) return true;
+    if (r->src_ref) FSClose(r->src_ref);
+    r->src_ref = 0;
+}
+
+static int hexdigit(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1;
+}
+
+/* file:, read by Mill itself: the file the address names, open; its size, or -1 */
+static long source_open_file(Response *r)
+{
+    Str255 p;
+    FSSpec spec;
+    const char *q = r->req->path + 1;
+    long n = strcspn(q, "?"), i, o = 0;
+    if (r->src_ref) return r->src_size;
+    /* "/Macintosh%20HD/Web/kit.zip" as "Macintosh HD:Web:kit.zip", as file: has it */
+    for (i = 0; i < n && o < 255; i++) {
+        int c = (unsigned char)q[i];
+        if (c == '/') c = ':';
+        else if (c == '%' && i + 2 < n && hexdigit(q[i + 1]) >= 0 && hexdigit(q[i + 2]) >= 0) {
+            c = hexdigit(q[i + 1]) * 16 + hexdigit(q[i + 2]);
+            i += 2;
         }
-        if (gz && format_for(r->mime, r->url, 0, millGivesPicture)) return true;
+        p[++o] = (unsigned char)c;
     }
-    /* what came with the headers goes to the format too */
+    p[0] = (unsigned char)o;
+    if (!o || file_spec(0, 0, p, &spec) != noErr || file_open(&spec, fsRdPerm, &r->src_ref) != noErr) {
+        r->src_ref = 0;
+        return -1;
+    }
+    if (GetEOF(r->src_ref, &r->src_size) != noErr) { source_close(r); return -1; }
+    return r->src_size;
+}
+
+static long file_read(void *ref, unsigned long at, char *p, long n)
+{
+    Response *r = ref;
+    OSErr err;
+    char msg[48];
+    if (stop_asked()) return -1;
+    if (SetFPos(r->src_ref, fsFromStart, (long)at) != noErr) return -1;
+    err = FSRead(r->src_ref, &n, p);
+    sprintf(msg, "Reading\311 %ldK of %ldK", done_k((long)at + n, r->src_size), (r->src_size + 1023) / 1024);
+    progress(msg);
+    return err == noErr || err == eofErr ? n : -1;
+}
+
+/* A part by a Range request, through the protocol: 206 brings the part; 200, the whole,
+   means it can't (the dialog again: Ranges that fail). Reached only when
+   plugin_seekable said yes. */
+typedef struct { char *p; long want, got; long line; Boolean headed, part; char head[512]; short nhead; } RangeRead;
+
+static Boolean range_collect(const char *data, long len, void *ref)
+{
+    RangeRead *g = ref;
+    if (stop_asked()) return false;
+    while (!g->headed && len > 0) {
+        /* the status line and headers, up to the blank line */
+        char c = *data++;
+        len--;
+        if (g->nhead < (short)sizeof g->head - 1) g->head[g->nhead++] = c;
+        if (c == '\n') {
+            g->head[g->nhead] = 0;
+            if (!g->line) g->part = g->nhead > 12 && !memcmp(g->head, "HTTP/", 5) && atoi(g->head + 9) == 206;
+            g->line++;
+            if (g->nhead <= 2) g->headed = true;    /* the blank line */
+            g->nhead = 0;
+        }
+    }
+    if (!g->headed || len <= 0) return true;
+    if (!g->part) return false;     /* the whole thing: never read through it */
+    if (len > g->want - g->got) len = g->want - g->got;
+    memcpy(g->p + g->got, data, len);
+    g->got += len;
+    return g->got < g->want;
+}
+
+static long range_read(void *ref, unsigned long at, char *p, long n)
+{
+    Response *r = ref;
+    RangeRead g;
+    Url with = *r->req;
+    char headers[1700], bare[300], owner[32], key[AUTH_KEYS];
+    OSErr err;
+    memset(&g, 0, sizeof g);
+    g.p = p;
+    g.want = n;
+    snprintf(bare, sizeof bare, "%.*s", (int)strcspn(r->url, "#"), r->url);
+    snprintf(headers, sizeof headers, "%s%sRange: bytes=%lu-%lu", request_headers(r->req, NULL),
+             request_headers(r->req, NULL)[0] ? "\r\n" : "", at, at + n - 1);
+    /* the window's page's server: a part borrows its kept connection, if any */
+    err = plugin_request(&with, bare, headers, NULL, NULL, range_collect, &g, "", owner, key, br, false);
+    if (err != noErr || stopped) return -1;
+    if (!g.part) { r->range_failed = true; return -1; }
+    return g.got;
+}
+
+/* Whether the reply can be read by parts, and its size (-1 if not known) */
+static Boolean source_seekable(Response *r, long *size)
+{
+    long whole, block;
+    *size = r->total > 0 ? r->total - r->body : -1;
+    if (r->req->scheme == SCHEME_FILE) return (*size = source_open_file(r)) >= 0;
+    return plugin_seekable(r->url, r->buf, r->body, &whole, &block);
+}
+
+/* Why it can't be browsed where it is */
+static const char *why_not(Response *r, const FmtAsk *a)
+{
+    if (a->reason && a->reason[0]) return a->reason;
+    if (a->depth > 0) return "It\325s inside another archive. It may only be browsed after saving.";
+    if (plugin_block_size(r->req) > 0 && !plugin_random_access(r->req)) return "Support Random Access is off. It may only be browsed after saving.";
+    return "This server sends only whole files. It may only be browsed after saving.";
+}
+
+/* ---- the dialog: Cancel, Browse, or Save... ---- */
+
+#define DIALOG_ARCHIVE 206
+enum { AD_SAVE = 1, AD_CANCEL, AD_BROWSE, AD_NAME, AD_LINE, AD_REASON, AD_AFTER, AD_RING };
+
+static pascal void draw_ring(DialogPtr d, short item);
+
+/* Return and Enter are Save...; Escape and Command-period are Cancel */
+static pascal Boolean ad_filter(DialogPtr d, EventRecord *e, short *item)
+{
+    (void)d;
+    if (e->what == keyDown || e->what == autoKey) {
+        char c = e->message & charCodeMask;
+        if (c == '\r' || c == 3) { *item = AD_SAVE; return true; }
+        if (c == 27 || (c == '.' && (e->modifiers & cmdKey))) { *item = AD_CANCEL; return true; }
+    }
+    return false;
+}
+
+/* "2,100K" */
+static void kilobytes(long bytes, char *out)
+{
+    long k = (bytes + 1023) / 1024;
+    if (k >= 1000000L) sprintf(out, "%ld,%03ld,%03ldK", k / 1000000L, k / 1000 % 1000, k % 1000);
+    else if (k >= 1000) sprintf(out, "%ld,%03ldK", k / 1000, k % 1000);
+    else sprintf(out, "%ldK", k);
+}
+
+/* Mill's own dialog for an archive, the same on System 6 and 7 (no Standard File hook):
+   AD_CANCEL, AD_BROWSE, or AD_SAVE, and whether "Browse after saving" was checked */
+static short archive_dialog(const char *name, const PlugFormat *f, long size, const char *reason, Boolean can_browse,
+                            Boolean can_after, Boolean *after)
+{
+    DialogPtr d;
+    short item, type;
+    Handle h;
+    Rect r;
+    Str255 p0, p1, p2;
+    char line[100], k[24];
+    const char *hd = f->heading;
+    Boolean an = strchr("AEIOUaeiou", hd[0]) != NULL;
+    *after = false;
+    if (size >= 0) { kilobytes(size, k); snprintf(line, sizeof line, "This is %s %s archive, %s.", an ? "an" : "a", hd, k); }
+    else snprintf(line, sizeof line, "This is %s %s archive.", an ? "an" : "a", hd);
+    pstr_of(name, p0);
+    pstr_of(line, p1);
+    pstr_of(reason ? reason : "", p2);
+    ParamText(p0, p1, p2, "\p");
+    if (!(d = GetNewDialog(DIALOG_ARCHIVE, NULL, (WindowPtr)-1))) return AD_CANCEL;
+    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
+               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+    GetDialogItem(d, AD_RING, &type, &h, &r);
+    SetDialogItem(d, AD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
+    GetDialogItem(d, AD_BROWSE, &type, &h, &r);
+    if (!can_browse) HiliteControl((ControlHandle)h, 255);
+    GetDialogItem(d, AD_AFTER, &type, &h, &r);
+    if (!can_after) HiliteControl((ControlHandle)h, 255);
+    ShowWindow(d);
+    InitCursor();
+    do {
+        ModalDialog((ModalFilterUPP)ad_filter, &item);
+        if (item == AD_AFTER) {
+            GetDialogItem(d, AD_AFTER, &type, &h, &r);
+            SetControlValue((ControlHandle)h, !GetControlValue((ControlHandle)h));
+        }
+        if (item == AD_BROWSE && !can_browse) item = 0;
+    } while (item != AD_SAVE && item != AD_CANCEL && item != AD_BROWSE);
+    GetDialogItem(d, AD_AFTER, &type, &h, &r);
+    *after = can_after && GetControlValue((ControlHandle)h);
+    DisposeDialog(d);
+    SetPort(br->win);
+    watch_cursor();
+    return item;
+}
+
+/* ---- the format's answer ---- */
+
+static Boolean is_listing_path(const char *path)
+{
+    size_t n = strlen(path);
+    return n == 0 || path[n - 1] == '/';
+}
+
+/* An address's last name, as the server gave it, in Mac Roman (a file: address's is) */
+static void last_name(const char *url, char *out, int size)
+{
+    char mac[64];
+    const char *e = url + strcspn(url, "?#"), *s = e;
+    long i, o = 0;
+    while (s > url && s[-1] != '/') s--;
+    for (i = 0; s + i < e && o < size - 1 && o < 63; i++) {
+        int c = (unsigned char)s[i];
+        if (c == '%' && s + i + 2 < e && hexdigit(s[i + 1]) >= 0 && hexdigit(s[i + 2]) >= 0) {
+            c = hexdigit(s[i + 1]) * 16 + hexdigit(s[i + 2]);
+            i += 2;
+        }
+        if (c >= 32) mac[o++] = (char)c;
+    }
+    mac[o] = 0;
+    charset_name_to_mac(mac, !strncmp(url, "file:", 5) ? CHARSET_MAC : CHARSET_UTF8, out, size);
+    if (!out[0]) filetype_name(url, out, size);
+}
+
+/* The file name an archive (or a member of one) is shown by */
+static void archive_name(const Response *r, const FmtAsk *a, char *out, int size)
+{
+    char mac[256];
+    if (a->member) {
+        charset_name_to_mac(a->member->name, a->member->charset, mac, sizeof mac);
+        hfs_name(mac, out);
+    } else last_name(r->url, out, size);
+}
+
+/* The page's bytes start again: what the format gives */
+static short begin_page(Response *r, short to)
+{
+    r->deciding = false;
+    r->len = r->body;
+    if (to == FMT_PULL) r->pull = true;
+    return to;
+}
+
+/* Save the bytes a member's format was given (a .tar inside a .tar.gz) */
+static short save_inner(Response *r, const FmtAsk *a)
+{
+    char name[64], type[4], creator[4], t[64];
+    archive_name(r, a, name, sizeof name);
+    if (!ask_where_named(name, &r->spec)) { r->declined = true; return FMT_STOP; }
+    type_for_name(name, t, sizeof t);
+    filetype_find(file_type_rules(), t, name, type, creator);
+    saver_begin(&r->saver, &r->spec, type, creator, false, false);
+    r->member_saving = true;
+    return FMT_SAVE;
+}
+
+/* sink->ask: what Mill does with a format's answer */
+static short reply_ask(void *ref, const FmtAsk *a)
+{
+    Response *r = ref;
+    Boolean members = (a->f->gives & millGivesMembers) != 0, listing = members && is_listing_path(a->path);
+    Boolean seekable_member = a->depth == 0 && (a->pull || r->src_ref);    /* Mill reads it by parts */
+    short answer = a->answer, item;
+    char name[64];
+    if (members && answer == millShowNow) answer = millBrowseNow;    /* the same, for an archive */
+    if (a->depth == 0) r->fmt = a->f;
+    if (r->picture) {
+        /* an inline picture: no dialogs, and only what shows */
+        if (answer == millShowNow || (answer == millBrowseNow && !listing))
+            return a->depth == 0 ? begin_page(r, seekable_member && members ? FMT_PULL : FMT_GO) : FMT_GO;
+        return FMT_STOP;
+    }
+    if (!members) {
+        if (answer == millShowNow) return a->depth == 0 ? begin_page(r, FMT_GO) : FMT_GO;
+        /* save only (and "Open after saving", which no 2.1 format asks for) */
+        if (a->depth > 0) return save_inner(r, a);
+        if (!r->may_save) return FMT_STOP;
+        start_save(r);
+        return FMT_STOP;
+    }
+    if (answer == millSaveOnly) {
+        if (a->depth > 0) return save_inner(r, a);
+        if (r->may_save) start_save(r);
+        return FMT_STOP;
+    }
+    if (answer == millBrowseNow && (r->member || a->depth > 0)) {
+        /* inside the archive already: no dialog */
+        if (listing) r->listing = true;
+        return a->depth == 0 ? begin_page(r, seekable_member ? FMT_PULL : FMT_GO) : FMT_GO;
+    }
+    /* the archive itself, or one that can only be browsed once saved: Mill's dialog */
+    archive_name(r, a, name, sizeof name);
+    /* (the checkbox is dimmed where saving would decode the MacBinary: nothing to browse) */
+    item = archive_dialog(name, a->f, a->size, answer == millBrowseNow ? NULL : why_not(r, a), answer == millBrowseNow,
+                          a->depth > 0 || !(decode_macbinary() && strstr(a->f->types, "macbinary")), &r->after);
+    if (item == AD_CANCEL) { r->declined = r->cancelled = true; return FMT_STOP; }
+    if (item == AD_BROWSE) {
+        r->browse = r->listing = true;
+        return a->depth == 0 ? begin_page(r, seekable_member ? FMT_PULL : FMT_GO) : FMT_GO;
+    }
+    if (a->depth > 0) return save_inner(r, a);
+    start_save(r);
+    return FMT_STOP;
+}
+
+/* ---- the listing Mill makes from Entry calls ---- */
+
+#define LIST_MAX 2000
+
+typedef struct {
+    char *name;                 /* the part after the folder, as the archive has it */
+    short charset, kind, flags;
+    OSType ftype;               /* a Mac file's Finder type, or 0 */
+    long size;
+    unsigned long modified, pos;
+} ListItem;
+
+typedef struct Listing {
+    char doc[300];              /* the archive's address, without "#/" */
+    char path[256];             /* the folder listed, "" or ending in '/' */
+    Boolean top;                /* listed by the reply's own format (whose positions they are) */
+    ListItem *items;
+    short n, room;
+} Listing;
+
+/* The last listing shown, so a click hands the member's position back */
+static Listing *last_list;
+
+static void list_free(Listing *l)
+{
+    short i;
+    if (!l) return;
+    for (i = 0; i < l->n; i++) free(l->items[i].name);
+    free(l->items);
+    free(l);
+}
+
+static Boolean list_has_folder(const Listing *l, const char *name, long n)
+{
+    short i;
+    for (i = 0; i < l->n; i++)
+        if (l->items[i].kind == millMemberFolder && (long)strlen(l->items[i].name) == n && !memcmp(l->items[i].name, name, n))
+            return true;
+    return false;
+}
+
+/* sink->entry: a member, kept if it's in the folder listed (the archive's list is flat:
+   folders are names' prefixes) */
+static Boolean reply_entry(void *ref, const MillEntry *e, const char *folder)
+{
+    Response *r = ref;
+    Listing *l = r->list;
+    size_t pn = strlen(folder);
+    const char *rest, *slash;
+    long n;
+    ListItem *it;
+    if (!l && !(l = r->list = calloc(1, sizeof *l))) return false;
+    l->top = !strcmp(folder, r->path);
+    if (strncmp(e->name, folder, pn) || !e->name[pn]) return true;
+    rest = e->name + pn;
+    slash = strchr(rest, '/');
+    n = slash ? slash - rest : (long)strlen(rest);
+    if ((slash || e->kind == millMemberFolder) && list_has_folder(l, rest, n)) return true;
+    if (l->n >= LIST_MAX) return false;
+    if (l->n == l->room) {
+        ListItem *more = realloc(l->items, (l->room + 64) * sizeof *more);
+        if (!more) return false;
+        l->items = more;
+        l->room += 64;
+    }
+    it = &l->items[l->n];
+    memset(it, 0, sizeof *it);
+    if (!(it->name = malloc(n + 1))) return false;
+    memcpy(it->name, rest, n);
+    it->name[n] = 0;
+    it->charset = e->charset;
+    it->kind = slash ? millMemberFolder : e->kind;
+    it->size = slash ? -1 : e->size;
+    it->modified = slash ? 0 : e->modified;
+    it->flags = slash ? 0 : e->flags;
+    it->ftype = !slash && (e->flags & millMemberMac) ? e->fileType : 0;
+    it->pos = e->pos;
+    l->n++;
+    return true;
+}
+
+/* sink->save_member: a member nothing shows, saved (a Mac file with both its forks) */
+static Boolean reply_save_member(void *ref, const MillEntry *e, Boolean *forks)
+{
+    Response *r = ref;
+    char mac[256], name[32], type[4], creator[4], t[64];
+    if (r->picture || r->as_text || !r->may_save) return false;
+    charset_name_to_mac(e->name, e->charset, mac, sizeof mac);
+    hfs_name(mac, name);
+    if (!ask_where_named(name, &r->spec)) { r->declined = true; return false; }
+    if (e->flags & millMemberMac) {
+        MacBinary mb;
+        memset(&mb, 0, sizeof mb);
+        memcpy(mb.type, &e->fileType, 4);
+        memcpy(mb.creator, &e->creator, 4);
+        mb.flags = e->finderFlags;
+        mb.data_len = e->dataLen > 0 ? e->dataLen : 0;
+        mb.rsrc_len = e->rsrcLen > 0 ? e->rsrcLen : 0;
+        saver_begin_forks(&r->saver, &r->spec, &mb);
+        *forks = true;
+    } else {
+        type_for_name(mac, t, sizeof t);
+        filetype_find(file_type_rules(), t, name, type, creator);
+        saver_begin(&r->saver, &r->spec, type, creator, false, false);
+    }
+    r->member_saving = true;
+    return true;
+}
+
+static Boolean reply_save(const char *p, long n, void *ref)
+{
+    Response *r = ref;
+    return saver_write(&r->saver, p, n) == noErr;
+}
+
+/* < > & " made safe for HTML */
+static void html_escape_to(const char *in, char *out, long size)
+{
+    long o = 0;
+    for (; *in; in++) {
+        const char *rep = *in == '<' ? "&lt;" : *in == '>' ? "&gt;" : *in == '&' ? "&amp;" : *in == '"' ? "&quot;" : NULL;
+        long n = rep ? (long)strlen(rep) : 1;
+        if (o + n >= size) break;
+        if (rep) memcpy(out + o, rep, n);
+        else out[o] = *in;
+        o += n;
+    }
+    out[o] = 0;
+}
+
+/* What a listed member is, for its icon: by its Finder type if it tells, else its name */
+static void member_icon_type(const ListItem *it, const char *mac, char *out, long size)
+{
+    if (it->ftype && it->ftype != 'BINA' && it->ftype != '????' && type_for_finder(it->ftype, out, size) &&
+        strcmp(out, "application/octet-stream"))
+        return;
+    type_for_name(mac, out, size);
+}
+
+/* The listing as a page, in the buffer after the reply's headers: Mill's own icons, the
+   names as links to their "#/" addresses, sizes, and dates */
+static void listing_page(Response *r, const char *target)
+{
+    Listing *l = r->list;
+    char doc[300], docesc[400], mac[256], esc[400], enc[400], small[80];
+    long o = r->body;
+    short i;
+    size_t dn = strcspn(target, "#");
+    Str255 date;
+#define PUT(s) do { const char *s_ = (s); long n_ = strlen(s_); if (o + n_ < r->size) { memcpy(r->buf + o, s_, n_); o += n_; } } while (0)
+    snprintf(doc, sizeof doc, "%.*s", (int)dn, target);
+    if (!l && !(l = r->list = calloc(1, sizeof *l))) return;
+    html_escape_to(doc, docesc, sizeof docesc);
+    /* the archive's name, and the folder in it */
+    last_name(doc, small, sizeof small);
+    charset_name_to_mac(r->path, CHARSET_UTF8, mac, sizeof mac);
+    html_escape_to(small, esc, sizeof esc);
+    PUT("<TITLE>"); PUT(esc);
+    if (mac[0]) { html_escape_to(mac, enc, sizeof enc); PUT("/"); PUT(enc); }
+    PUT("</TITLE><H2>"); PUT(esc);
+    if (mac[0]) { PUT("/"); PUT(enc); }
+    PUT("</H2><P>");
+    /* up: the folder that holds this one, or the one that holds the archive */
+    sprintf(small, "<IMG SRC=\"mill://icon/%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> <A HREF=\"", kMillIconParent);
+    PUT(small);
+    if (r->path[0]) {
+        size_t n = strlen(r->path);
+        snprintf(mac, sizeof mac, "%s", r->path);
+        mac[--n] = 0;
+        while (n > 0 && mac[n - 1] != '/') mac[--n] = 0;
+        PUT(docesc);
+        PUT("#/");
+        if (url_member_encode(mac, enc, sizeof enc) >= 0) PUT(enc);
+    } else {
+        char *slash = strrchr(docesc, '/');
+        if (slash) slash[1] = 0;
+        PUT(docesc);
+        html_escape_to(doc, docesc, sizeof docesc);
+    }
+    PUT("\">Up</A><BR>\r");
+    if (!l->n) PUT(r->failed ? "<P>Mill couldn\325t read this archive." : "<P>Nothing in it.");
+    for (i = 0; i < l->n; i++) {
+        ListItem *it = &l->items[i];
+        short icon = it->kind == millMemberFolder ? kMillIconFolder : it->kind == millMemberLink ? kMillIconLink : kMillIconDocument;
+        charset_name_to_mac(it->name, it->charset, mac, sizeof mac);
+        if (icon == kMillIconDocument) {
+            char t[64];
+            member_icon_type(it, mac, t, sizeof t);
+            icon = !strncmp(t, "text/", 5) ? kMillIconText : !strncmp(t, "image/", 6) ? kMillIconPicture :
+                   strcmp(t, "application/octet-stream") ? kMillIconBinary : kMillIconDocument;
+        }
+        html_escape_to(mac, esc, sizeof esc);
+        sprintf(small, "<IMG SRC=\"mill://icon/%d\" WIDTH=16 HEIGHT=16 ALIGN=TOP> ", icon);
+        PUT(small);
+        /* its address: the folder's path, then its name */
+        snprintf(mac, sizeof mac, "%s%s%s", r->path, it->name, it->kind == millMemberFolder ? "/" : "");
+        if (it->kind == millMemberLink || (it->flags & millMemberClosed) || url_member_encode(mac, enc, sizeof enc) < 0) {
+            PUT(esc);
+        } else {
+            PUT("<A HREF=\""); PUT(docesc); PUT("#/"); PUT(enc); PUT("\">"); PUT(esc); PUT("</A>");
+        }
+        if (it->kind != millMemberFolder && it->size >= 0) { kilobytes(it->size, small + 1); small[0] = ' '; PUT(small); }
+        if (it->modified) {
+            IUDateString((long)it->modified, shortDate, date);
+            sprintf(small, ", %.*s", date[0] < 60 ? date[0] : 60, (char *)date + 1);
+            PUT(small);
+        }
+        PUT("<BR>\r");
+    }
+#undef PUT
+    r->len = o;
+    /* kept for the next click: the folder's members and their positions */
+    snprintf(l->doc, sizeof l->doc, "%s", doc);
+    snprintf(l->path, sizeof l->path, "%s", r->path);
+    list_free(last_list);
+    last_list = l;
+    r->list = NULL;
+    strcpy(r->inner, "text/html");
+}
+
+/* A member's position from the last listing, if it was on it */
+static Boolean list_pos(const char *target, const char *path, unsigned long *pos)
+{
+    size_t dn = strcspn(target, "#"), pn;
+    short i;
+    if (!last_list || !last_list->top || strlen(last_list->doc) != dn || strncmp(last_list->doc, target, dn)) return false;
+    pn = strlen(last_list->path);
+    if (strncmp(path, last_list->path, pn)) return false;
+    for (i = 0; i < last_list->n; i++)
+        if (last_list->items[i].kind == millMemberFile && !strcmp(last_list->items[i].name, path + pn)) {
+            *pos = last_list->items[i].pos;
+            return true;
+        }
+    return false;
+}
+
+/* Once the headers and the first bytes are in: a format, if one reads it, is asked what
+   to do (millFormatBegin); else a page is kept, or a file saved. False to stop. */
+static Boolean start_reply(Response *r)
+{
+    PlugFormat *f;
+    Boolean gz = gzipped(r), seekable, has_pos;
+    long wants, size, n;
+    unsigned long pos = 0;
+    char *rest = NULL;
+    int got = 0;
+    if (r->save_all) return start_save(r);
+    if (r->as_text) return true;    /* the original bytes, not what a format makes of them */
+    wants = r->picture ? millGivesPicture | millGivesStream | millGivesMembers : millGivesElements | millGivesStream | millGivesMembers;
+    f = format_for(r->mime, r->url, 0, wants);
+    if (!f) {
+        if (r->picture) return true;    /* Mill's own icons: kept whole */
+        /* a picture by itself: its page shows it (and asks for it again, as an image) */
+        if (format_for(r->mime, r->url, 0, millGivesPicture)) return true;
+        if (r->mime[0] && !prefix_ci(r->mime, "text/", 5)) return r->may_save ? start_save(r) : true;
+        if (!gz) return true;
+        /* text, gzip'd for the journey: undone */
+    }
+    seekable = f && source_seekable(r, &size);
+    if (!f) size = -1;
+    has_pos = r->member && list_pos(r->url, r->path, &pos);
     if ((n = r->len - r->body) > 0 && !(rest = malloc(n))) { ran_out = true; return false; }
     if (n > 0) memcpy(rest, r->buf + r->body, n);
-    r->len = r->body;
-    r->run = format_begin(f, r->mime, gz ? r->encoding : NULL, r->url, r->picture ? r->picture->aw : -1,
-                          r->picture ? r->picture->ah : -1, wants, r->picture ? NULL : decoded, r);
-    if (r->run && !r->picture) {
-        const char *t = format_out_type(r->run);
-        snprintf(r->inner, sizeof r->inner, "%s", t ? t : "");
-    }
-    if (r->run && n > 0) got = format_data(r->run, rest, n);
+    r->run = format_begin(f, r->mime, gz ? r->encoding : NULL, r->url, r->path, pos, has_pos,
+                          r->picture ? r->picture->aw : -1, r->picture ? r->picture->ah : -1, wants, size, seekable, &r->sink);
+    if (!r->run) { free(rest); r->failed = true; return false; }
+    if (f) r->deciding = true;      /* the reply's bytes are kept too, till the format answers */
+    else r->len = r->body;
+    if (n > 0) got = format_data(r->run, rest, n);
     free(rest);
-    if (!r->run) { r->failed = true; return false; }
     if (got < 0) r->failed = true;
-    return got == 0;
+    return got == 0 || r->saving;
+}
+
+/* While the format hasn't answered: the reply's bytes, for saving it whole */
+static void keep_raw(Response *r, const char *data, long len)
+{
+    if (r->raw_lost || r->len + len > r->size) { r->raw_lost = true; return; }
+    memcpy(r->buf + r->len, data, len);
+    r->len += len;
+}
+
+/* "Reading... 3K of 4K", of the body; "Drawing..." once all of a picture is in */
+static void show_progress(Response *r)
+{
+    char msg[48];
+    long from = r->resume ? r->resume_from : 0;     /* what the part file had */
+    long got = from + r->raw - r->body;
+    const char *verb = r->saving ? "Saving" : "Reading";
+    if (r->picture && r->total > 0 && r->raw >= r->total) strcpy(msg, "Drawing\311");
+    else if (r->total > 0) sprintf(msg, "%s\311 %ldK of %ldK", verb, done_k(got, from + r->total - r->body),
+                                   (from + r->total - r->body + 1023) / 1024);
+    else sprintf(msg, "%s\311 %ldK", verb, (got + 1023) / 1024);
+    progress(msg);
 }
 
 static Boolean collect(const char *data, long len, void *ref)
 {
     Response *r = ref;
-    char msg[48];
+    Boolean shown = r->headed;
     if (stop_asked()) return false;
     r->raw += len;
-    if (r->run) {
-        int got = format_data(r->run, data, len);
-        if (got < 0) r->failed = true;
-        if (got != 0) return false;
-    } else if (r->saving) {
+    if (shown) show_progress(r);    /* before the bytes are decoded or written */
+    if (r->saving) {
         if (saver_write(&r->saver, data, len) != noErr) return false;
         r->len += len;
+    } else if (r->run) {
+        int got;
+        if (r->deciding) keep_raw(r, data, len);
+        got = format_data(r->run, data, len);
+        if (got == -2) r->not_found = true;
+        else if (got < 0) r->failed = true;
+        if (got != 0 && !r->saving) return false;
     } else {
         if (!keep(r, data, len)) return false;
-        if (!r->headed) {
-            read_head(r);
-            if (r->headed && r->code >= 200 && r->code < 300) {
-                if (r->save_all || (r->may_save && !showable(r))) { if (!start_save(r)) return false; }
-                else if (!start_format(r)) return false;
-            }
+        if (!r->headed) read_head(r);
+        if (!shown) show_progress(r);
+        /* once the headers and the first bytes are in (to decide with), or all there is */
+        if (r->headed && !r->decided && r->code >= 200 && r->code < 300 &&
+            (r->len - r->body >= 512 || (r->total > 0 && r->raw >= r->total))) {
+            r->decided = true;
+            if (!start_reply(r)) return false;
         }
     }
-    if (r->total > 0) sprintf(msg, "%s... %ldK of %ldK", r->saving ? "Saving" : "Reading", (r->raw + 1023) / 1024, (r->total + 1023) / 1024);
-    else sprintf(msg, "%s... %ldK", r->saving ? "Saving" : "Reading", (r->raw + 1023) / 1024);
-    progress(msg);
     /* done at the length it gave, even if the server (or a proxy) keeps the connection open */
     return !(r->total > 0 && r->raw >= r->total);
+}
+
+/* The reply has ended: the format answers now if it hadn't, then Mill reads by parts if
+   it was to (format_pull) */
+static void finish_reply(Response *r)
+{
+    if (r->headed && !r->decided && r->code >= 200 && r->code < 300 && !stopped) {
+        r->decided = true;
+        if (!start_reply(r)) return;
+    }
+    if (!r->run) return;
+    if (r->deciding && !stopped) format_input_end(r->run);
+    if (r->pull && !stopped) {
+        FmtSource s;
+        OSErr err;
+        s.size = r->src_ref ? r->src_size : r->total - r->body;
+        s.block = plugin_block_size(r->req);
+        s.read = r->src_ref ? file_read : range_read;
+        s.ref = r;
+        err = format_pull(r->run, &s);
+        if (err == fnfErr) r->not_found = true;
+        else if (err != noErr && !stopped) r->failed = true;
+    }
 }
 
 enum { FETCH_BAD_URL = 1, FETCH_CROSS, FETCH_FAILED, FETCH_SILENT };
@@ -2094,7 +2989,7 @@ enum { FETCH_BAD_URL = 1, FETCH_CROSS, FETCH_FAILED, FETCH_SILENT };
 /* Why a request failed (FETCH_FAILED): a Plug-In's Fail */
 static char fail_text[200];
 
-/* A request that failed: said in an alert, as a protocol's errors are, not as a page */
+/* A request that failed, other than a page's (which gets Mill's error page): said in an alert */
 static void fail_alert(const char *text)
 {
     Str255 p;
@@ -2107,27 +3002,87 @@ static void fail_alert(const char *text)
     NoteAlert(ALERT_FAILED, NULL);
 }
 
-/* After a fetch that saved, or was to: say how it went */
-static void finish_save(Response *r, OSErr err)
+/* A download that stopped: what its part file holds, after what happened (said first);
+   false if there's no part file */
+static Boolean kept_status(const Response *r, const char *what)
+{
+    char msg[160], k[24];
+    long d, rs;
+    const FSSpec *part = &r->saver.part;
+    if (!r->saver.in_part || file_lengths(part, &d, &rs) != noErr) return false;
+    kilobytes(d + rs, k);
+    snprintf(msg, sizeof msg, "%s%s%s saved in \322%.*s\323.", what, what[0] ? " " : "", k, part->name[0], (char *)part->name + 1);
+    set_status(msg);
+    return true;
+}
+
+/* After a fetch that saved, or was to: say how it went; whether the file is there */
+static Boolean finish_save(Response *r, OSErr err)
 {
     char msg[120], name[64];
-    if (r->declined) { set_status("Not saved."); return; }
+    if (r->declined) { set_status(r->cancelled ? "" : "Not saved."); return false; }
     snprintf(name, sizeof name, "%.*s", r->spec.name[0], (char *)r->spec.name + 1);
     if (stopped || err != noErr) {
         saver_abort(&r->saver);
-        if (err == FETCH_FAILED) fail_alert(fail_text);
-        else if (stopped) set_status("Stopped. The file wasn't saved.");
-        else { snprintf(msg, sizeof msg, "The download failed (MacTCP error %d).", err); set_status(msg); }
-        return;
+        if (err == FETCH_FAILED) { fail_alert(fail_text); kept_status(r, ""); }
+        else if (stopped) { if (!kept_status(r, "Stopped.")) set_status("Stopped. The file wasn\325t saved."); }
+        else {
+            snprintf(msg, sizeof msg, "The download failed (MacTCP error %d).", err);
+            if (!kept_status(r, msg)) set_status(msg);
+        }
+        return false;
     }
-    if ((err = saver_end(&r->saver)) != noErr) {
-        snprintf(msg, sizeof msg, err == eofErr ? "\"%s\" ended early and wasn't saved." : "Mill couldn't save \"%s\" (error %d).", name, err);
+    if (r->closed) { saver_abort(&r->saver); err = eofErr; }     /* only its start came */
+    else err = saver_end(&r->saver);
+    if (err == eofErr && kept_status(r, "Ended early.")) return false;
+    if (err != noErr) {
+        snprintf(msg, sizeof msg, err == eofErr ? "\322%s\323 ended early and wasn\325t saved." : "Mill couldn\325t save \322%s\323 (error %d).", name, err);
         set_status(msg);
-        return;
+        return false;
     }
-    snprintf(msg, sizeof msg, r->saver.macbinary ? "Saved \"%s\", decoded from MacBinary." : "Saved \"%s\".", name);
+    snprintf(msg, sizeof msg, r->restarted ? "Saved \322%s\323 from the start: the server couldn\325t resume." :
+             r->saver.macbinary && !r->saver.forks ? "Saved \322%s\323, decoded from MacBinary." : "Saved \322%s\323.", name);
     set_status(msg);
+    return true;
 }
+
+/* A saved file's file: address, with "#/" to browse it: false if it won't fit */
+static Boolean saved_url(const FSSpec *spec, char *out, int size)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char path[400];
+    long dir = spec->parID, n = spec->name[0];
+    CInfoPBRec pb;
+    Str255 name;
+    int o, i;
+    memcpy(path + sizeof path - n, spec->name + 1, n);
+    i = sizeof path - n;
+    /* up through its folders to the disk, whose parent is 1 */
+    while (dir != 1) {
+        memset(&pb, 0, sizeof pb);
+        pb.dirInfo.ioNamePtr = name;
+        pb.dirInfo.ioVRefNum = spec->vRefNum;
+        pb.dirInfo.ioFDirIndex = -1;
+        pb.dirInfo.ioDrDirID = dir;
+        if (PBGetCatInfoSync(&pb) != noErr || i < name[0] + 1) return false;
+        path[--i] = ':';
+        i -= name[0];
+        memcpy(path + i, name + 1, name[0]);
+        dir = pb.dirInfo.ioDrParID;
+    }
+    o = snprintf(out, size, "file:///");
+    for (; i < (int)sizeof path; i++) {
+        unsigned char c = (unsigned char)path[i];
+        if (o + 4 >= size) return false;
+        if (c == ':') out[o++] = '/';
+        else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strchr("-_.~", c)) out[o++] = c;
+        else { out[o++] = '%'; out[o++] = hex[c >> 4]; out[o++] = hex[c & 15]; }
+    }
+    if (o + 3 >= size) return false;
+    strcpy(out + o, "#/");
+    return true;
+}
+
 
 static void show_url(const char *url)
 {
@@ -2284,8 +3239,8 @@ static void forget_logins(char *addr_pass, char *typed_pass)
     plugin_login_typed(NULL, NULL, NULL);
 }
 
-static OSErr fetch(char *target, const char *from, const char *content_type, Body *body,
-                   Response *resp, Url *u, Head *h)
+static OSErr fetch_reply(char *target, const char *from, const char *content_type, Body *body,
+                         Response *resp, Url *u, Head *h, Boolean page)
 {
     int redirects = 0;
     /* the address's login, for its own server; and what was typed in the dialog this
@@ -2309,17 +3264,40 @@ static OSErr fetch(char *target, const char *from, const char *content_type, Bod
         resp->code = 0;
         resp->mime[0] = 0;
         resp->owner[0] = 0;
-        if (resp->run) { format_end(resp->run, millCutStop, NULL); resp->run = NULL; }
+        if (resp->run) { format_end(resp->run, millCutStop, NULL, NULL); resp->run = NULL; }
         resp->raw = 0;
         resp->encoding[0] = resp->inner[0] = 0;
         resp->failed = false;
-        resp->headed = resp->cut = false;
+        resp->headed = resp->cut = resp->closed = false;
         resp->url = target;
         resp->req = u;
+        /* an archive's member (after "#/"): the format is given the whole address */
+        resp->member = url_member(target, resp->path, sizeof resp->path);
+        resp->decided = resp->deciding = resp->raw_lost = resp->pull = false;
+        resp->listing = resp->browse = resp->not_found = resp->range_failed = false;
+        resp->fmt = NULL;
+        source_close(resp);
+        list_free(resp->list);
+        resp->list = NULL;
+        resp->sink.ref = resp;
+        resp->sink.out = resp->picture ? NULL : decoded;
+        resp->sink.ask = reply_ask;
+        resp->sink.entry = reply_entry;
+        resp->sink.save_member = reply_save_member;
+        resp->sink.save = reply_save;
         if (u->scheme != SCHEME_MILL) {
             char referer[300];
             Boolean refer = from && url_referer(from, target, referer, sizeof referer);
             const char *headers = request_headers(u, refer ? referer : NULL);
+            if (resp->ranged) {
+                /* a part: the rest of a download, or its first bytes again */
+                static char with_range[1700];
+                char range[48];
+                if (resp->range_last >= 0) sprintf(range, "Range: bytes=%ld-%ld", resp->range_first, resp->range_last);
+                else sprintf(range, "Range: bytes=%ld-", resp->range_first);
+                snprintf(with_range, sizeof with_range, "%s%s%s", headers, headers[0] ? "\r\n" : "", range);
+                headers = with_range;
+            }
             {
                 /* every scheme but mill: is a Plug-In's (http: and https: too). A page may only
                    use plugin://NAME/ if NAME marked it as its own; typed addresses and mill:
@@ -2329,19 +3307,22 @@ static OSErr fetch(char *target, const char *from, const char *content_type, Bod
                 if (u->scheme == SCHEME_OTHER && !strcmp(u->name, "plugin") && from && strncmp(from, "mill:", 5) &&
                     strcmp(owner, u->host)) {
                     static const char no[] = "HTTP/1.0 403 Forbidden\r\nContent-Type: text/html\r\n\r\n"
-                        "<TITLE>Forbidden</TITLE><H2>Forbidden</H2><P>Only the Plug-In's own pages can use this address.";
+                        "<TITLE>Forbidden</TITLE><H2>Forbidden</H2><P>Only the Plug-In&rsquo;s own pages can use this address.";
                     collect(no, sizeof no - 1, resp);
                     err = noErr;
                 } else if (u->scheme == SCHEME_OTHER && !strcmp(u->name, "plugin") && font_file_request(u, collect, resp)) {
                     err = noErr;        /* a font file's About: Mill answers for it */
                 } else {
                     Url with = *u;
-                    char key[AUTH_KEYS];
+                    char key[AUTH_KEYS], bare[300];
                     strcpy(with.user, addr_user);
                     strcpy(with.pass, addr_pass);
                     if (body) body_rewind(body);    /* asked again: from the start */
-                    err = plugin_request(&with, target, headers, content_type, body, collect, resp, owner, resp->owner, key);
+                    /* the address without its fragment: a member's path is the format's */
+                    snprintf(bare, sizeof bare, "%.*s", (int)strcspn(target, "#"), target);
+                    err = plugin_request(&with, bare, headers, content_type, body, collect, resp, owner, resp->owner, key, br, page);
                     memset(with.pass, 0, sizeof with.pass);
+                    if (err == PLUGIN_CUT) { resp->closed = true; err = noErr; }   /* shown as far as it came */
                     if (err == PLUGIN_FAILED) {
                         snprintf(fail_text, sizeof fail_text, "%s", plugin_failure());
                         forget_logins(addr_pass, typed_pass);
@@ -2398,20 +3379,24 @@ static OSErr fetch(char *target, const char *from, const char *content_type, Bod
             }
             if (--making_page == 0) UnloadSeg((void *)local_request);  /* mill: pages take memory only while one's made */
         }
+        if (err == noErr || err == userCanceledErr) finish_reply(resp);
         if (resp->run && !resp->picture) {
             /* a page a format read: the rest of what it gives */
-            format_end(resp->run, resp->cut ? millCutLimit : stopped ? millCutStop : 0, NULL);
+            format_end(resp->run, resp->cut ? millCutLimit : stopped ? millCutStop : resp->closed ? millCutClosed : 0, NULL, resp->inner);
             resp->run = NULL;
         }
-        if (err != noErr || resp->saving || resp->declined) {
+        if (resp->listing && !resp->saving && !resp->member_saving && !resp->declined && !stopped && err == noErr)
+            listing_page(resp, target);
+        if (err != noErr || resp->saving || resp->member_saving || resp->declined) {
             forget_logins(addr_pass, typed_pass);
             return err;
         }
         split_response(resp->buf, resp->len, h);
         if (resp->inner[0]) {
-            /* what the format gave: HTML, or text */
-            h->kind = prefix_ci(resp->inner, "text/html", 9) ? BODY_HTML : BODY_TEXT;
-            h->charset = CHARSET_GUESS;
+            /* what the format gave: HTML, or text; or a member that's a picture, shown as one.
+               In the character set it said (a Mac's text member: Mac Roman), else guessed. */
+            h->kind = prefix_ci(resp->inner, "text/html", 9) ? BODY_HTML : prefix_ci(resp->inner, "image/", 6) ? BODY_PICTURE : BODY_TEXT;
+            h->charset = charset_of_type(resp->inner);
         } else if (h->kind != BODY_HTML && h->code < 300 &&
                    (format_for(resp->mime, target, 0, millGivesPicture) ||
                     (gzipped(resp) && format_for(resp->mime, NULL, 0, millGivesPicture)))) {
@@ -2419,9 +3404,24 @@ static OSErr fetch(char *target, const char *from, const char *content_type, Bod
         } else if (h->kind == BODY_PICTURE && !format_for(resp->mime, target, 0, millGivesPicture)) {
             h->kind = BODY_TEXT;
         }
+        if (resp->not_found) {
+            /* no such member: said as file: says it */
+            long o = h->body;
+            char line[400], mac[256], esc[300];
+            charset_name_to_mac(resp->path, CHARSET_GUESS, mac, sizeof mac);
+            html_escape_to(mac, esc, sizeof esc);
+            snprintf(line, sizeof line, "<TITLE>Not found</TITLE><H2>Not found</H2><P>There\325s nothing at <TT>%.300s</TT>.", esc);
+            if (o + (long)strlen(line) < resp->size) { strcpy(resp->buf + o, line); resp->len = o + strlen(line); }
+            h->kind = BODY_HTML;
+            h->charset = CHARSET_MAC;
+        }
+        if (resp->listing) { h->kind = BODY_HTML; h->charset = CHARSET_MAC; }
         if ((h->code == 301 || h->code == 302 || h->code == 303) && h->location[0] && redirects++ < 5) {
             char next[300];
+            const char *m = strchr(target, '#');
             if (url_resolve(target, h->location, next, sizeof next)) return noErr;
+            /* a member of an archive that moved is still that member */
+            if (m && m[1] == '/' && !strchr(next, '#') && strlen(next) + strlen(m) < sizeof next) strcat(next, m);
             if (kind_of(next) != kind_of(target) || plugin_url(next)) return FETCH_CROSS;
             strcpy(target, next);
             content_type = NULL;  /* a redirect after a POST is fetched with GET */
@@ -2434,6 +3434,17 @@ static OSErr fetch(char *target, const char *from, const char *content_type, Bod
         forget_logins(addr_pass, typed_pass);
         return noErr;
     }
+}
+
+/* One fetch, then the file a pull read (file:) closed */
+static OSErr fetch(char *target, const char *from, const char *content_type, Body *body,
+                   Response *resp, Url *u, Head *h, Boolean page)
+{
+    OSErr err = fetch_reply(target, from, content_type, body, resp, u, h, page);
+    source_close(resp);
+    list_free(resp->list);
+    resp->list = NULL;
+    return err;
 }
 
 /* A Mac icon from a Plug-In (plugin://NAME/rsrc, x-rsrc/TYPE), at its own size: 0, -1,
@@ -2508,10 +3519,12 @@ static void load_images(Response *resp, short which)
             resp->picture = p;
             strcpy(target, p->url);
             /* a picture alone on a page is that page: no page asked for it */
-            err = fetch(target, strcmp(p->url, br->page_url) ? br->page_url : NULL, NULL, NULL, resp, &u, &h);
+            err = fetch(target, strcmp(p->url, br->page_url) ? br->page_url : NULL, NULL, NULL, resp, &u, &h, false);
             if (err == memFullErr) out_of_memory();
             if (resp->run) {
-                got = format_end(resp->run, stopped ? millCutStop : resp->failed ? millCutBroken : 0, &p->bm);
+                if (!stopped) progress("Drawing\311");     /* the rest is decoded and drawn */
+                got = format_end(resp->run, stopped ? millCutStop : resp->failed ? millCutBroken :
+                                 resp->closed ? millCutClosed : 0, &p->bm, NULL);
                 resp->run = NULL;
                 if (got == 0 && (stopped || (err != noErr && err != userCanceledErr && !resp->raw))) { image_free(&p->bm); got = -1; }
                 if (got == IMAGE_NO_MEMORY) out_of_memory();
@@ -2523,7 +3536,7 @@ static void load_images(Response *resp, short which)
             resp->buf = NULL;
             if (got == IMAGE_NO_MEMORY) continue;  /* it shows as a picture that didn't load */
             if (got) {
-                if (stopped) p->state = PIC_WAITING;  /* it can still be loaded */
+                if (stopped || resp->closed) p->state = PIC_WAITING;  /* it can still be loaded */
                 continue;
             }
         }
@@ -2567,7 +3580,7 @@ static char *pre_page(const char *title, const char *text, long n, long *len)
         const char *s = i ? text : title;
         long k, m = i ? n : (long)strlen(title);
         if (!i && !m) continue;
-        strcpy(o, i ? "<PRE><FONT SIZE=1>" : "<TITLE>");  /* Courier 9: 80 columns fit the window */
+        strcpy(o, i ? "<PRE><FONT SIZE=2>" : "<TITLE>");  /* 10 points: 80 columns fit a Plus's window */
         o += strlen(o);
         for (k = 0; k < m; k++) {
             switch (s[k]) {
@@ -2587,10 +3600,12 @@ static char *pre_page(const char *title, const char *text, long n, long *len)
 /* What went wrong with a request that failed on the network, as the status line says it */
 static void net_trouble(OSErr err, char *msg, int size)
 {
-    if (net_stage == NET_LOOKUP)
-        snprintf(msg, size, err == commandTimeout ? "Looking up %s took too long." : "Couldn't find %s.", asked);
+    if (err == NET_NO_MACTCP)
+        snprintf(msg, size, "MacTCP isn\325t available.");
+    else if (net_stage == NET_LOOKUP)
+        snprintf(msg, size, err == commandTimeout ? "Looking up %s took too long." : "Couldn\325t find %s.", asked);
     else if (net_stage == NET_CONNECT)
-        snprintf(msg, size, "Couldn't connect to %s.", asked);
+        snprintf(msg, size, "Couldn\325t connect to %s.", asked);
     else
         snprintf(msg, size, "The connection to %s failed (MacTCP error %d).", asked, err);
 }
@@ -2612,15 +3627,16 @@ static long fetch_for_page(const char *url, char *buf, long size, char *why, int
     strcpy(activity, "Checking for updates");
     set_status("Checking for updates\311");
     snprintf(target, sizeof target, "%s", url);
-    err = fetch(target, NULL, NULL, NULL, &resp, &u, &h);
+    err = fetch(target, NULL, NULL, NULL, &resp, &u, &h, false);
     if (err == memFullErr) out_of_memory();
     if (stopped || err == userCanceledErr) snprintf(why, why_size, ran_out ? "Not enough memory." : "Stopped.");
-    else if (err == FETCH_BAD_URL || err == FETCH_CROSS) snprintf(why, why_size, "Its address isn't one Mill can open.");
+    else if (err == FETCH_BAD_URL || err == FETCH_CROSS) snprintf(why, why_size, "Its address isn\325t one Mill can open.");
     else if (err == FETCH_FAILED) snprintf(why, why_size, "%s", fail_text);
     else if (err == FETCH_SILENT) snprintf(why, why_size, "It asked for a name and password.");
     else if (err != noErr) net_trouble(err, why, why_size);
-    else if (h.code != 200) snprintf(why, why_size, "The server didn't send it (error %d).", h.code);
+    else if (h.code != 200) snprintf(why, why_size, "The server didn\325t send it (error %d).", h.code);
     else if (resp.cut) snprintf(why, why_size, "Its answer was too long.");
+    else if (resp.closed) snprintf(why, why_size, "Its answer ended early.");
     else {
         n = resp.len - h.body;
         if (n > size) n = size;
@@ -2635,22 +3651,20 @@ static long fetch_for_page(const char *url, char *buf, long size, char *why, int
 static Boolean coming_back;     /* load: Back or Forward, so the page's forms come back too */
 static Boolean forms_kept;      /* load: the page being left has had its forms kept already */
 
-/* The length of an address without its #fragment */
-static size_t doc_part(const char *url)
-{
-    const char *h = strchr(url, '#');
-    return h ? (size_t)(h - url) : strlen(url);
-}
+static Boolean reloading;       /* load: Reload, so the page is asked for again */
+
+/* The length of an address without its #fragment (a member's "#/" path is the document's) */
+static size_t doc_part(const char *url) { return url_doc_len(url); }
 
 /* A link to a #name on the page already shown, or Back and Forward between two places on it:
-   the page is only scrolled, not asked for again */
-static Boolean same_page(const char *url, Boolean record, const char *from)
+   the page is only scrolled, not asked for again. how is a URL_OPEN_ kind. */
+static Boolean same_page(const char *url, int how, Boolean record, const char *from)
 {
-    const char *frag = strchr(url, '#');
     size_t n = doc_part(url);
+    const char *frag = url[n] == '#' ? url + n : NULL;
     long i;
-    if (!br->have_page || strncmp(url, VIEW_SOURCE, strlen(VIEW_SOURCE)) == 0 || n != doc_part(br->page_url) ||
-        strncmp(url, br->page_url, n) != 0 || (record && !frag) || strlen(url) >= sizeof br->page_url)
+    if (!br->have_page || strncmp(url, VIEW_SOURCE, strlen(VIEW_SOURCE)) == 0 || strlen(url) >= sizeof br->page_url ||
+        !url_scroll_only(url, br->page_url, how))
         return false;
     coming_back = false;
     forms_kept = false;     /* the page's fields stay as they are */
@@ -2669,6 +3683,58 @@ static Boolean same_page(const char *url, Boolean record, const char *from)
     return true;
 }
 
+/* A page load that got no reply: Mill's own page says why in the server's place, its
+   address staying (Reload tries again). title is its heading too; text is said as is. */
+static void error_page(Response *r, Head *h, const char *title, const char *text)
+{
+    char esc[400];
+    long n;
+    html_escape_to(text, esc, sizeof esc);
+    n = snprintf(r->buf, r->size, "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n"
+                 "<TITLE>%s</TITLE><H2>%s</H2><P>%s", title, title, esc);
+    r->len = n < r->size ? n : r->size - 1;
+    r->cut = r->closed = false;
+    r->owner[0] = 0;
+    split_response(r->buf, r->len, h);
+    h->charset = CHARSET_MAC;
+}
+
+/* Why a page load got no reply: the error page's heading and sentence */
+static void no_reply(OSErr err, Boolean nothing, char *title, char *msg, int size)
+{
+    if (err == FETCH_FAILED) {
+        strcpy(title, "Couldn\325t open the page");
+        snprintf(msg, size, "%s", fail_text);
+    } else if (err == FETCH_BAD_URL) {
+        strcpy(title, "Couldn\325t open the page");
+        snprintf(msg, size, "Mill can\325t open this kind of address.");
+    } else if (err == NET_NO_MACTCP) {
+        strcpy(title, "No MacTCP");
+        snprintf(msg, size, "MacTCP isn\325t available, so Mill can\325t reach %s.", asked);
+    } else if (nothing) {
+        strcpy(title, "No reply");
+        snprintf(msg, size, "%s closed the connection without replying.", asked);
+    } else if (net_stage == NET_LOOKUP) {
+        strcpy(title, "Server not found");
+        snprintf(msg, size, err == commandTimeout ? "Looking up %s took too long." : "There\325s no server named %s.", asked);
+    } else if (net_stage == NET_CONNECT) {
+        strcpy(title, "No connection");
+        snprintf(msg, size, "The server %s couldn\325t be contacted.", asked);
+    } else if (err == commandTimeout) {
+        strcpy(title, "No reply");
+        snprintf(msg, size, "%s didn\325t reply.", asked);
+    } else {
+        strcpy(title, "No reply");
+        snprintf(msg, size, "The connection to %s failed (MacTCP error %d).", asked, err);
+    }
+}
+
+static Boolean save_url(const char *url, const char *from, Boolean browse);
+static Boolean save_to(const char *url, const char *from, const FSSpec *spec, Boolean resume, Boolean browse);
+
+/* Whether the last load showed a page without an error: all of a 2xx reply */
+static Boolean page_whole;
+
 static Boolean load(const char *url, Boolean record, const char *from, const char *content_type, Body *body)
 {
     /* view-source:address shows what address sends, as text */
@@ -2679,13 +3745,23 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     Url u;
     Head h;
     OSErr err;
-    Boolean shown = false, cut;
+    Boolean shown = false, cut, closed;
+    Boolean failed = false;     /* no reply: Mill's error page shows */
+    char why[200];
     int parsed = -1;
     long page_k;
     Boolean back = coming_back;
     Plug *making;   /* the Plug-In for the address, kept loaded from asking to showing */
+    Boolean again = reloading;
+    char then[320]; /* what's next: the saved copy to browse, or (save_after) the archive to save */
+    short save_after = 0;
+    Boolean resume_later = false, resume_browse = false;
+    FSSpec resume_spec;
+    then[0] = 0;
 
-    if (!body && same_page(url, record, from)) return true;
+    reloading = false;
+    page_whole = false;
+    if (!body && same_page(url, again ? URL_OPEN_RELOAD : record ? URL_OPEN_LINK : URL_OPEN_HISTORY, record, from)) return true;
     coming_back = false;
     blur();
     snprintf(referrer, sizeof referrer, "%s", from ? from : "");  /* from may be this window's page_url */
@@ -2696,10 +3772,12 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     forms_kept = false;
     stopped = ran_out = false;
     leaving = true;     /* until the new page takes this one's place */
+    loading = target;
     if (!response_buffer(&resp)) {
         leaving = false;
+        loading = NULL;
         InvalRect(&br->win->portRect);
-        out_of_memory_alert("it couldn't load this page.");
+        out_of_memory_alert("it couldn\325t load this page.");
         return false;
     }
     response_init(&resp);
@@ -2713,23 +3791,42 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     snprintf(shown_url, sizeof shown_url, "%s%s", source ? VIEW_SOURCE : "", target);
     show_url(shown_url);
     making = plugin_hold(target);
-    err = fetch(target, referrer[0] ? referrer : NULL, content_type, body, &resp, &u, &h);
-    snprintf(shown_url, sizeof shown_url, "%s%s", source ? VIEW_SOURCE : "", target);  /* where it ended up */
-    if (resp.saving || resp.declined) {
-        /* a file Mill can't show: saved, and the page stays */
-        finish_save(&resp, err);
+    err = fetch(target, referrer[0] ? referrer : NULL, content_type, body, &resp, &u, &h, true);
+    /* where it ended up; Browse makes it the archive's listing */
+    snprintf(shown_url, sizeof shown_url, "%s%s%s", source ? VIEW_SOURCE : "", target, resp.browse ? "#/" : "");
+    if (resp.saving || resp.member_saving || resp.declined) {
+        /* a file Mill can't show: saved, and the page stays; then browsed, if asked */
+        if (finish_save(&resp, err) && resp.after && !saved_url(&resp.spec, then, sizeof then)) then[0] = 0;
+        if (resp.resume_later) {
+            /* Resume: asked for again, from the part file's end */
+            resume_later = true;
+            resume_browse = resp.after;
+            resume_spec = resp.spec;
+            snprintf(then, sizeof then, "%.*s", (int)strcspn(target, "#"), target);
+        }
         show_url(br->page_url);
         goto done;
     }
-    if (err == FETCH_FAILED || err == FETCH_SILENT) {
-        /* the page and its history stay as they were, as after Stop: with an alert when
-           the request failed, quietly after a cancelled login */
+    if (resp.range_failed && resp.fmt) {
+        /* ranges were claimed, and the whole came: the dialog again, browsing only once saved */
+        char name[64];
+        Boolean after;
+        filetype_name(target, name, sizeof name);
         show_url(br->page_url);
-        if (err == FETCH_FAILED) fail_alert(fail_text);
+        if (archive_dialog(name, resp.fmt, resp.total > 0 ? resp.total - resp.body : -1,
+                           "This server stopped sending parts. It may only be browsed after saving.", false, true, &after) == AD_SAVE) {
+            snprintf(then, sizeof then, "%.*s", (int)strcspn(target, "#"), target);
+            save_after = after ? 2 : 1;
+        } else set_status("");
+        goto done;
+    }
+    if (err == FETCH_SILENT) {
+        /* a cancelled login: the page and its history stay as they were, as after Stop */
+        show_url(br->page_url);
         goto done;
     }
     show_url(shown_url);
-    if (err == memFullErr) out_of_memory();
+    if (err == memFullErr) { out_of_memory(); show_url(br->page_url); goto done; }
     if (stopped || err == userCanceledErr) {
         /* the page being left stays; but if it went to make room, what came of the new
            one shows instead */
@@ -2737,19 +3834,18 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
         split_response(resp.buf, resp.len, &h);
         err = noErr;
     }
-    if (err == FETCH_BAD_URL) { set_status("Mill can't open this kind of address."); goto done; }
     if (err == FETCH_CROSS) { set_status("Stopped at a redirect to another kind of address."); goto done; }
-    if (err != noErr) {
-        char msg[200];
-        net_trouble(err, msg, sizeof msg);
-        /* no reply at all (lookup, connect, timeout, lost before any reply): an alert, and
-           the page stays; a server's own error page is shown as a page instead */
-        show_url(br->page_url);
-        fail_alert(msg);
-        goto done;
+    if (err != noErr || resp.len == 0) {
+        /* no reply at all (no MacTCP, lookup, connect, timeout, closed before any reply, the
+           Plug-In's failure, an address no Plug-In takes): Mill's error page, as a server's
+           would be; a server's own error page is shown as it is */
+        char title[40];
+        no_reply(err, err == noErr, title, why, sizeof why);
+        error_page(&resp, &h, title, why);
+        failed = true;
     }
 
-    set_status("Formatting...");
+    set_status("Formatting\311");
     {
         /* the end of the buffer the page didn't use is room for the page itself */
         char *fits = realloc(resp.buf, resp.len + 1);  /* shrinks where it is */
@@ -2760,7 +3856,7 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     br->form_base = NULL;
     leaving = false;    /* what's loading now is this page */
     page_number++;
-    if (source || h.kind != BODY_HTML) {
+    if (!failed && (source || h.kind != BODY_HTML)) {
         /* source and plain text show preformatted, and a picture by itself on a page */
         long n = resp.len - h.body, len;
         const char *text = resp.buf + h.body;
@@ -2816,31 +3912,43 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     br->scroll_x = 0;
     if (relayout() == -1) out_of_memory();
     br->scroll_y = 0;
-    if (u.fragment[0]) {
+    if (*url_anchor(shown_url)) {
         long i;
+        const char *anchor = url_anchor(shown_url);
         for (i = 0; i < br->lay.nanchors; i++)
-            if (!strcmp(br->lay.anchors[i].name, u.fragment)) { br->scroll_y = br->lay.anchors[i].y; break; }
+            if (!strcmp(br->lay.anchors[i].name, anchor)) { br->scroll_y = br->lay.anchors[i].y; break; }
         if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
     }
     update_scroll();
     redraw();
     cut = resp.cut;
+    closed = resp.closed;
     response_init(&resp);   /* images are never saved */
     load_images(&resp, IMAGES_AUTO);
     if (!stopped) {
         char msg[48];
         sprintf(msg, "Showed the first %ldK of this page.", page_k);
-        set_status(h.code >= 400 ? "The server sent an error page." : cut ? msg : "Done.");
+        set_status(failed ? why : h.code >= 400 ? "The server sent an error page." : cut ? msg :
+                   closed ? "The connection closed early." : "Done.");
     }
+    page_whole = !failed && !stopped && h.code >= 200 && h.code < 300 && !closed;
     shown = true;
 done:
+    loading = NULL;
     plugin_drop(making);
+    /* the window keeps a connection only to its page's server (a page that failed may have
+       kept one to another) */
+    plugin_page_shown(br, br->page_url + (strncmp(br->page_url, VIEW_SOURCE, strlen(VIEW_SOURCE)) ? 0 : strlen(VIEW_SOURCE)));
     leaving = false;
     free(resp.buf);
     set_loading(false);
     InitCursor();
     InvalRect(&br->win->portRect);
     if (ran_out) out_of_memory_alert("it stopped loading this page.");
+    /* Browse after saving: the saved copy, read by parts (file: always can be) */
+    if (save_after) return save_url(then, referrer[0] ? referrer : NULL, save_after == 2) && shown;
+    if (resume_later) return save_to(then, referrer[0] ? referrer : NULL, &resume_spec, true, resume_browse) && shown;
+    if (then[0] && !stopped) return load(then, true, NULL, NULL, NULL);
     return shown;
 }
 
@@ -2920,7 +4028,9 @@ static void reload(void)
     const char *h;
     if (br->hist_pos < 0) return;
     h = br->history[br->hist_pos];
-    go(h, false, h + strlen(h) + 1);
+    if (!may_leave("Leave this page?")) return;
+    reloading = true;
+    load(h, false, h + strlen(h) + 1, NULL, NULL);
 }
 
 static void go_home(void)
@@ -2941,45 +4051,107 @@ static void load_image(short which)
     stopped = ran_out = false;
     watch_cursor();
     load_images(&resp, which);
-    if (!stopped) set_status(br->pics[which].state == PIC_SHOWN ? "Done." : "Mill couldn't load that image.");
+    if (!stopped) set_status(br->pics[which].state == PIC_SHOWN ? "Done." : "Mill couldn\325t load that image.");
     set_loading(false);
     InitCursor();
-    if (ran_out) out_of_memory_alert("it couldn't load that image.");
+    if (ran_out) out_of_memory_alert("it couldn\325t load that image.");
 }
 
-/* Save Image, Link, or Page Source As: fetch url into a file, whatever it is; from is
-   the page it's on (the Referer), or NULL */
-static void save_url(const char *url, const char *from)
+/* Resume: where the stream goes on from (resp->resume_from), and whether the part file
+   holds decoded MacBinary's forks. With MacBinary decoded, the stream's first 128 bytes
+   are asked for again, to learn its forks. 1 to go on, 0 to start again, -1 if that
+   fetch failed (*err). */
+static int resume_point(Response *r, char *target, const char *from, Url *u, Head *h, OSErr *err)
 {
+    FSSpec part;
+    FInfo fi;
+    long d, rs;
+    unsigned char head[128];
+    Boolean mb = decode_macbinary();
+    int dec;
+    saver_part_spec(&r->spec, &part);
+    if (file_lengths(&part, &d, &rs) != noErr || file_get_info(&part, &fi) != noErr) return 0;
+    if (mb) {
+        /* its own bytes, kept: no format, no file */
+        r->as_text = r->ranged = true;
+        r->save_all = false;
+        r->range_first = 0;
+        r->range_last = 127;
+        *err = fetch(target, from, NULL, NULL, r, u, h, false);
+        r->as_text = r->ranged = false;
+        r->save_all = true;
+        if (*err != noErr || stopped) return -1;
+        if (!resume_appends(r->code) || r->len - r->body < 128) return 0;
+        memcpy(head, r->buf + r->body, 128);
+    }
+    r->resume_from = resume_at(mb ? head : NULL, (const char *)&fi.fdType, (const char *)&fi.fdCreator, d, rs, &r->rmb, &dec);
+    r->resume_mb = dec != 0;
+    return r->resume_from >= 0;
+}
+
+/* Fetch url into spec (chosen already), whatever it is, by way of its part file: from
+   the part file's end if resume. from is the page it's on (the Referer), or NULL.
+   browse: then browse the saved copy (an archive). Whether it was saved. */
+static Boolean save_to(const char *url, const char *from, const FSSpec *spec, Boolean resume, Boolean browse)
+{
+    char then[320];
+    Boolean saved = false;
     Response resp;
     char target[300];
     Url u;
     Head h;
-    OSErr err;
-    if (br->loading) return;
+    OSErr err = noErr;
+    int go_on = 0;
     stopped = ran_out = false;
-    if (!response_buffer(&resp)) { out_of_memory_alert("it couldn't save that."); return; }
+    if (!response_buffer(&resp)) { out_of_memory_alert("it couldn\325t save that."); return false; }
     response_init(&resp);
-    if (!ask_where(url, &resp.spec)) { free(resp.buf); InitCursor(); return; }
-    resp.have_spec = resp.save_all = true;
+    resp.spec = *spec;
+    resp.have_spec = resp.save_all = resp.part_asked = true;
     blur();
     set_loading(true);
-    stopped = false;
     activity[0] = 0;
     watch_cursor();
     snprintf(target, sizeof target, "%s", url);
-    err = fetch(target, from, NULL, NULL, &resp, &u, &h);
+    if (resume && (go_on = resume_point(&resp, target, from, &u, &h, &err)) > 0) {
+        resp.resume = resp.ranged = true;
+        resp.range_first = resp.resume_from;
+        resp.range_last = -1;
+        err = fetch(target, from, NULL, NULL, &resp, &u, &h, false);
+        /* the whole came instead (200), or nothing (416): start again */
+        if (resp.restart || (!resp.saving && err == noErr && !stopped && resp.code == 416)) go_on = 0;
+    }
+    if (resume && go_on == 0) {
+        response_init(&resp);
+        resp.spec = *spec;
+        resp.have_spec = resp.save_all = resp.part_asked = resp.restarted = true;
+        snprintf(target, sizeof target, "%s", url);
+    }
+    if (!resume || go_on == 0) err = fetch(target, from, NULL, NULL, &resp, &u, &h, false);
     if (err == memFullErr) out_of_memory();
-    if (resp.saving) finish_save(&resp, err);
+    if (resp.saving) saved = finish_save(&resp, err);
     else if (err == FETCH_FAILED) fail_alert(fail_text);
     else if (err == FETCH_SILENT) set_status("Not saved.");
     else if (stopped) set_status("Stopped.");
-    else if (err == noErr && h.code >= 300) set_status("The server didn't send it.");
-    else set_status("Mill couldn't get it.");
+    else if (err == noErr && h.code >= 300) set_status("The server didn\325t send it.");
+    else set_status("Mill couldn\325t get it.");
     free(resp.buf);
     set_loading(false);
     InitCursor();
-    if (ran_out) out_of_memory_alert("it couldn't save that.");
+    if (ran_out) out_of_memory_alert("it couldn\325t save that.");
+    if (saved && browse && saved_url(&resp.spec, then, sizeof then)) return load(then, true, NULL, NULL, NULL);
+    return saved;
+}
+
+/* Save Image, Link, or Page Source As: where, then what about a part file there, then
+   save_to. Whether it was saved. */
+static Boolean save_url(const char *url, const char *from, Boolean browse)
+{
+    FSSpec spec;
+    short part;
+    if (br->loading) return false;
+    if (!ask_where(url, &spec)) { InitCursor(); return false; }
+    if ((part = ask_part(url, &spec)) == PART_CANCEL) { InitCursor(); return false; }
+    return save_to(url, from, &spec, part == PART_RESUME, browse);
 }
 
 /* Send a form, as its field by (a button, or -1 for Return in a text field) sends it */
@@ -2989,9 +4161,9 @@ static void submit(long form, long by, short x, short y)
     char target[300], content_type[80];
     char *q;
     blur();
-    if (forms_submit(&br->forms, &br->doc, form, by, x, y, &s)) { out_of_memory_alert("it couldn't send the form."); return; }
+    if (forms_submit(&br->forms, &br->doc, form, by, x, y, &s)) { out_of_memory_alert("it couldn\325t send the form."); return; }
     if (url_resolve(br->page_url, s.action[0] ? s.action : br->page_url, target, sizeof target)) {
-        set_status("Mill can't send this form to that address.");
+        set_status("Mill can\325t send this form to that address.");
     } else if (!same_kind(target)) {
         set_status(FORM_MSG);
     } else {
@@ -3011,7 +4183,7 @@ static void submit(long form, long by, short x, short y)
             UnloadSeg((void *)body_new);    /* sending's code, only while it's used */
         } else {
             if ((q = strchr(target, '?'))) *q = 0;
-            if (strlen(target) + s.len + 2 > sizeof target) set_status("This form's data is too long for an address.");
+            if (strlen(target) + s.len + 2 > sizeof target) set_status("This form\325s data is too long for an address.");
             else {
                 strcat(target, "?");
                 strcat(target, s.data);
@@ -3059,7 +4231,7 @@ static void follow(const Run *r)
 {
     char target[300];
     if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) {
-        set_status("Mill can't open this kind of address.");
+        set_status("Mill can\325t open this kind of address.");
         return;
     }
     if (!may_follow(target)) { set_status(FILE_MSG); return; }
@@ -3114,7 +4286,10 @@ static void go_map(const char *target)
 }
 
 enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE, CM_VIEW_LINK };
-#define HOLD 30         /* ticks the button is held for the menu, as Mac browsers did */
+/* Held this long for the menu: the double-click time, at least half a second; moved this
+   far first, it's a click (as Netscape 4's context menus did) */
+#define HOLD 30
+#define HYSTERESIS 6
 
 /* The menu for what's under the mouse: an image, a link, or the page itself */
 static void context_menu(Point p, const Run *r)
@@ -3133,13 +4308,13 @@ static void context_menu(Point p, const Run *r)
         if (br->pics[pic].state == PIC_SHOWN) DisableItem(m, n);
         AppendMenu(m, "\pView Image");
         codes[n++] = CM_VIEW_IMAGE;
-        AppendMenu(m, "\pSave Image As...");
+        AppendMenu(m, "\pSave Image As\311");
         codes[n++] = CM_SAVE_IMAGE;
     }
     if (r && r->link && r->kind != RUN_CONTROL) {
         AppendMenu(m, "\pOpen Link in New Window");
         codes[n++] = CM_NEW_WINDOW;
-        AppendMenu(m, "\pSave Link As...");
+        AppendMenu(m, "\pSave Link As\311");
         codes[n++] = CM_SAVE_LINK;
         AppendMenu(m, "\pView Link as Text");
         codes[n++] = CM_VIEW_LINK;
@@ -3148,11 +4323,17 @@ static void context_menu(Point p, const Run *r)
         AppendMenu(m, "\pView Source");
         codes[n++] = CM_VIEW_SOURCE;
         if (page != br->page_url) DisableItem(m, n);  /* already */
-        AppendMenu(m, "\pSave Page Source As...");
+        AppendMenu(m, "\pSave Page Source As\311");
         codes[n++] = CM_SAVE_SOURCE;
     }
     InsertMenu(m, -1);
     LocalToGlobal(&where);
+    /* where it wouldn't fit, the menu goes to the mouse's left (or above), clear of it: moved
+       there by the Menu Manager, it would be over the mouse, and a release without moving
+       would choose its first item */
+    CalcMenuSize(m);
+    if (where.h + (**m).menuWidth > qd.screenBits.bounds.right && where.h > (**m).menuWidth + 1) where.h -= (**m).menuWidth + 1;
+    if (where.v + (**m).menuHeight > qd.screenBits.bounds.bottom && where.v > (**m).menuHeight + 21) where.v -= (**m).menuHeight + 1;
     choice = PopUpMenuSelect(m, where.v, where.h, 0);
     DeleteMenu(MENU_CONTEXT);
     DisposeMenu(m);
@@ -3166,12 +4347,12 @@ static void context_menu(Point p, const Run *r)
         go(br->pics[pic].url, true, br->page_url);  /* on a page of its own */
         break;
     case CM_SAVE_IMAGE:
-        save_url(br->pics[pic].url, br->page_url);
+        save_url(br->pics[pic].url, br->page_url, false);
         break;
     case CM_NEW_WINDOW: case CM_SAVE_LINK: case CM_VIEW_LINK:
-        if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill can't open this kind of address.");
+        if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill can\325t open this kind of address.");
         else if (!may_follow(target)) set_status(FILE_MSG);
-        else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target, br->page_url);
+        else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target, br->page_url, false);
         else if (codes[LoWord(choice) - 1] == CM_VIEW_LINK) {
             /* what it sends, as text: View Source, for the link */
             char source[340];
@@ -3189,7 +4370,7 @@ static void context_menu(Point p, const Run *r)
         go(target, true, NULL);
         break;
     case CM_SAVE_SOURCE:
-        save_url(page, NULL);
+        save_url(page, NULL, false);
         break;
     }
 }
@@ -3201,7 +4382,18 @@ static void page_click(Point p, EventRecord *ev)
     const Run *r = run_at(p);
     Point now;
     if (!(ev->modifiers & ControlKey)) {
-        while (StillDown() && TickCount() - ev->when < HOLD) {}
+        long *dbl = (long *)0x2F0;     /* DoubleTime: GetDblTime is this low-memory read */
+        unsigned long hold, start = ev->when;
+        Boolean moved = false;
+        __asm__("" : "+a"(dbl));       /* hidden from GCC, which flags a fixed address */
+        hold = *dbl > HOLD ? *dbl : HOLD;
+        if (TickCount() - start > 6) start = TickCount();  /* a press that waited: from now */
+        while (StillDown() && TickCount() - start < hold) {
+            GetMouse(&now);
+            if (now.h - p.h >= HYSTERESIS || p.h - now.h >= HYSTERESIS ||
+                now.v - p.v >= HYSTERESIS || p.v - now.v >= HYSTERESIS) { moved = true; break; }
+        }
+        if (moved) while (StillDown()) {}
         if (!StillDown()) {
             GetMouse(&now);
             if (r && run_at(now) == r) {
@@ -3438,7 +4630,7 @@ static int print_laying_out(void *ctx, int percent)
 {
     char msg[32];
     (void)ctx;
-    sprintf(msg, "Laying out... %d%%", percent);
+    sprintf(msg, "Laying out\311 %d%%", percent);
     print_progress(msg, percent);
     return stop_asked();
 }
@@ -3463,7 +4655,7 @@ static void print_trouble(OSErr err)
     if (err == iPrAbort) strcpy(msg, "Printing stopped.");
     else if (err == fnfErr || err == resNotFound) strcpy(msg, "Choose a printer in the Chooser first.");
     else if (err == memFullErr) strcpy(msg, "Out of memory.");
-    else snprintf(msg, sizeof msg, "Mill couldn't print this page (error %d).", err);
+    else snprintf(msg, sizeof msg, "Mill couldn\325t print this page (error %d).", err);
     if (br) set_status(msg);
     else SysBeep(10);
 }
@@ -3583,7 +4775,7 @@ static void print_page(void)
 
     r = qd.screenBits.bounds;
     SetRect(&r, (r.right - 300) / 2, 20 + (r.bottom - 20 - 96) / 3, (r.right - 300) / 2 + 300, 20 + (r.bottom - 20 - 96) / 3 + 96);
-    snprintf(print_what, sizeof print_what, "Printing \"%.60s\"", br->doc.title[0] ? br->doc.title : br->page_url);
+    snprintf(print_what, sizeof print_what, "Printing \322%.60s\323", br->doc.title[0] ? br->doc.title : br->page_url);
     print_step[0] = 0;
     print_pct = 0;
     print_win = NewWindow(NULL, &r, "\p", true, dBoxProc, (WindowPtr)-1, false, 0);
@@ -3626,7 +4818,7 @@ static void print_page(void)
     PrCloseDoc(port);
     if (PrError() == noErr && (**print_rec).prJob.bJDocLoop == bSpoolLoop) {
         /* a spooled job (the ImageWriter's best quality) prints now */
-        print_progress("Printing...", 100);
+        print_progress("Printing\311", 100);
         PrPicFile(print_rec, NULL, NULL, NULL, &st);
     }
     err = PrError();
@@ -3845,9 +5037,9 @@ static void bookmark_dialog(short slot)
     n = bd_slot == 9 ? 0 : bd_slot + 1;
     if (url[0]) {
         Url u;
-        if (url_parse(url, &u)) { set_status("That isn't an address Mill can open."); return; }
+        if (url_parse(url, &u)) { set_status("That isn\325t an address Mill can open."); return; }
     }
-    if (bookmark_set(bd_slot, url, title) != noErr) sprintf(msg, "Mill couldn't save its bookmarks.");
+    if (bookmark_set(bd_slot, url, title) != noErr) sprintf(msg, "Mill couldn\325t save its bookmarks.");
     else if (url[0]) sprintf(msg, "Bookmarked as Command-%d.", n);
     else sprintf(msg, "Bookmark %d is empty now.", n);
     set_status(msg);
@@ -3951,6 +5143,13 @@ static void do_menu(long choice)
         if (item == FILE_QUIT) quitting = may_quit();
     } else if (menu == MENU_EDIT) {
         if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true, NULL); }
+        if (item == EDIT_CLEAR_LOGINS) {
+            /* every name and password typed, and every cookie: the next protected page asks again */
+            auth_clear(&keyring);
+            jar_free(&jar);
+            net_keep_close(NULL, NULL);     /* logged in as someone: they go too */
+            if (br) set_status("Logins and cookies cleared.");
+        }
         else if (br) {
             if (item == EDIT_CUT) TECut(typing_te());
             if (item == EDIT_COPY) TECopy(typing_te());
@@ -4090,6 +5289,7 @@ static void close_browser(Browser *x)
     Browser **p;
     short i;
     use(x);
+    net_keep_close(x, NULL);
     if (x->have_page) { layout_free(&x->lay); pics_free(); forms_free(&x->forms); html_free(&x->doc); }
     free(x->form_base);
     plugin_drop(x->held);
@@ -4240,14 +5440,14 @@ static void hover(void)
 static void setup_menus(void)
 {
     MenuHandle m = NewMenu(MENU_APPLE, "\p\024");
-    AppendMenu(m, "\pAbout Mill...;(-");
+    AppendMenu(m, "\pAbout Mill\311;(-");
     AppendResMenu(m, 'DRVR');
     InsertMenu(m, 0);
     m = NewMenu(MENU_FILE, "\pFile");
-    AppendMenu(m, "\pNew Window/N;Open Location.../L;Open File.../O;Close/W;(-;Page Setup...;Print.../P;(-;Quit/Q");
+    AppendMenu(m, "\pNew Window/N;Open Location\311/L;Open File\311/O;Close/W;(-;Page Setup\311;Print\311/P;(-;Quit/Q");
     InsertMenu(m, 0);
     m = NewMenu(MENU_EDIT, "\pEdit");
-    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;(-;Preferences...");
+    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;(-;Preferences\311;Clear Logins and Cookies");
     InsertMenu(m, 0);
     m = NewMenu(MENU_VIEW, "\pView");
     AppendMenu(m, "\pLarger Text/+;Smaller Text/-;(-;Page Source");
@@ -4256,7 +5456,7 @@ static void setup_menus(void)
     AppendMenu(m, "\pBack/[;Forward/];Reload/R;Home/H;(-;Stop/.");
     InsertMenu(m, 0);
     m = NewMenu(MENU_BOOKMARKS, "\pBookmarks");
-    AppendMenu(m, "\pAdd Bookmark.../D;(-");
+    AppendMenu(m, "\pAdd Bookmark\311/D;(-");
     {
         /* the ten slots, Command-1 to Command-9 and Command-0; their names come later */
         static unsigned char key[] = "\p /1";
@@ -4266,7 +5466,7 @@ static void setup_menus(void)
             AppendMenu(m, key);
         }
     }
-    AppendMenu(m, "\p(-;Edit Bookmarks...");
+    AppendMenu(m, "\p(-;Edit Bookmarks\311");
     InsertMenu(m, 0);
     DrawMenuBar();
 }
@@ -4281,10 +5481,31 @@ static Boolean net_waiting(void)
     return stop_asked();
 }
 
+/* Once, at startup: the Plug-Ins skipped as made for another interface (mill://plugins
+   lists them too) */
+static void skipped_alert(void)
+{
+    char text[256];
+    short i, n = 0, more = 0;
+    long len = sprintf(text, "Plug-Ins made for another version of Mill weren\325t loaded: ");
+    for (i = 0; i < nplugs; i++) {
+        long k;
+        if (plugs[i].status != PLUG_OLDER && plugs[i].status != PLUG_NEWER) continue;
+        k = strlen(plugs[i].file);
+        if (len + k + 16 > 150) { more++; continue; }
+        len += sprintf(text + len, "%s%s", n ? ", " : "", plugs[i].file);
+        n++;
+    }
+    if (!n) return;
+    if (more) sprintf(text + len, ", and %d more.", more);
+    else strcpy(text + len, ".");
+    fail_alert(text);
+}
+
 int mill_run(WindowPtr splash)
 {
     EventRecord ev;
-    Boolean net_ok;
+    Boolean reached, welcome;
 
     sys_init();  /* System 6 or 7: which calls to use */
     mem_init();
@@ -4294,11 +5515,20 @@ int mill_run(WindowPtr splash)
     if (!new_browser(splash)) return 1;
 
     settings_load();
-    net_status = net_progress;
+    net_keep_secs = keep_alive_secs();
     net_idle = net_waiting;
-    net_ok = net_init() == noErr;
     plugins_init();
+    settings_migrate();
     fonts_choose();
+    /* the connection check, when it's on (not without MacTCP: the first page says so).
+       Only it opens MacTCP at launch; else the first page that needs it does. */
+    reached = true;
+    if (!strcmp(setting("net_check", "yes"), "yes")) {
+        if (splash_say) splash_say("MacTCP");
+        if (net_open() == noErr) reached = net_check();
+    }
+    net_status = net_progress;
+    splash_say = NULL;      /* it's in the splash's segment, which goes below */
     DisposeWindow(splash);  /* the browser is ready */
     SetPort(br->win);
     /* the splash and what Mill does once are done: their segment goes. main's frame
@@ -4308,16 +5538,18 @@ int mill_run(WindowPtr splash)
     memreport_snapshot("the window is up, before the first page", true);
 #endif
 
-    /* the home page, or Mill's own page when the network isn't there */
-    if (!net_ok || !go(setting("homepage", MILL_DEFAULT_HOME), true, NULL)) {
-        char why[128];
-        strcpy(why, net_ok ? br->status_text : "MacTCP isn't available.");
-        go("mill://about", true, NULL);
-        set_status(why);  /* why it isn't the home page */
+    if (!reached) fail_alert("The Internet wasn\325t reachable. If that\325s expected, turn off Connection check from the Settings page.");
+    /* the welcome page while that setting is on, until it loads without an error; else the
+       home page. One that fails shows Mill's error page, as any page would. */
+    welcome = !strcmp(setting("welcome", "yes"), "yes");
+    if (go(welcome ? MILL_WELCOME : setting("homepage", MILL_DEFAULT_HOME), true, NULL) && welcome && page_whole) {
+        setting_put("welcome", "no");
+        settings_write();
     }
 #ifdef MILL_MEMREPORT
     memreport_snapshot("the first page has loaded", false);
 #endif
+    skipped_alert();
 
     while (!quitting) {
         use(front());
@@ -4328,7 +5560,7 @@ int mill_run(WindowPtr splash)
         } else if (br && br->focus < 0) {
             TEIdle(br->url_te);
         }
-        if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); } mem_short(); continue; }
+        if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); } mem_short(); net_keep_idle(); continue; }
         switch (ev.what) {
         case mouseDown: do_mouse(&ev); break;
         case keyDown: case autoKey: do_key(&ev); break;
@@ -4336,6 +5568,7 @@ int mill_run(WindowPtr splash)
         case activateEvt: activate((WindowPtr)ev.message, (ev.modifiers & activeFlag) != 0); break;
         }
     }
+    net_keep_close(NULL, NULL);
     plugins_quit();
     net_shutdown();
     ExitToShell();

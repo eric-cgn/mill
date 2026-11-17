@@ -68,3 +68,9 @@ long mill_format(char *out, long size, const char *fmt, const long *args)
     if (size > 0) out[o < size ? o : size - 1] = 0;
     return o;
 }
+
+long done_k(long done, long total)
+{
+    if (total <= 0) return (done + 1023) / 1024;
+    return done >= total ? (total + 1023) / 1024 : done / 1024;
+}

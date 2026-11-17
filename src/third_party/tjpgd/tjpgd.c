@@ -279,7 +279,7 @@ static JRESULT create_huffman_tbl (	/* 0:OK, !0:Failed */
 /* Extract a huffman decoded data from input stream                      */
 /*-----------------------------------------------------------------------*/
 
-static int huffext (	/* >=0: decoded data, <0: error code */
+static inline __attribute__((always_inline)) int huffext (	/* >=0: decoded data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int id,	/* Table ID (0:Y, 1:C) */
 	unsigned int cls	/* Table class (0:DC, 1:AC) */
@@ -420,7 +420,7 @@ static int huffext (	/* >=0: decoded data, <0: error code */
 /* Extract N bits from input stream                                      */
 /*-----------------------------------------------------------------------*/
 
-static int bitext (	/* >=0: extracted data, <0: error code */
+static inline __attribute__((always_inline)) int bitext (	/* >=0: extracted data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int nbit	/* Number of bits to extract (1 to 16) */
 )

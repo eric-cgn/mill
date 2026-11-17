@@ -5,7 +5,21 @@
    the name and password Mill gives it (Basic, or Digest), and otherwise passes the
    server's page back and calls AskLogin. It's also where other Plug-Ins' ProxyRequest
    goes (MillRequest.forward). For the proxy's exclusions it uses Mill's own address
-   code (core/url.h), and for logins core/httpauth.c, in this Plug-In's segment. */
+   code (core/url.h), for logins core/httpauth.c, and for reading HTTP/1.1 replies
+   core/http11.c, all in this Plug-In's segment.
+
+   It asks in HTTP/1.1 (RFC 2068) and hands Mill the reply's head and its body, chunks
+   undone; a body that stops before its end (short of its Content-Length or last chunk)
+   is passed on as far as it came, cut off (EndedEarly). A Range in Mill's request is
+   sent as it is; a 206 must be just that part, all of it, and a 200 to it means the
+   server can't seek, so only its head is passed on.
+
+   Connections are persistent (8.1): one whose reply ended where its Content-Length or
+   last chunk said, with nothing after it, is kept for the window's next page there
+   (TcpKeep). A reply that ends when the server closes, says Connection: close, or comes
+   from an HTTP/1.0 server isn't kept, and neither is anything through the proxy. A GET
+   or HEAD starts on the kept connection (TcpKept); Mill asks again on a new one if it
+   had closed (8.1.4). A POST always has a new one. */
 #include <Multiverse.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,6 +32,8 @@
 #include "../sdk/Glue/MillGlue.c"
 #include "core/url.h"
 #include "core/httpauth.h"
+#include "core/http11.h"
+#include "core/range.h"
 #include "version.h"
 
 #define H (self->host)
@@ -73,13 +89,14 @@ typedef struct {
 } Side;
 
 typedef struct {
-    char head[2048];        /* the reply's first bytes: its head, if it fits */
+    char head[4096];        /* the reply's first bytes: its head, which must fit */
     char start[600];
     char server[300];       /* "http://host:port" or "proxy host:port" */
     char keys[256];         /* AskLogin's: the realm's key, and the folder's for Basic (MillRequest.loginKey's size) */
     char name[64], pass[64];
     Side site, proxy;
     Challenge ch;
+    HttpHead h;
 } Work;
 
 /* The keys a login is kept under (MillPlugIn.h's loginKey). The realm's, which a 401
@@ -135,26 +152,62 @@ static void up_front(MillPlugIn *self, Work *w, Side *side, const char *path, co
     else side->out[0] = 0;
 }
 
+/* How a body is passed on: as it comes, to the close; length bytes; or chunked */
+typedef struct {
+    int kind;
+    long left;              /* HTTP_LENGTH: the bytes still to come */
+    Chunked ck;
+    int extra;              /* more came after its end: the connection isn't at rest */
+} Body;
+
+/* n bytes of body at buf to Mill: 1 for more, 0 at its end (or when Mill wants no
+   more), -1 if its chunks are broken */
+static int body_out(MillPlugIn *self, MillReqRef ref, Body *b, char *buf, long n)
+{
+    long used;
+    if (b->kind == HTTP_LENGTH) {
+        if (n > b->left) {
+            n = b->left;        /* what's after it isn't this reply's */
+            b->extra = 1;
+        }
+        b->left -= n;
+    } else if (b->kind == HTTP_CHUNKED) {
+        long all = n;
+        if ((n = chunked_run(&b->ck, buf, n, &used)) < 0) return -1;
+        if (used < all) b->extra = 1;
+    } else if (b->kind != HTTP_CLOSE) {
+        if (n > 0) b->extra = 1;
+        return 0;
+    }
+    if (n > 0 && !H->Write(ref, buf, n)) return 0;
+    return b->kind == HTTP_CLOSE || (b->kind == HTTP_LENGTH ? b->left > 0 : !chunked_done(&b->ck));
+}
+
 static OSErr http_request(MillPlugIn *self, MillRequest *r)
 {
     Url via;
     const char *line_end = strstr(r->text, "\r\n"), *sp;
-    long n, have, a[3];
+    long n, have, head, d, part, a[3], first, last;
     MillConn c;
     OSErr err;
     Work *w;
     short attempt = 0;
     unsigned long count = 0;
     short proxied = proxy_for(self, r->host, &via);
+    int head_request = r->len > 5 && !memcmp(r->text, "HEAD ", 5);
+    int safe = head_request || (r->len > 4 && !memcmp(r->text, "GET ", 4));
+    int ranged = range_asked(r->text, r->len, &first, &last);
+    char note[4];
+    long nlen;
     if (r->forward && !proxied) return millNoProxy;
-    if (!line_end || !(sp = strchr(r->text, ' '))) return paramErr;
+    if (!line_end || !(sp = strchr(r->text, ' ')) || ranged < 0) return paramErr;
     if (!(w = H->NewMem(sizeof *w))) return memFullErr;
     memset(w, 0, sizeof *w);
     /* the request line again, as a proxy is asked for the whole address */
     a[0] = sp - r->text;
     a[1] = (long)r->text;
     a[2] = (long)(proxied ? r->url : r->path);
-    if ((n = H->Format(w->start, sizeof w->start, "%.*s %s HTTP/1.0\r\nAccept: */*", a)) >= (long)sizeof w->start) {
+    if ((n = H->Format(w->start, sizeof w->start, "%.*s %s HTTP/1.1\r\nAccept: */*", a)) >= (long)sizeof w->start) {
         H->FreeMem(w);
         return paramErr;
     }
@@ -172,33 +225,81 @@ static OSErr http_request(MillPlugIn *self, MillRequest *r)
     }
     for (;;) {
         Boolean asks = false;
-        int code;
+        const char *fail = NULL;
+        Body b;
+        int code, interim = 0, more = 0;
+        nlen = sizeof note;
         if (proxied) err = H->TcpOpen(r->ref, via.host, url_port(&via), &c);
-        else err = H->TcpOpen(r->ref, r->host, r->port ? r->port : 80, &c);
+        else if (attempt > 0 || !safe || H->TcpKept(r->ref, "", &c, note, &nlen) != noErr)
+            err = H->TcpOpen(r->ref, r->host, r->port ? r->port : 80, &c);
         if (err != noErr) break;
-        err = H->TcpSend(c, w->start, n);
-        if (err == noErr && w->site.out[0]) err = H->TcpSend(c, w->site.out, strlen(w->site.out));
-        if (err == noErr && w->proxy.out[0]) err = H->TcpSend(c, w->proxy.out, strlen(w->proxy.out));
-        if (err == noErr) err = H->TcpSend(c, line_end, r->len - (line_end - r->text));
         /* a POST's body, as it's made (from the start again, if asked again) */
         if (attempt++ > 0) H->ReadBody(r->ref, NULL, NULL);
-        while (err == noErr) {
+        {
+            /* the request and the body's start in one send: MacTCP ends a send once it's
+               acknowledged, so a second would wait a round trip */
+            long so = strlen(w->site.out), po = strlen(w->proxy.out), rest = r->len - (line_end - r->text);
             long m = sizeof w->head;
-            if ((err = H->ReadBody(r->ref, w->head, &m)) != noErr || m == 0) break;
-            err = H->TcpSend(c, w->head, m);
+            char *q;
+            if ((err = H->ReadBody(r->ref, w->head, &m)) != noErr) m = 0;
+            else if (!(q = H->NewMem(n + so + po + rest + m))) err = memFullErr;
+            else {
+                memcpy(q, w->start, n);
+                memcpy(q + n, w->site.out, so);
+                memcpy(q + n + so, w->proxy.out, po);
+                memcpy(q + n + so + po, line_end, rest);
+                memcpy(q + n + so + po + rest, w->head, m);
+                err = H->TcpSend(c, q, n + so + po + rest + m);
+                H->FreeMem(q);
+            }
+            while (err == noErr && m > 0) {
+                m = sizeof w->head;
+                if ((err = H->ReadBody(r->ref, w->head, &m)) != noErr || m == 0) break;
+                err = H->TcpSend(c, w->head, m);
+            }
         }
         if (err != noErr) { H->TcpClose(c); break; }
-        H->Status(r->ref, "Waiting for reply...");
-        /* the head first, to see if it asks for a login */
-        for (have = 0; have < (long)sizeof w->head;) {
-            long m = sizeof w->head - have, k;
-            if ((err = H->TcpRecv(c, w->head + have, &m)) != noErr || m == 0) break;
-            for (k = have > 3 ? have - 3 : 0, have += m; k + 3 < have; k++)
-                if (!memcmp(w->head + k, "\r\n\r\n", 4)) break;
-            if (k + 3 < have) break;
+        H->Status(r->ref, "Waiting for reply\311");
+        /* the head first, after any 1xx (RFC 2068 10.1: 100 Continue is skipped), to see
+           how the body ends and if it asks for a login */
+        for (have = head = 0;;) {
+            long m = sizeof w->head - have;
+            if (have > 0 && (head = http_head_end(w->head, have)) > 0) {
+                http_head(w->head, head, &w->h);
+                if (w->h.code > 199 || w->h.code < 100 || ++interim > 4) break;
+                memmove(w->head, w->head + head, have -= head);
+                head = 0;
+                continue;
+            }
+            if (m == 0 || (err = H->TcpRecv(c, w->head + have, &m)) != noErr || m == 0) break;
+            have += m;
         }
-        code = read_head(w->head, have, "WWW-Authenticate", &w->ch);
-        if (code == 407 && proxied) code = read_head(w->head, have, "Proxy-Authenticate", &w->ch);
+        if (err != noErr || (have == 0 && !interim)) { H->TcpClose(c); break; }
+        memset(&b, 0, sizeof b);
+        part = RANGE_PASS;
+        b.kind = head ? http_body(&w->h, head_request) : HTTP_BAD;
+        if (b.kind == HTTP_BAD || w->h.code < 200)
+            fail = head || have < (long)sizeof w->head ? "The server\325s reply couldn\325t be read." : "The server\325s reply had too many headers.";
+        /* a Range asked for: the part, or the whole (so the server can't seek: its head
+           says so, and the rest isn't read) */
+        else if ((part = http_range_reply(&w->h, ranged ? first : -1, last)) == RANGE_BAD) fail = "The server sent the wrong part.";
+        else if (part == RANGE_WHOLE) b.kind = HTTP_NONE;
+        if (fail) {
+            H->TcpClose(c);
+            H->Fail(r->ref, fail);
+            break;
+        }
+        b.left = w->h.length;
+        if (w->h.chunked) {
+            /* Mill gets the body with its chunks undone (or none of it): no
+               Transfer-Encoding, and no Content-Length, which chunked overrules (4.4) */
+            d = http_drop(w->head, head, have, "Transfer-Encoding:");
+            d += http_drop(w->head, head - d, have - d, "Content-Length:");
+            head -= d;
+            have -= d;
+        }
+        code = read_head(w->head, head, "WWW-Authenticate", &w->ch);
+        if (code == 407 && proxied) code = read_head(w->head, head, "Proxy-Authenticate", &w->ch);
         if ((code == 401 || (code == 407 && proxied)) && w->ch.scheme != AUTH_NONE) {
             Side *side = code == 407 ? &w->proxy : &w->site;
             const char *field = code == 407 ? "\r\nProxy-Authorization: " : "\r\nAuthorization: ";
@@ -259,16 +360,28 @@ static OSErr http_request(MillPlugIn *self, MillRequest *r)
             }
             asks = true;
         }
-        /* the reply as it came, and the rest of it */
-        if (have > 0 && H->Write(r->ref, w->head, have)) {
-            for (;;) {
-                n = sizeof w->head;
-                if ((err = H->TcpRecv(c, w->head, &n)) != noErr || n == 0) break;
-                if (!H->Write(r->ref, w->head, n)) break;
+        /* the head, and the body to its end */
+        if (H->Write(r->ref, w->head, head)) {
+            for (more = body_out(self, r->ref, &b, w->head + head, have - head); more > 0;) {
+                long m = sizeof w->head;
+                if ((err = H->TcpRecv(c, w->head, &m)) != noErr) break;
+                if (m == 0) { more = b.kind == HTTP_CLOSE ? 0 : -2; break; }
+                more = body_out(self, r->ref, &b, w->head, m);
             }
+            /* ended early: what came is shown, cut off; but a part must be all there */
+            if (more == -1) fail = "The server\325s reply couldn\325t be read.";
+            else if (more == -2 && part == RANGE_PART) fail = "The server\325s reply ended early.";
         }
-        H->TcpClose(c);
-        if (asks) {
+        /* read to the end its head gave, and nothing more: the next page here may use it */
+        if (err == noErr && !fail && !proxied && !w->h.closes && !b.extra && part != RANGE_WHOLE &&
+            (b.kind == HTTP_NONE || (b.kind == HTTP_LENGTH && b.left == 0) ||
+             (b.kind == HTTP_CHUNKED && chunked_done(&b.ck))))
+            H->TcpKeep(r->ref, c, "", NULL, 0, NULL, 0);
+        else H->TcpClose(c);
+        if (fail) {
+            H->Fail(r->ref, fail);
+            err = noErr;
+        } else if (asks) {
             /* a name and password it didn't have, or that didn't work: Mill asks.
                "Log in to www.example.com (Members)." */
             Side *side = code == 407 ? &w->proxy : &w->site;
@@ -285,7 +398,7 @@ static OSErr http_request(MillPlugIn *self, MillRequest *r)
             r->loginKey[0] = 0;
             H->AskLogin(r->ref, prompt, NULL, NULL, w->keys, side->tries ? side->name : code == 401 ? r->user : NULL, NULL);
             err = noErr;
-        }
+        } else if (more == -2) H->EndedEarly(r->ref);
         break;
     }
     memset(w, 0, sizeof *w);    /* the logins */
@@ -300,9 +413,10 @@ static const MillSetting settings[] = {
     { "proxy", "HTTP proxy", "A proxy server, as host:port.", millText, "", 0, 0, NULL },
     { "proxy_exclude", "Proxy excluded domains",
       "Domains (with their subdomains), IP addresses, or ranges such as 192.168.0.0/16, separated by spaces.",
-      millText, "", 0, 0, NULL }
+      millText, "", 0, 0, NULL },
+    kMillRandomAccessSetting("no")
 };
-static const MillProtocol protocols[] = { { "http", "HTTP", "Hypertext Transfer Protocol 1.0 (RFC 1945)", 3, settings } };
+static const MillProtocol protocols[] = { { "http", "HTTP", "Hypertext Transfer Protocol 1.1 (RFC 2068)", 4096, 4, settings } };
 
 MillPlugIn *http_new(const MillHost *host, short resFile, MillInfo *info)
 {

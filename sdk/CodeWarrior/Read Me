@@ -20,6 +20,22 @@ CodeWarrior:
 - Project: Code Resource; File Name Finger; Resource Name Finger;
   Header Type Standard; ResType MPlg; ResID 128; Creator MiLL; Type MPlg.
 
+Mill also needs Finger's 'MIfc' resource, ID 128: 2 bytes, the
+interface it was built for, kMillInterface in Interfaces:MillInterface.h.
+CodeWarrior writes only the 'MPlg' resource, so after Make add 'MIfc'
+to Finger one of two ways:
+- With MPW 3.4's Rez (or ToolServer), the directory set to this folder:
+      Rez -a -i ::Interfaces: ::Interfaces:MillPlugIn.r -o Finger
+  (-a adds to Finger's resources and leaves 'MPlg' 128 as it is.)
+- With ResEdit 2.1: open Finger and choose Create New Resource from the
+  Resource menu; type MIfc and click OK. In the window that opens, type
+  kMillInterface's value as four hex digits (12 would be 000C). Choose
+  Get Resource Info from the Resource menu, set the ID to 128 and the
+  name to Interface, close the windows, and save.
+Mill skips a Plug-In without it, or with another number. Check it is
+there after every Make, and after kMillInterface changes rebuild and
+add it again.
+
 The Standard header starts with a branch to main, so byte 0 is the entry.
 The glue names its entry main for CodeWarrior and sets up A4 for globals.
 CodeWarrior writes the 'MPlg' resource itself.

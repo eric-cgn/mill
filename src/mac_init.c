@@ -1,4 +1,4 @@
-/* What Mill does once, as it starts: reading its settings, finding MacTCP's resolver,
+/* What Mill does once, as it starts: reading its settings, the connection check,
    and finding the Plug-Ins and copying what each says about itself. In the Start code
    segment with the splash (mill.segmap), which is unloaded once the browser is up. */
 #include <Multiverse.h>
@@ -9,6 +9,9 @@
 #include "mac_net.h"
 #include "mac_plugin.h"
 #include "mac_sys.h"
+#include "mac_start.h"
+#include "version.h"
+#include "core/migrate.h"
 
 /* ------------------------------------------------------------ Plug-Ins */
 
@@ -44,6 +47,7 @@ static Boolean keep_info(Plug *p, const MillInfo *in)
         if (!(pp->scheme = dup(mp->scheme)) || !(pp->heading = dup(mp->heading)) || !(pp->description = dup(mp->description)))
             return false;
         for (c = pp->scheme; *c; c++) if (*c >= 'A' && *c <= 'Z') *c |= 32;
+        pp->block = mp->blockSize > 0 ? mp->blockSize : 0;
         pp->nset = mp->settingCount > 0 ? mp->settingCount : 0;
         if (pp->nset && !(pp->sets = calloc(pp->nset, sizeof(MillSetting)))) return false;
         for (k = 0; k < pp->nset; k++) {
@@ -94,7 +98,13 @@ static void read_plug(Plug *p)
     MillOpenParams op;
     short i, k;
     if (!plugin_load(p, &op)) {
-        p->status = op.interface > kMillInterface ? PLUG_NEWER : PLUG_FAILED;
+        p->status = op.interface > kMillInterface ? PLUG_NEWER : op.interface < kMillInterface ? PLUG_OLDER : PLUG_FAILED;
+        return;
+    }
+    if (op.interface != kMillInterface) {
+        /* made for another version of the interface: no compatibility (MillGlue.c says which) */
+        p->status = op.interface > kMillInterface ? PLUG_NEWER : PLUG_OLDER;
+        plugin_close(p);
         return;
     }
     if (!keep_info(p, &op.info)) p->status = PLUG_FAILED;
@@ -130,8 +140,8 @@ static OSErr app_folder(short *vref, long *dir)
 
 /* Optional: font suitcases ('FFIL') in the Plug-In folder, read-only and kept open for the
    session. Mill runs the same without them. The font settings list each family in them that
-   the Font Manager finds, with the System's. */
-#define kTimesFont 20
+   the Font Manager finds, with the System's. One may also hold a Plug-In that draws its
+   families' outlines (Web Fonts does): read here, like a Plug-In's MillInfo. */
 PackFam pack_fams[PACK_FAMS];
 short npack_fams;
 PackFile pack_files[PACK_FILES];
@@ -214,10 +224,40 @@ static short family_sizes(Handle fond, short family)
     return mask;
 }
 
+/* The font file's Plug-In ('MPlg'), if it has one and none is known yet: opened once for
+   the families it draws, then closed, its code unloaded; the file stays open */
+static void read_font_plug(short ref, const char *file)
+{
+    MillOpenParams op;
+    short was = CurResFile(), i, n;
+    if (font_plug.res) return;
+    UseResFile(ref);
+    n = Count1Resources('MPlg');
+    UseResFile(was);
+    if (!n) return;
+    font_plug.res = ref;
+    font_plug.shared = true;
+    strcpy(font_plug.file, file);
+    font_plug.status = PLUG_FAILED;
+    if (!plugin_load(&font_plug, &op)) return;
+    if (op.interface == kMillInterface)
+        for (i = 0; i < op.info.fontCount && nplug_fonts < PLUG_FONTS; i++) {
+            const MillFont *mf = &op.info.fonts[i];
+            PlugFont *pf = &plug_fonts[nplug_fonts];
+            if (!mf->name || strlen(mf->name) >= sizeof pf->name || mf->minSize < 1 || mf->maxSize < mf->minSize) continue;
+            strcpy(pf->name, mf->name);
+            pf->min = mf->minSize;
+            pf->max = mf->maxSize;
+            nplug_fonts++;
+        }
+    plugin_close(&font_plug);
+    if (nplug_fonts) font_plug.status = PLUG_READY;
+}
+
 static void open_fonts(const FSSpec *spec, ConstStr255Param name)
 {
     short was = CurResFile(), ref, i, k, n, first = npack_fams;
-    if (npack_files >= PACK_FILES || RealFont(kTimesFont, 36)) return;   /* the System's own is better */
+    if (npack_files >= PACK_FILES) return;
     ref = file_open_res(spec, fsRdPerm);
     if (ref == -1) { UseResFile(was); return; }
     /* it's on top of the chain and current. Each family's FOND and FONTs are checked before
@@ -256,9 +296,21 @@ static void open_fonts(const FSSpec *spec, ConstStr255Param name)
     pack_files[npack_files].ref = ref;
     if (name[0] < sizeof pack_files[0].file) { memcpy(pack_files[npack_files].file, name + 1, name[0]); pack_files[npack_files].file[name[0]] = 0; }
     npack_files++;
+    read_font_plug(ref, pack_files[npack_files - 1].file);
 #ifdef MILL_MEMREPORT
     if (!fonts_map) fonts_map = (Handle)LMGetTopMapHndl();
 #endif
+}
+
+/* "Loading: name" on the splash, while it's up */
+static void say_loading(ConstStr255Param name)
+{
+    char s[64];
+    short n = name[0] < 63 ? name[0] : 63;
+    if (!splash_say) return;
+    memcpy(s, name + 1, n);
+    s[n] = 0;
+    splash_say(s);
 }
 
 static void read_folder(Boolean skip)
@@ -286,7 +338,10 @@ static void read_folder(Boolean skip)
         if (pb.hFileInfo.ioFlFndrInfo.fdType == 'FFIL') {
             /* not a Plug-In, and not listed: Web Fonts */
             FSSpec fs;
-            if (!skip && file_spec(vref, dir, name, &fs) == noErr) open_fonts(&fs, name);
+            if (!skip && file_spec(vref, dir, name, &fs) == noErr) {
+                say_loading(name);
+                open_fonts(&fs, name);
+            }
             continue;
         }
         if (!(p = add_plug())) break;
@@ -294,6 +349,7 @@ static void read_folder(Boolean skip)
         p->file[name[0]] = 0;
         if (file_spec(vref, dir, name, &p->spec) != noErr) { p->status = PLUG_FAILED; continue; }
         if (skip) { p->status = PLUG_SKIPPED; continue; }
+        say_loading(name);
         read_plug(p);
         if (p->status != PLUG_READY && !p->name) p->name = dup(p->file);
     }
@@ -317,6 +373,8 @@ void plugins_init(void)
         for (k = 0; k < plugs[i].nproto; k++) plugs[i].protos[k].plug = &plugs[i];
         for (k = 0; k < plugs[i].nformat; k++) plugs[i].formats[k].plug = &plugs[i];
     }
+    /* a format whose key a later one has is replaced by it (MillPlugIn.h, Formats) */
+    formats_overlap();
     /* the schemes for url.c: all but file:, which it knows already */
     strcpy(scheme_list, "plugin");
     for (i = 0; i < nplugs; i++) {
@@ -335,6 +393,8 @@ void plugins_init(void)
 /* ------------------------------------------------------------ settings */
 
 /* One name=value on each line; lines starting with # are notes */
+static Boolean settings_found;     /* there was a settings file */
+
 void settings_load(void)
 {
     FSSpec spec;
@@ -342,6 +402,7 @@ void settings_load(void)
     long len;
     char *text, *p, *end;
     if (settings_spec(&spec) != noErr || file_open(&spec, fsRdPerm, &ref) != noErr) return;
+    settings_found = true;
     GetEOF(ref, &len);
     if (len > 16384) len = 16384;
     if ((text = malloc(len + 1)) && FSRead(ref, &len, text) == noErr) {
@@ -369,10 +430,27 @@ void settings_load(void)
         setting_put("https.enable", strcmp(setting("proxy_https", "no"), "yes") ? "no" : "yes");
 }
 
+static const char *get_setting(const char *name, const char *dflt) { return setting(name, dflt); }
+
+/* Settings an older Mill saved, brought up to this one's once, then saved with its version
+   (core/migrate.c). After the Plug-Ins are read: Web Fonts decides the fonts. A new Mill's
+   settings have this version from the start, and are saved when something is changed. */
+void settings_migrate(void)
+{
+    static const SettingsIO io = { get_setting, setting_put };
+    const char *v = setting("version", NULL);
+    if (!settings_found) { setting_put("version", MILL_VERSION); return; }
+    if (v && !strcmp(v, MILL_VERSION)) return;
+    settings_upgrade(&io, v, MILL_DEFAULT_AGENT, font_default(0), font_default(1), first_bookmarks, n_first_bookmarks);
+    setting_put("version", MILL_VERSION);
+    settings_write();
+}
+
 /* ------------------------------------------------------------ the system */
 
 #define GESTALT_TRAP 0xA1AD
 #define FIND_FOLDER_PRESENT 1
+#define OUTLINE_FONTS 1        /* gestaltOutlineFonts */
 
 static Boolean trap_available(unsigned short trap, TrapType type)
 {
@@ -387,60 +465,36 @@ void sys_init(void)
     sys_fsspec = Gestalt(gestaltFSAttr, &r) == noErr && (r & gestaltHasFSSpecCalls);
     sys_new_sf = Gestalt(gestaltStandardFileAttr, &r) == noErr && (r & gestaltStandardFile58);
     sys_find_folder = Gestalt(gestaltFindFolderAttr, &r) == noErr && (r & FIND_FOLDER_PRESENT);
+    /* TrueType: gestaltFontMgrAttr's outline bit, and _FontDispatch there for its calls
+       (Inside Macintosh: Text, "Font Manager", Gestalt and SetOutlinePreferred) */
+    sys_outlines = trap_available(_FontDispatch, kToolboxTrapType) &&
+        Gestalt(gestaltFontMgrAttr, &r) == noErr && (r & OUTLINE_FONTS);
 }
 
-/* ------------------------------------------------------------ MacTCP */
+/* ------------------------------------------------------------ the connection check */
 
-enum { OPENRESOLVER = 1 };
-typedef OSErr (*dnr_proc)(long selector, ...);
+#define CHECK_LOOKUP_TICKS (10 * 60L)   /* a name not found in 10 seconds isn't */
+#define CHECK_ECHO_SECS 5
 
-/* MacTCP's resolver lives in a 'dnrp' resource: in the MacTCP control panel or in a
-   "MacTCP DNR" file, in the System Folder, Control Panels or Extensions. */
-static Boolean is_resolver_file(const HFileInfo *pb)
+static long check_since;
+
+static Boolean check_waited(void) { return TickCount() - check_since > CHECK_LOOKUP_TICKS; }
+
+Boolean net_check(void)
 {
-    OSType type = pb->ioFlFndrInfo.fdType, creator = pb->ioFlFndrInfo.fdCreator;
-    if (type == 'cdev' && (creator == 'ztcp' || creator == 'mtcp')) return true;
-    return pb->ioNamePtr[0] == 10 && memcmp(pb->ioNamePtr + 1, "MacTCP DNR", 10) == 0;
-}
-
-static Handle load_dnrp_from(OSType folder)
-{
-    short vref; long dir; short i;
-    Str63 name;
-    HFileInfo pb;
-    if (sys_folder(folder, &vref, &dir) != noErr) return NULL;
-    for (i = 1; ; i++) {
-        memset(&pb, 0, sizeof pb);
-        pb.ioNamePtr = name;
-        pb.ioVRefNum = vref;
-        pb.ioDirID = dir;
-        pb.ioFDirIndex = i;
-        if (PBGetCatInfoSync((CInfoPBPtr)&pb) != noErr) return NULL;
-        if ((pb.ioFlAttrib & ioDirMask) == 0 && is_resolver_file(&pb)) {
-            FSSpec spec;
-            short ref;
-            Handle h;
-            if (file_spec(vref, dir, name, &spec) != noErr) continue;
-            ref = file_open_res(&spec, fsRdPerm);
-            if (ref == -1) continue;
-            h = Get1IndResource('dnrp', 1);
-            if (h) { DetachResource(h); MoveHHi(h); HLock(h); }
-            CloseResFile(ref);
-            if (h) return h;
-        }
-    }
-}
-
-OSErr net_init(void)
-{
-    OSErr err = OpenDriver("\p.IPP", &net_ipp);
-    if (err != noErr) return err;
-    net_dnr = load_dnrp_from(kControlPanelFolderType);
-    if (!net_dnr) net_dnr = load_dnrp_from(kSystemFolderType);
-    if (!net_dnr) net_dnr = load_dnrp_from(kExtensionFolderType);
-    if (net_dnr && ((dnr_proc)*net_dnr)(OPENRESOLVER, (char *)NULL) != noErr) {
-        DisposeHandle(net_dnr);
-        net_dnr = NULL;
-    }
-    return noErr;
+    const char *host = setting("ping_host", "");
+    Boolean (*idle)(void) = net_idle;
+    void (*said)(const char *) = net_status;
+    ip_addr addr;
+    OSErr err;
+    if (!host[0]) host = MILL_DEFAULT_PING;
+    if (splash_say) splash_say("Connection check");
+    /* the browser isn't up: no sails or status line while the name is looked up */
+    check_since = TickCount();
+    net_idle = check_waited;
+    net_status = NULL;
+    err = net_resolve(host, &addr);
+    net_idle = idle;
+    net_status = said;
+    return err == noErr && net_ping(addr, CHECK_ECHO_SECS) == noErr;
 }

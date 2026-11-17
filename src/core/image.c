@@ -9,7 +9,7 @@
 /* ------------------------------------------------------------ scaling */
 
 /* A grayscale picture at the target size. Each source pixel fills the target pixels
-   whose centers fall in it: plain nearest-neighbour, cheap on a 68000. */
+   whose centers fall in it: plain nearest-neighbor, cheap on a 68000. */
 typedef struct {
     unsigned char *px;
     short w, h, sw, sh;
@@ -89,7 +89,7 @@ static void put(Gray *g, long sx, long sy, unsigned char v)
 
 /* Stretch a photo's tones so its darkest hundredth is black and its brightest white:
    in one bit, a picture that's all mid-grays is all checkerboard */
-static void levels(Gray *g)
+__attribute__((optimize("O2"))) static void levels(Gray *g)
 {
     long hist[256], n = (long)g->w * g->h, cut = n / 100, seen, i;
     int lo = 0, hi = 255;
@@ -103,9 +103,9 @@ static void levels(Gray *g)
     for (i = 0; i < n; i++) g->px[i] = map[g->px[i]];
 }
 
-/* Atkinson's: an eighth of the error to each of six neighbours, the rest dropped,
+/* Atkinson's: an eighth of the error to each of six neighbors, the rest dropped,
    which keeps light areas clean and gives the crisp look of early Mac pictures */
-static int dither(const Gray *g, Bitmap1 *out)
+__attribute__((optimize("O2"))) static int dither(const Gray *g, Bitmap1 *out)
 {
     short w = g->w, h = g->h, x, y;
     short *rows = calloc(3 * (w + 3), sizeof(short));
@@ -203,7 +203,7 @@ void canvas_rect(ImageCanvas *c, short x, short y, short w, short h, const unsig
         }
 }
 
-int canvas_finish(ImageCanvas *c, int photo, Bitmap1 *out)
+__attribute__((optimize("O2"))) int canvas_finish(ImageCanvas *c, int photo, Bitmap1 *out)
 {
     int err;
     memset(out, 0, sizeof *out);

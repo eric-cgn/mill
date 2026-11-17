@@ -1,0 +1,19 @@
+News
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder.
+
+  news://host/               The server's groups
+  news://host/group          Its articles, newest first
+  news://host/group/number   An article
+  news://host/message-id     An article, by its Message-ID
+
+nntp:// works the same. Network News Transfer Protocol, with XOVER and
+AUTHINFO. Read-only: no posting. Text is shown; attachments are named, not
+shown. When the server asks, Mill asks for a name and password.
+
+plugin://news/about has a form, filled in from Settings.
+
+Written from the published specifications (RFC 977, 1036, 1522, 1738, 2045,
+2046, and the common NNTP extensions, since RFC 2980).
+
+Build: ./build.sh writes build/News.bin.

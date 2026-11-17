@@ -1,0 +1,16 @@
+Bitstream's Courier 10 Pitch, Type 1, the outlines of Mill Mono (Regular c0419bt_, Bold c0583bt_,
+and Italic c0582bt_, each .pfb and .afm), kept in ../bitstream.tar.xz so Web Fonts can be rebuilt
+without a download. They are unchanged from the release:
+
+  font-bitstream-type1-1.0.4.tar.xz  https://www.x.org/releases/individual/font/font-bitstream-type1-1.0.4.tar.xz
+    SHA-256 de2f238b4cd72db4228a0ba67829d76a2b7c039e22993d66a722ee385248c628
+
+fonts.json lists each file's SHA-256 and build.py checks them. outlines.py converts them to
+TrueType and reduces them for Mill; build.py checks the results' SHA-256 too.
+
+COPYING is the release's notice (Bitstream, 1989-1992): use, copy, modify, sublicense, sell, and
+redistribute allowed, with the notice left intact on all copies. It goes into Web Fonts (TXGZ 129)
+and its Read Me. Inside Mill the family is called Mill Mono. The fonts lack 14 Mac Roman characters
+(13 math symbols and the lozenge); they show as the missing glyph.
+
+python3 ../../build.py --download reads the release instead of the archive.

@@ -28,6 +28,10 @@ typedef struct {
     long rsrc_at, rsrc_len;
 } MacBinary;
 
+/* The content type of a Mac file of type 'TEXT', whose type by its name is by_name: HTML
+   if the name says so, else plain text, in Mac Roman either way */
+const char *mac_text_type(const char *by_name);
+
 /* Read a MacBinary I, II or III header (128 bytes); returns 0, or -1 if it isn't one.
    II and III are known by their header's CRC; I by its zero bytes and lengths. */
 int macbinary_header(const unsigned char *h, MacBinary *mb);

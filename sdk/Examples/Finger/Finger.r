@@ -1,4 +1,6 @@
 /* The Plug-In's code, built by Retro68 as a flat code resource */
+#include "MillPlugIn.r"         /* 'MIfc' 128: the interface it was built for */
+
 data 'MPlg' (128, "Finger") {
     $$read("Finger.flt")
 };

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "core/charset.h"
+#include "core/config.h"
 #include "core/filetypes.h"
 #include "core/inflate.h"
 #include "core/update.h"
@@ -56,36 +57,6 @@ static void out_text_n(Out *o, const char *s, long n)
     for (i = 0; i < n; i++) { one[0] = s[i]; one[1] = 0; out_text(o, one); }
 }
 
-/* The file type rules typed in mill://config, checked and joined with semicolons for
-   the settings file; returns 0, or the number of the first line that isn't a rule */
-static int join_rules(char *text)
-{
-    char *in = text, *o = text;
-    int line = 0;
-    while (*in) {
-        char *e = in;
-        long n;
-        while (*e && *e != '\r' && *e != '\n') e++;
-        n = e - in;
-        line++;
-        while (n > 0 && in[n - 1] == ' ') n--;
-        if (n > 0) {
-            long k = 0;
-            while (k < n && in[k] == ' ') k++;
-            if (k < n) {
-                if (filetype_rule_ok(in + k, n - k)) return line;
-                if (o > text) *o++ = ';';
-                memmove(o, in + k, n - k);
-                o += n - k;
-            }
-        }
-        if (*e == '\r' && e[1] == '\n') e++;
-        in = *e ? e + 1 : e;
-    }
-    *o = 0;
-    return 0;
-}
-
 /* Rules one on each line, for a TEXTAREA */
 static void out_rules(Out *o, const char *rules)
 {
@@ -112,7 +83,7 @@ static void check_for_updates(Out *o)
     int k, err;
     strcpy(why, "Not enough memory.");
     /* the download link must be on the site the file came from: this copy's own */
-    if (update_site(MILL_UPDATE_URL, site, sizeof site)) strcpy(why, "Its address isn't one Mill can open.");
+    if (update_site(MILL_UPDATE_URL, site, sizeof site)) strcpy(why, "Its address isn\325t one Mill can open.");
     else if (text && u && local_fetch) {
         n = local_fetch(MILL_UPDATE_URL, text, UPDATE_MAX_BYTES + 1, why, sizeof why);
         if (n > UPDATE_MAX_BYTES) { n = -1; strcpy(why, "Its answer was too long."); }
@@ -121,14 +92,14 @@ static void check_for_updates(Out *o)
             if (err == UPDATE_OFF_SITE) {
                 /* site without its scheme and last slash: mill.1in1e6.com */
                 const char *host = strstr(site, "://") + 3;
-                snprintf(why, sizeof why, "Its download link isn't on %.*s.", (int)(strlen(host) - 1), host);
+                snprintf(why, sizeof why, "Its download link isn\325t on %.*s.", (int)(strlen(host) - 1), host);
             } else {
-                strcpy(why, "Its answer wasn't a version number.");
+                strcpy(why, "Its answer wasn\325t a version number.");
             }
         }
     }
     if (n < 0) {
-        out_s(o, "<P>Mill couldn't check for updates. ");
+        out_s(o, "<P>Mill couldn\325t check for updates. ");
         out_text(o, why);
     } else if (update_compare(u->version, MILL_VERSION) > 0) {
         out_s(o, "<P><B>A new version is available!</B><BR><A HREF=\"");
@@ -197,15 +168,16 @@ static void about(Out *o, int check)
         "<P>Mill is a capable web browser for monochrome Macs. It is the most feature-complete, no-nonsense "
         "browser available for the Plus and later."
         "<P><B>System Requirements:</B><UL>"
-        "<LI>Mac Plus or later"
-        "<LI>System 6.0.3 with MacTCP or later"
-        "<LI>700K free RAM</UL>"
+        "<LI>Mac Plus or later, 1 MB RAM"
+        "<LI>System 6.0.3, MacTCP 1.1, or later"
+        "<LI>700K free RAM"
+        "<LI>Recommended: System 6.0.8, 2 MB RAM</UL>"
         "<H3>What Mill reads</H3><UL>"
         "<LI>HTML 3.2, which included text, lists, tables, images (and maps), and forms, as well as a few extras "
         "like bgcolor and font face. No applets, JavaScript, style sheets, or frames."
         "<LI>URL schemes: http://, https:// (through a proxy), file://, mill://, and more with Plug-Ins"
         "<LI>Character sets: UTF-8, ISO 8859-1, and Mac Roman"
-        "<LI>Formats: GIF (static), JPEG (baseline), Netpbm, and gzip; more with Plug-Ins"
+        "<LI>Formats: GIF (static) and JPEG (baseline); more with Plug-Ins"
         "<LI>Pages up to 192K for rendering, but larger for downloads"
         "<LI>Cookies: kept until you quit Mill</UL>"
         "<H3>Built-in pages</H3><UL>"
@@ -224,13 +196,13 @@ static void about(Out *o, int check)
         "<DT>Command-1 to Command-0<DD>Open a bookmark"
         "<DT>Command-D<DD>Bookmark this page"
         "<DT>Option-Command and a number<DD>Bookmark this page in that slot"
-        "<DT>Control-click, or hold the button down<DD>Save an image, a link, or the page's source</DL>"
+        "<DT>Control-click, or hold down the mouse button<DD>Save an image, a link, or the page\325s source</DL>"
         "<P><A HREF=\"" MILL_SITE "changes.html\">Change log</A>"
         "<H3>Credits</H3><UL>"
-        "<LI>The drawing is by George A. Harker, from James Baldwin's <I>Stories of Don Quixote</I> (1910), "
+        "<LI>The drawing is by George A. Harker, from James Baldwin\325s <I>Stories of Don Quixote</I> (1910), "
         "now in the public domain."
-        "<LI>JPEG decoding by ChaN's <A HREF=\"mill://license#tjpgd\">TJpgDec</A>."
-        "<LI>Built with Wolfgang Thaller's Retro68, including its "
+        "<LI>JPEG decoding by ChaN\325s <A HREF=\"mill://license#tjpgd\">TJpgDec</A>."
+        "<LI>Built with Wolfgang Thaller\325s Retro68, including its "
         "<A HREF=\"mill://license#runtime\">runtime</A>, the <A HREF=\"mill://license#newlib\">newlib</A> "
         "C library, and <A HREF=\"mill://license#multiversal\">Multiversal Interfaces</A>."
         "<LI>Source code under the <A HREF=\"mill://license#mill\">MIT License</A>.</UL>");
@@ -307,9 +279,9 @@ static void license_section(Out *o, const char *name, short ref)
     if (ref > 0) {
         Boolean found;
         UseResFile(ref);
-        out_s(o, "<PRE>");
+        out_s(o, "<PRE><FONT SIZE=2>");
         found = license_text(o, LICENSE_ID_FILE, 1);
-        out_s(o, found ? "</PRE>" : "</PRE><P>This file has no license text.");
+        out_s(o, found ? "</FONT></PRE>" : "</FONT></PRE><P>This file has no license text.");
         UseResFile(was);
     } else {
         out_s(o, "<P>This file has no license text.");
@@ -340,22 +312,83 @@ static void license_page(Out *o)
 
 /* ------------------------------------------------------------ Plug-Ins' settings */
 
-static void setting_name(const PlugProto *pp, const MillSetting *st, char *name)
+static void setting_name(const char *scheme, const MillSetting *st, char *name)
 {
-    if (plugin_setting_name(pp->scheme, st->key, name)) name[0] = 0;
+    if (plugin_setting_name(scheme, st->key, name)) name[0] = 0;
 }
 
-static const char *setting_now(const PlugProto *pp, const MillSetting *st)
+static const char *setting_now(const char *scheme, const MillSetting *st)
 {
     char name[48];
-    setting_name(pp, st, name);
+    setting_name(scheme, st, name);
     return setting(name, st->dflt);
 }
 
-/* Each protocol a Plug-In has, under its own heading, after HTTP and HTTPS */
-static void plugin_settings_form(Out *o)
+/* A protocol's or a format's own settings (scheme: its scheme or key), a row each, after
+   its Enable row */
+static void setting_rows(Out *o, const char *scheme, const MillSetting *sets, short n)
 {
-    short i, k, j;
+    short j;
+    for (j = 0; j < n; j++) {
+        const MillSetting *st = &sets[j];
+        const char *v = setting_now(scheme, st);
+        char name[48];
+        setting_name(scheme, st, name);
+        out_s(o, "<TR><TD VALIGN=TOP WIDTH=110><B>");
+        out_text(o, st->label);
+        out_s(o, "</B><TD>");
+        if (st->kind == millCheckbox) {
+            out_s(o, "<INPUT TYPE=checkbox VALUE=yes NAME=\"");
+            out_text(o, name);
+            out_s(o, !strcmp(v, "yes") ? "\" CHECKED>" : "\">");
+            if (st->note) { out_s(o, " "); out_text(o, st->note); }
+            continue;
+        }
+        if (st->kind == millChoice && st->choices) {
+            const char *c = st->choices;
+            short k = 0;
+            /* each sent back as its number: a form sends Latin-1, which hasn't
+               Mac Roman's curly quotes */
+            out_s(o, "<SELECT NAME=\"");
+            out_text(o, name);
+            out_s(o, "\">");
+            while (*c) {
+                const char *e = strchr(c, '|');
+                long n = e ? e - c : (long)strlen(c);
+                char opt[40];
+                sprintf(opt, "<OPTION VALUE=%d%s>", k++, (long)strlen(v) == n && !memcmp(v, c, n) ? " SELECTED" : "");
+                out_s(o, opt);
+                out_text_n(o, c, n);
+                c += n + (e != NULL);
+            }
+            out_s(o, "</SELECT>");
+        } else {
+            out_s(o, st->kind == millNumber ? "<INPUT SIZE=6 NAME=\"" : "<INPUT SIZE=30 NAME=\"");
+            out_text(o, name);
+            out_s(o, "\" VALUE=\"");
+            out_text(o, v);
+            out_s(o, "\">");
+        }
+        if (st->note) { out_s(o, "<BR>"); out_text(o, st->note); }
+    }
+}
+
+/* A section's own FORM, after its heading: which section it is, and "Saved." if it was just saved */
+static void section_start(Out *o, const char *sec, const char *saved)
+{
+    out_s(o, "<FORM METHOD=POST ACTION=\"mill://config\"><INPUT TYPE=hidden NAME=section VALUE=\"");
+    out_text(o, sec);
+    out_s(o, "\">");
+    if (!strcmp(sec, saved)) out_s(o, "<P><B>Saved.</B>");
+}
+
+/* Its Save button, under its last row */
+static void section_end(Out *o) { out_s(o, "<P><INPUT TYPE=submit VALUE=\"Save\"></FORM>"); }
+
+/* Each protocol a Plug-In has, under its own heading, after HTTP and HTTPS */
+static void plugin_settings_form(Out *o, const char *saved)
+{
+    short i, k;
     for (i = 0; i < nplugs; i++) {
         if (plugs[i].status != PLUG_READY) continue;
         for (k = 0; k < plugs[i].nproto; k++) {
@@ -365,55 +398,22 @@ static void plugin_settings_form(Out *o)
             out_s(o, "\">");
             out_text(o, pp->heading);
             out_s(o, "</A></H4>");
+            section_start(o, pp->scheme, saved);
             /* Mill's own first row: whether the protocol is on at all */
             out_s(o, SETTINGS_TABLE "<TR><TD VALIGN=TOP WIDTH=110><B>Enable</B><TD><INPUT TYPE=checkbox VALUE=yes NAME=\"");
             out_text(o, pp->scheme);
             out_s(o, plugin_enabled(pp->scheme) ? ".enable\" CHECKED>" : ".enable\">");
             if (pp->description[0]) { out_s(o, " "); out_text(o, pp->description); }
-            for (j = 0; j < pp->nset; j++) {
-                const MillSetting *st = &pp->sets[j];
-                const char *v = setting_now(pp, st);
-                char name[48];
-                setting_name(pp, st, name);
-                out_s(o, "<TR><TD VALIGN=TOP WIDTH=110><B>");
-                out_text(o, st->label);
-                out_s(o, "</B><TD>");
-                if (st->kind == millCheckbox) {
-                    out_s(o, "<INPUT TYPE=checkbox VALUE=yes NAME=\"");
-                    out_text(o, name);
-                    out_s(o, !strcmp(v, "yes") ? "\" CHECKED>" : "\">");
-                    if (st->note) { out_s(o, " "); out_text(o, st->note); }
-                    continue;
-                }
-                if (st->kind == millChoice && st->choices) {
-                    const char *c = st->choices;
-                    out_s(o, "<SELECT NAME=\"");
-                    out_text(o, name);
-                    out_s(o, "\">");
-                    while (*c) {
-                        const char *e = strchr(c, '|');
-                        long n = e ? e - c : (long)strlen(c);
-                        out_s(o, (long)strlen(v) == n && !memcmp(v, c, n) ? "<OPTION SELECTED>" : "<OPTION>");
-                        out_text_n(o, c, n);
-                        c += n + (e != NULL);
-                    }
-                    out_s(o, "</SELECT>");
-                } else {
-                    out_s(o, st->kind == millNumber ? "<INPUT SIZE=6 NAME=\"" : "<INPUT SIZE=30 NAME=\"");
-                    out_text(o, name);
-                    out_s(o, "\" VALUE=\"");
-                    out_text(o, v);
-                    out_s(o, "\">");
-                }
-                if (st->note) { out_s(o, "<BR>"); out_text(o, st->note); }
-            }
+            setting_rows(o, pp->scheme, pp->sets, pp->nset);
             out_s(o, "</TABLE>");
+            section_end(o);
         }
     }
 }
 
-/* Each format a Plug-In reads: Enable and what it is, and its types and extensions */
-static void format_settings_form(Out *o)
+/* Each format a Plug-In reads (not one replaced): Enable and what it is, and its types and
+   extensions, then its own settings */
+static void format_settings_form(Out *o, const char *saved)
 {
     short i, k;
     for (i = 0; i < nplugs; i++) {
@@ -421,11 +421,14 @@ static void format_settings_form(Out *o)
         for (k = 0; k < plugs[i].nformat; k++) {
             const PlugFormat *f = &plugs[i].formats[k];
             const char *e;
+            if (f->replaced_by) continue;
             out_s(o, "<H4><A NAME=\"");
             out_text(o, f->key);
             out_s(o, "\">");
             out_text(o, f->heading);
-            out_s(o, "</A></H4>" SETTINGS_TABLE "<TR><TD VALIGN=TOP WIDTH=110><B>Enable</B><TD><INPUT TYPE=checkbox VALUE=yes NAME=\"");
+            out_s(o, "</A></H4>");
+            section_start(o, f->key, saved);
+            out_s(o, SETTINGS_TABLE "<TR><TD VALIGN=TOP WIDTH=110><B>Enable</B><TD><INPUT TYPE=checkbox VALUE=yes NAME=\"");
             out_text(o, f->key);
             out_s(o, format_enabled(f) ? ".enable\" CHECKED> " : ".enable\"> ");
             out_text(o, f->description);
@@ -441,56 +444,80 @@ static void format_settings_form(Out *o)
                 out_text_n(o, e, n);
                 e += n;
             }
+            setting_rows(o, f->key, f->sets, f->nset);
             out_s(o, "</TABLE>");
+            section_end(o);
         }
     }
 }
 
-/* Saved as SCHEME.KEY, once each is checked; note says what's wrong */
-static void plugin_settings_save(const char *body, long len, char *note, int note_size)
+/* One protocol's or format's settings from the form, each checked; false, with note saying
+   what's wrong, if one isn't right */
+static Boolean settings_save(const char *body, long len, const char *scheme, const char *heading,
+                             const MillSetting *sets, short nset, char *note, int note_size)
 {
-    short i, k, j;
+    short j;
+    char name[48], v[256], *c;
+    snprintf(name, sizeof name, "%.15s.enable", scheme);
+    setting_put(name, form_field(body, len, name, v, sizeof v) ? "yes" : "no");
+    for (j = 0; j < nset; j++) {
+        const MillSetting *st = &sets[j];
+        setting_name(scheme, st, name);
+        if (st->kind == millCheckbox) { setting_put(name, form_field(body, len, name, v, sizeof v) ? "yes" : "no"); continue; }
+        if (!form_field(body, len, name, v, sizeof v)) continue;
+        for (c = v; *c; c++) if ((unsigned char)*c < ' ') *c = ' ';  /* one line in the settings file */
+        if (st->kind == millChoice && st->choices) {
+            /* its number (see the page): the choice's own text is kept */
+            const char *ch = st->choices, *e;
+            long n = atol(v);
+            for (; n > 0 && (e = strchr(ch, '|')); n--) ch = e + 1;
+            if (n) continue;
+            snprintf(v, sizeof v, "%.*s", (int)((e = strchr(ch, '|')) ? e - ch : (long)strlen(ch)), ch);
+        }
+        if (st->kind == millNumber) {
+            long n = atol(v);
+            const char *d = v[0] == '-' ? v + 1 : v;      /* a minus, where the range goes below 0 */
+            if (*d < '0' || *d > '9' || n < st->min || n > st->max) {
+                snprintf(note, note_size, "%s %s must be from %ld to %ld.", heading, st->label, st->min, st->max);
+                return false;
+            }
+            sprintf(v, "%ld", n);
+        }
+        setting_put(name, v);
+    }
+    return true;
+}
+
+/* The protocol's or format's own section sec, saved as SCHEME.KEY (or a format's KEY.KEY), once
+   each is checked; note says what's wrong. False if sec isn't one. */
+static Boolean plugin_settings_save(const char *sec, const char *body, long len, char *note, int note_size)
+{
+    short i, k;
     for (i = 0; i < nplugs; i++) {
         if (plugs[i].status != PLUG_READY) continue;
         for (k = 0; k < plugs[i].nformat; k++) {
-            char name[48], v[8];
-            snprintf(name, sizeof name, "%.15s.enable", plugs[i].formats[k].key);
-            setting_put(name, form_field(body, len, name, v, sizeof v) ? "yes" : "no");
+            const PlugFormat *f = &plugs[i].formats[k];
+            if (f->replaced_by || strcmp(f->key, sec)) continue;
+            settings_save(body, len, f->key, f->heading, f->sets, f->nset, note, note_size);
+            return true;
         }
         for (k = 0; k < plugs[i].nproto; k++) {
             const PlugProto *pp = &plugs[i].protos[k];
-            {
-                char name[48], v[8];
-                snprintf(name, sizeof name, "%.15s.enable", pp->scheme);
-                setting_put(name, form_field(body, len, name, v, sizeof v) ? "yes" : "no");
-            }
-            for (j = 0; j < pp->nset; j++) {
-                const MillSetting *st = &pp->sets[j];
-                char name[48], v[256], *c;
-                setting_name(pp, st, name);
-                if (st->kind == millCheckbox) { setting_put(name, form_field(body, len, name, v, sizeof v) ? "yes" : "no"); continue; }
-                if (!form_field(body, len, name, v, sizeof v)) continue;
-                for (c = v; *c; c++) if ((unsigned char)*c < ' ') *c = ' ';  /* one line in the settings file */
-                if (st->kind == millNumber) {
-                    long n = atol(v);
-                    const char *d = v[0] == '-' ? v + 1 : v;      /* a minus, where the range goes below 0 */
-                    if (*d < '0' || *d > '9' || n < st->min || n > st->max) {
-                        snprintf(note, note_size, "%s %s must be from %ld to %ld.", pp->heading, st->label, st->min, st->max);
-                        return;
-                    }
-                    sprintf(v, "%ld", n);
-                }
-                setting_put(name, v);
-            }
+            if (strcmp(pp->scheme, sec)) continue;
+            settings_save(body, len, pp->scheme, pp->heading, pp->sets, pp->nset, note, note_size);
+            return true;
         }
     }
+    return false;
 }
 
-static const char *const plug_status[] = { "", "needs a newer Mill", "name already used", "skipped (Shift held)", "couldn't start" };
+static const char *const plug_status[] = { "", "needs a newer Mill", "name already used", "skipped (Shift held)", "couldn\325t start",
+                                           "made for an older Mill" };
 
 /* One protocol's or format's line: its link to its settings, what it is, and its state */
 static void plugin_line(Out *o, const Plug *p, const char *key, const char *label, const char *description, Boolean on)
 {
+    (void)p;
     out_s(o, "<BR>&nbsp;&nbsp;<A HREF=\"mill://config#");
     out_text(o, key);
     out_s(o, "\">");
@@ -498,6 +525,33 @@ static void plugin_line(Out *o, const Plug *p, const char *key, const char *labe
     out_s(o, "</A> ");
     out_text(o, description);
     out_s(o, on ? " &middot; On" : " &middot; Off");
+}
+
+/* Where a format is from, for a line about another: "JPEG in Built-In" */
+static void format_from(Out *o, const PlugFormat *f)
+{
+    out_text(o, f->heading);
+    out_s(o, " in ");
+    out_text(o, f->plug->builtin ? "Built-In" : f->plug->file);
+}
+
+/* A format's line, and which format it replaced, or which replaced it (MillPlugIn.h, Formats) */
+static void format_line(Out *o, const Plug *p, const PlugFormat *f)
+{
+    if (f->replaced_by) {
+        out_s(o, "<BR>&nbsp;&nbsp;");
+        out_text(o, f->heading);
+        out_s(o, " ");
+        out_text(o, f->description);
+        out_s(o, " &middot; replaced by ");
+        format_from(o, f->replaced_by);
+        return;
+    }
+    plugin_line(o, p, f->key, f->heading, f->description, format_enabled(f));
+    if (f->replaces) {
+        out_s(o, " &middot; replaces ");
+        format_from(o, f->replaces);
+    }
 }
 
 static Boolean has_about_text(const Plug *p);
@@ -537,8 +591,7 @@ static void plugin_lines(Out *o, const Plug *p)
         snprintf(label, sizeof label, "%.20s:", p->protos[k].scheme);
         plugin_line(o, p, p->protos[k].scheme, label, p->protos[k].description, plugin_enabled(p->protos[k].scheme));
     }
-    for (k = 0; k < p->nformat; k++)
-        plugin_line(o, p, p->formats[k].key, p->formats[k].heading, p->formats[k].description, format_enabled(&p->formats[k]));
+    for (k = 0; k < p->nformat; k++) format_line(o, p, &p->formats[k]);
 }
 
 /* mill://plugins: one entry for what's built into Mill, then one for each file in the Plug-Ins
@@ -589,6 +642,11 @@ static void plugins_page(Out *o)
                 if (--n > 0) out_s(o, n == 1 ? " and " : ", ");
             }
         out_s(o, ".");
+        if (font_plug.res == pack_files[i].ref && font_plug.status == PLUG_READY) {
+            char from[40];
+            snprintf(from, sizeof from, " Outlines from %d point.", plug_fonts[0].min);
+            out_s(o, from);
+        }
         plugin_links(o, pack_files[i].file, about);
         {
             FCBPBRec fcb;
@@ -728,104 +786,55 @@ static void font_row(Out *o, const char *label, const char *key, int fixed, cons
     out_s(o, note);
 }
 
-static void config(Out *o, const char *body, long len)
+/* mill://config, and a section's form sent to it: saved, then the page asked for again with
+   ?saved=SECTION#SECTION, so it says so at that section and Reload doesn't send it again */
+static void config(Out *o, const Url *u, const char *body, long len)
 {
-    static char types[2048], typed[2048];
-    char note[120] = "", home[256], where[300], k[16], agent[141];
+    static char typed[2048], rules[2048];
+    char note[120] = "", where[300], k[16], saved[32] = "";
     const char *shown = NULL;   /* rules typed with a mistake in them, shown again to fix */
     FSSpec spec;
+    {
+        const char *q = strstr(u->path, "saved=");
+        if (q) snprintf(saved, sizeof saved, "%.*s", (int)strcspn(q + 6, "&"), q + 6);
+    }
     if (body) {
-        Url check;
-        if (form_field(body, len, "homepage", home, sizeof home)) {
-            if (home[0] && url_parse(home, &check)) snprintf(note, sizeof note, "That home page isn't an address Mill can open.");
-            else put_setting("homepage", 8, home, strlen(home));
-        }
-        if (form_field(body, len, "image_memory", k, sizeof k)) {
-            long n = atol(k);
-            if (n < 0 || n > 4096 || (k[0] && (k[0] < '0' || k[0] > '9'))) snprintf(note, sizeof note, "Image memory must be from 0 to 4096 K.");
-            else { sprintf(k, "%ld", n); put_setting("image_memory", 12, k, strlen(k)); }
-        }
-        if (form_field(body, len, "history", k, sizeof k)) {
-            long n = atol(k);
-            if (n < 1 || n > MILL_HISTORY_MAX || k[0] < '0' || k[0] > '9')
-                snprintf(note, sizeof note, "Window history must be from 1 to %d.", MILL_HISTORY_MAX);
-            else { sprintf(k, "%ld", n); put_setting("history", 7, k, strlen(k)); }
-        }
-        /* a checkbox that isn't checked isn't sent */
-        {
-            static const char *const keys[] = { "font_prop", "font_fixed" };
-            char font[FONT_NAME_MAX + 4];
-            int f;
-            for (f = 0; f < 2; f++)
-                if (form_field(body, len, keys[f], font, sizeof font)) put_setting(keys[f], strlen(keys[f]), font, strlen(font));
-            fonts_choose();
-        }
-        if (form_field(body, len, "scale_text_only", k, sizeof k)) put_setting("scale_text_only", 15, "yes", 3);
-        else put_setting("scale_text_only", 15, "no", 2);
-        fonts_choose();
-        if (form_field(body, len, "load_images", k, sizeof k)) put_setting("load_images", 11, "yes", 3);
-        else put_setting("load_images", 11, "no", 2);
-        if (form_field(body, len, "decode_macbinary", k, sizeof k)) put_setting("decode_macbinary", 16, "yes", 3);
-        else put_setting("decode_macbinary", 16, "no", 2);
-        {
-            char as[20];
-            if (form_field(body, len, "upload_as", as, sizeof as) &&
-                (!strcmp(as, "Automatic") || !strcmp(as, "Data fork only") || !strcmp(as, "MacBinary") || !strcmp(as, "BinHex")))
-                setting_put("upload_as", as);
-        }
-        setting_put("upload_ext", form_field(body, len, "upload_ext", k, sizeof k) ? "yes" : "no");
-        if (form_field(body, len, "cookies", k, sizeof k)) put_setting("cookies", 7, "yes", 3);
-        else put_setting("cookies", 7, "no", 2);
-        if (form_field(body, len, "user_agent", agent, sizeof agent)) {
-            char *c;
-            for (c = agent; *c; c++) if ((unsigned char)*c < ' ') *c = ' ';  /* one header line */
-            put_setting("user_agent", 10, agent, strlen(agent));
-        }
-        if (form_field(body, len, "print_headers", k, sizeof k)) put_setting("print_headers", 13, "yes", 3);
-        else put_setting("print_headers", 13, "no", 2);
-        if (form_field(body, len, "print_backgrounds", k, sizeof k)) put_setting("print_backgrounds", 17, "yes", 3);
-        else put_setting("print_backgrounds", 17, "no", 2);
-        if (form_field(body, len, "file_types", types, sizeof types)) {
-            int bad;
-            strcpy(typed, types);
-            if ((bad = join_rules(types))) {
-                snprintf(note, sizeof note, "Line %d of File types isn't a valid rule.", bad);
-                shown = typed;
-            } else {
-                put_setting("file_types", 10, types, strlen(types));
+        const ConfigIO io = { form_field, setting_put, bookmark_put, MILL_HISTORY_MAX, MILL_KEEP_ALIVE_MAX,
+                              BOOKMARKS, MILL_DEFAULT_PING };
+        char sec[32];
+        if (config_section(&io, body, len, sec, sizeof sec)) {
+            if (config_save(&io, body, len, sec, note, sizeof note, typed, rules, sizeof typed)) {
+                if (typed[0]) shown = typed;
+                if (!strcmp(sec, CONFIG_GENERAL)) { fonts_choose(); net_keep_secs = keep_alive_secs(); }
+            } else if (!plugin_settings_save(sec, body, len, note, sizeof note)) sec[0] = 0;
+            if (sec[0] && !note[0]) {
+                OSErr err = settings_write();
+                if (err == noErr) {
+                    char h[160];
+                    snprintf(h, sizeof h, "HTTP/1.0 303 See Other\r\nLocation: mill://config?saved=%s#%s\r\n\r\n", sec, sec);
+                    out_s(o, h);
+                    return;
+                }
+                snprintf(note, sizeof note, "Mill couldn\325t save its settings (error %d).", err);
             }
-        }
-        {
-            /* bookmarks: a title and an address each; no address empties the slot */
-            int n;
-            for (n = 0; n < BOOKMARKS && !note[0]; n++) {
-                char fname[8], url[300], title[100];
-                Url u;
-                sprintf(fname, "bu%d", n + 1);
-                if (!form_field(body, len, fname, url, sizeof url)) continue;
-                sprintf(fname, "bt%d", n + 1);
-                if (!form_field(body, len, fname, title, sizeof title)) title[0] = 0;
-                if (url[0] && url_parse(url, &u)) snprintf(note, sizeof note, "Bookmark %d isn't an address Mill can open.", n == 9 ? 0 : n + 1);
-                else bookmark_put(n, url, title);
-            }
-        }
-        if (!note[0]) plugin_settings_save(body, len, note, sizeof note);
-        if (!note[0]) {
-            OSErr err = settings_write();
-            if (err == noErr) strcpy(note, "Saved.");
-            else snprintf(note, sizeof note, "Mill couldn't save its settings (error %d).", err);
         }
     }
     head(o, 200, HTML_MAC);
     out_s(o, "<TITLE>Mill Settings</TITLE><H2>Settings</H2>");
     if (note[0]) { out_s(o, "<P><B>"); out_text(o, note); out_s(o, "</B>"); }
     /* each section a table: the setting's name, then its control and what it does */
-    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#protocols\">Protocols</A> | <A HREF=\"#formats\">Formats</A> | <A HREF=\"#printing\">Printing</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
-             "<FORM METHOD=POST ACTION=\"mill://config\"><H3><A NAME=general>General</A></H3>"
-             SETTINGS_TABLE
+    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#check\">Connection check</A> | <A HREF=\"#protocols\">Protocols</A> | <A HREF=\"#formats\">Formats</A> | <A HREF=\"#printing\">Printing</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
+             "<P>After changing a section, click Save at the bottom of that section. "
+             "Changes to more than one section at a time are lost."
+             "<H3><A NAME=general>General</A></H3>");
+    section_start(o, CONFIG_GENERAL, saved);
+    out_s(o, SETTINGS_TABLE
              "<TR><TD VALIGN=TOP WIDTH=110><B>Home page</B><TD><INPUT NAME=homepage SIZE=36 VALUE=\"");
     out_text(o, setting("homepage", MILL_DEFAULT_HOME));
     out_s(o, "\"><BR>Opens at startup and with Home in the Go menu."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Show welcome page on next launch</B><TD><INPUT TYPE=checkbox NAME=welcome VALUE=yes");
+    if (!strcmp(setting("welcome", "yes"), "yes")) out_s(o, " CHECKED");
+    out_s(o, "> Opens " MILL_WELCOME_SHOWN " the next time Mill starts."
              "<TR><TD VALIGN=TOP WIDTH=110><B>Image memory</B><TD><INPUT NAME=image_memory SIZE=5 VALUE=\"");
     sprintf(k, "%ld", image_memory_k());
     out_s(o, k);
@@ -833,7 +842,11 @@ static void config(Out *o, const char *body, long len)
              "<TR><TD VALIGN=TOP WIDTH=110><B>Window history</B><TD><INPUT NAME=history SIZE=3 VALUE=\"");
     sprintf(k, "%d", history_size());
     out_s(o, k);
-    out_s(o, "\"><BR>Pages remembered for Back, 1 to 32.");
+    out_s(o, "\"><BR>Pages remembered for Back, 1 to 32."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Keep-alive</B><TD><INPUT NAME=keep_alive SIZE=5 VALUE=\"");
+    sprintf(k, "%ld", keep_alive_secs());
+    out_s(o, k);
+    out_s(o, "\"> seconds<BR>Idle time before closing a connection to a server; 0 to turn off.");
     font_row(o, "Proportional font", "prop", 0, "Default font for page text.");
     font_row(o, "Fixed font", "fixed", 1, "Monospace font for fixed-width text.");
     out_s(o, "<TR><TD VALIGN=TOP WIDTH=110><B>Scale Text Only</B><TD><INPUT TYPE=checkbox NAME=scale_text_only VALUE=yes");
@@ -850,7 +863,7 @@ static void config(Out *o, const char *body, long len)
     out_s(o, "\"><BR>Empty sends none."
              "<TR><TD VALIGN=TOP WIDTH=110><B>File types</B><TD>Mac type and creator for saved files, so the Finder knows "
              "what opens them. One rule per line: MIME type, file name, TYPE/CREATOR; * matches anything, and "
-             "the first match wins. Empty uses Mill's defaults.<BR><TEXTAREA NAME=file_types ROWS=8 COLS=36>");
+             "the first match wins. Empty uses Mill\325s defaults.<BR><TEXTAREA NAME=file_types ROWS=8 COLS=36>");
     out_rules(o, shown ? shown : file_type_rules());
     out_s(o, "</TEXTAREA><TR><TD VALIGN=TOP WIDTH=110><B>Decode MacBinary</B>"
              "<TD><INPUT TYPE=checkbox NAME=decode_macbinary VALUE=yes");
@@ -869,19 +882,35 @@ static void config(Out *o, const char *body, long len)
     out_s(o, "</SELECT>"
              "<TR><TD VALIGN=TOP WIDTH=110><B>Add upload file extension</B><TD><INPUT TYPE=checkbox NAME=upload_ext VALUE=yes");
     if (strcmp(setting("upload_ext", "yes"), "no")) out_s(o, " CHECKED");
-    out_s(o, "> Automatically appends .bin or .hqx if uploading a file as MacBinary or BinHex</TABLE>"
-             "<H3><A NAME=protocols>Protocols</A></H3>");
-    plugin_settings_form(o);
+    out_s(o, "> Automatically appends .bin or .hqx if uploading a file as MacBinary or BinHex</TABLE>");
+    section_end(o);
+    out_s(o, "<H3><A NAME=check>Connection check</A></H3>");
+    section_start(o, CONFIG_CHECK, saved);
+    out_s(o, SETTINGS_TABLE
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Check internet connectivity at launch</B><TD><INPUT TYPE=checkbox NAME=net_check VALUE=yes");
+    if (!strcmp(setting("net_check", "yes"), "yes")) out_s(o, " CHECKED");
+    out_s(o, "> Warns at launch if the server below doesn\325t reply."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Server to ping</B><TD><INPUT NAME=ping_host SIZE=36 VALUE=\"");
+    out_text(o, setting("ping_host", MILL_DEFAULT_PING));
+    out_s(o, "\"><BR>A name or an address.</TABLE>");
+    section_end(o);
+    out_s(o, "<H3><A NAME=protocols>Protocols</A></H3>");
+    plugin_settings_form(o, saved);
     out_s(o, "<H3><A NAME=formats>Formats</A></H3>");
-    format_settings_form(o);
-    out_s(o, "<H3><A NAME=printing>Printing</A></H3>" SETTINGS_TABLE
+    format_settings_form(o, saved);
+    out_s(o, "<H3><A NAME=printing>Printing</A></H3>");
+    section_start(o, CONFIG_PRINTING, saved);
+    out_s(o, SETTINGS_TABLE
              "<TR><TD VALIGN=TOP WIDTH=110><B>Print headers and footers</B><TD><INPUT TYPE=checkbox NAME=print_headers VALUE=yes");
     if (print_headers()) out_s(o, " CHECKED");
-    out_s(o, "> The page's title at the top of each sheet; its address, the page number, and the date at the bottom."
+    out_s(o, "> The page\325s title at the top of each sheet; its address, the page number, and the date at the bottom."
              "<TR><TD VALIGN=TOP WIDTH=110><B>Print backgrounds</B><TD><INPUT TYPE=checkbox NAME=print_backgrounds VALUE=yes");
     if (print_backgrounds()) out_s(o, " CHECKED");
-    out_s(o, "> Prints dark table cells black, as on screen. When off, they print white with black text."
-             "</TABLE><H3><A NAME=bookmarks>Bookmarks</A></H3>" SETTINGS_TABLE "<TR><TH><TH>Title<TH>Address");
+    out_s(o, "> Prints dark table cells black, as on screen. When off, they print white with black text.</TABLE>");
+    section_end(o);
+    out_s(o, "<H3><A NAME=bookmarks>Bookmarks</A></H3>");
+    section_start(o, CONFIG_BOOKMARKS, saved);
+    out_s(o, SETTINGS_TABLE "<TR><TH><TH>Title<TH>Address");
     {
         int n;
         for (n = 0; n < BOOKMARKS; n++) {
@@ -897,7 +926,8 @@ static void config(Out *o, const char *body, long len)
         }
     }
     out_s(o, "</TABLE>");
-    out_s(o, "<P><INPUT TYPE=submit VALUE=\"Save\"></FORM><HR><P>Settings are saved in ");
+    section_end(o);
+    out_s(o, "<HR><P>Settings are saved in ");
     if (settings_spec(&spec) == noErr) {
         spec_to_path(&spec, where, sizeof where);
         out_s(o, "<TT>");
@@ -912,7 +942,7 @@ static void config(Out *o, const char *body, long len)
 static void mill_request(const Url *u, const char *body, long len, Out *o)
 {
     if (!strcmp(u->host, "about")) about(o, strstr(u->path, "check=1") != NULL);
-    else if (!strcmp(u->host, "config")) config(o, body, len);
+    else if (!strcmp(u->host, "config")) config(o, u, body, len);
     else if (!strcmp(u->host, "plugins")) plugins_page(o);
     else if (!strcmp(u->host, "license")) license_page(o);
     else {

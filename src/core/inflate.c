@@ -15,9 +15,10 @@ enum { HEAD, EXTRA_LEN, EXTRA, NAME, COMMENT, HCRC, BLOCK, STORED_LEN, STORED, D
 typedef struct { short count[16], symbol[288]; } Huff;
 
 typedef struct {
+    GzMem mem;
     gz_out out;
     void *ref;
-    int state, final, flags;
+    int state, final, flags, raw;
     long left;                  /* bytes still to skip or copy */
     unsigned long bits;
     int nbits;
@@ -38,27 +39,53 @@ static const short DBASE[30] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97
 static const short DEXT[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
 static const unsigned char CLORDER[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
 
-void *gz_begin(gz_out out, void *ref)
+void *gz_begin_with(const GzMem *mem, int raw, gz_out out, void *ref)
 {
-    Gz *g = calloc(1, sizeof *g);
+    Gz *g = mem->alloc(mem->ref, sizeof *g);
     if (!g) return NULL;
-    if (!(g->window = malloc(WINDOW))) { free(g); return NULL; }
+    memset(g, 0, sizeof *g);
+    g->mem = *mem;
+    /* zeroed, so a distance past the start of bad data reads zeros, not old memory */
+    if (!(g->window = mem->alloc(mem->ref, WINDOW))) { mem->release(mem->ref, g); return NULL; }
+    memset(g->window, 0, WINDOW);
     g->out = out;
     g->ref = ref;
+    g->raw = raw;
     g->left = 10;
+    if (raw) g->state = BLOCK;
     return g;
+}
+
+static void *std_alloc(void *ref, long n) { (void)ref; return malloc((size_t)n); }
+static void std_release(void *ref, void *p) { (void)ref; free(p); }
+
+void *gz_begin(gz_out out, void *ref)
+{
+    GzMem mem;
+    mem.ref = NULL;
+    mem.alloc = std_alloc;
+    mem.release = std_release;
+    return gz_begin_with(&mem, 0, out, ref);
 }
 
 void gz_end(void *d)
 {
     Gz *g = d;
     if (!g) return;
-    free(g->window);
-    free(g);
+    g->mem.release(g->mem.ref, g->window);
+    g->mem.release(g->mem.ref, g);
+}
+
+long gz_size(void) { return (long)sizeof(Gz) + WINDOW; }
+
+long gz_unused(void *d)
+{
+    Gz *g = d;
+    return (long)(g->in_end - g->in) + g->nbits / 8;
 }
 
 /* As many bits as fit (up to 32); whether at least n are in */
-static int fill(Gz *g, int n)
+static inline __attribute__((always_inline)) int fill(Gz *g, int n)
 {
     while (g->nbits <= 24 && g->in < g->in_end) {
         g->bits |= (unsigned long)*g->in++ << g->nbits;
@@ -67,7 +94,7 @@ static int fill(Gz *g, int n)
     return g->nbits >= n;
 }
 
-static unsigned long take(Gz *g, int n)
+static inline __attribute__((always_inline)) unsigned long take(Gz *g, int n)
 {
     unsigned long v = g->bits & ((1UL << n) - 1);
     g->bits >>= n;
@@ -77,7 +104,7 @@ static unsigned long take(Gz *g, int n)
 
 /* The next symbol, without taking its bits: its length in *len, or -1 if more bits are
    needed, -2 for a code that isn't in the table */
-static int peek(const Gz *g, const Huff *h, int *len)
+static inline __attribute__((always_inline)) int peek(const Gz *g, const Huff *h, int *len)
 {
     int code = 0, first = 0, index = 0, l;
     unsigned long b = g->bits;
@@ -113,7 +140,7 @@ static void flush(Gz *g)
     g->olen = 0;
 }
 
-static void emit(Gz *g, unsigned char c)
+static inline __attribute__((always_inline)) void emit(Gz *g, unsigned char c)
 {
     g->window[g->wpos] = c;
     g->wpos = (g->wpos + 1) & (WINDOW - 1);
@@ -265,8 +292,9 @@ int gz_data(void *d, const unsigned char *p, long n)
             break;
         }
         case TRAILER:
-            /* CRC32 and size: not checked */
+            /* CRC32 and size: not checked; raw data has none */
             take(g, g->nbits & 7);
+            if (g->raw) { g->state = DONE; r = 1; break; }
             if (!fill(g, 8)) goto wait;
             take(g, 8);
             if (--g->left == 0) { g->state = DONE; r = 1; }

@@ -1,4 +1,6 @@
-/* The Plug-In's code, built by Retro68 as a flat code resource, and its licence */
+/* The Plug-In's code, built by Retro68 as a flat code resource, and its license */
+#include "MillPlugIn.r"         /* 'MIfc' 128: the interface it was built for (sdk/Interfaces) */
+
 data 'MPlg' (128, "Internet Services") {
     $$read("Internet.flt")
 };

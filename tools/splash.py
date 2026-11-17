@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
-'''Makes the splash screen's picture (src/splash.r) from art/quixote.jpg: scaled to
-SPLASH_W pixels wide with macOS's sips, then dithered with Atkinson's dither like
-Mill's own pictures. Run on a Mac after changing the art: python3 tools/splash.py'''
+'''Makes the splash screen's two pictures.
+
+  python3 tools/splash.py        the drawing (src/splash.r, 'SPLS' 128) from art/quixote.jpg:
+                                 scaled to SPLASH_W pixels wide with macOS's sips, then dithered
+                                 with Atkinson's dither like Mill's own pictures. Run on a Mac
+                                 after changing the art.
+  python3 tools/splash.py text   the words under it (src/splash_text.r, 'SPLS' 129): "Mill" in
+                                 Mill Serif Bold 24 (the outline, drawn by plugins/fonts' engine
+                                 built for this Mac with cc) and the copyright line in Mill Serif
+                                 12 (its bitmap), both read from build/fonts/Web Fonts.bin, so
+                                 the splash looks like mill://about with Web Fonts on any System.
+                                 A gap between them is left for the version, which Mill draws
+                                 (mac_start.c). Run after changing the fonts, the year, or the
+                                 publisher (src/version.h); build Web Fonts first.'''
 
 import os
+import re
 import struct
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,5 +79,122 @@ def main():
     print('%dx%d, %d bytes' % (w, h, len(data)))
 
 
+ROOT = os.path.join(HERE, '..')
+TEXT_OUT = os.path.join(ROOT, 'src', 'splash_text.r')
+TEXT_W = 212        # mac_start.c's SPLASH_W: the window's width
+GAP = 16            # from "Mill"'s baseline to the version's (Geneva 9, drawn by Mill)
+COPY_GAP = 15       # from the version's baseline to the copyright's
+
+
+def resources(macbinary):
+    '''A MacBinary file's resources: {(type, id): (name, data)}'''
+    b = open(macbinary, 'rb').read()
+    dl, rl = struct.unpack('>II', b[83:91])
+    r = b[128 + (dl + 127) // 128 * 128:][:rl]
+    do, mo = struct.unpack('>II', r[:8])
+    tl = mo + struct.unpack('>H', r[mo + 24:mo + 26])[0]
+    nl = mo + struct.unpack('>H', r[mo + 26:mo + 28])[0]
+    out = {}
+    for i in range(struct.unpack('>H', r[tl:tl + 2])[0] + 1):
+        t, c, o = struct.unpack('>4sHH', r[tl + 2 + 8 * i:tl + 10 + 8 * i])
+        for j in range(c + 1):
+            rid, no, a = struct.unpack('>hhI', r[tl + o + 12 * j:tl + o + 12 * j + 8])
+            at = do + (a & 0xFFFFFF)
+            name = r[nl + no + 1:nl + no + 1 + r[nl + no]].decode('mac_roman') if no != -1 else ''
+            out[(t.decode('mac_roman'), rid)] = (name, r[at + 4:at + 4 + struct.unpack('>I', r[at:at + 4])[0]])
+    return out
+
+
+def strike_glyphs(font):
+    '''A 'FONT' or 'NFNT' strike (Inside Macintosh I, The Font Manager) as
+    {code: (advance, left, top, width, height, rows of 0/1)}; top is rows above the baseline'''
+    h = struct.unpack('>13h', font[:26])
+    first, last, kern, rect_h, ascent, row_words = h[1], h[2], h[4], h[7], h[9], h[12]
+    rb = row_words * 2
+    img = font[26:26 + rb * rect_h]
+    n = last - first + 3
+    loc = struct.unpack('>%dH' % n, font[26 + rb * rect_h:][:2 * n])
+    ow = struct.unpack('>%dh' % n, font[26 + rb * rect_h + 2 * n:][:2 * n])
+    out = {}
+    for c in range(first, last + 1):
+        i = c - first
+        if ow[i] == -1:
+            continue
+        x0, x1 = loc[i], loc[i + 1]
+        rows = [[(img[y * rb + (x >> 3)] >> (7 - (x & 7))) & 1 for x in range(x0, x1)] for y in range(rect_h)]
+        out[c] = (ow[i] & 0xFF, kern + (ow[i] >> 8 & 0xFF), ascent, x1 - x0, rect_h, rows)
+    return out
+
+
+def outline_glyphs(ttf, size):
+    '''Every character of a TrueType font at size, drawn by Mill's outline engine'''
+    src = os.path.join(ROOT, 'plugins', 'fonts')
+    with tempfile.TemporaryDirectory() as tmp:
+        exe, font = os.path.join(tmp, 'glyphs'), os.path.join(tmp, 'font.ttf')
+        subprocess.run(['cc', '-O1', '-DTT_DROPOUT', '-I', src, '-o', exe, os.path.join(HERE, 'splash_glyphs.c')] +
+                       [os.path.join(src, f) for f in ('parse.c', 'raster.c', 'glyph.c')], check=True)
+        open(font, 'wb').write(ttf)
+        lines = subprocess.run([exe, font, str(size)], check=True, capture_output=True, text=True).stdout
+    out = {}
+    for line in lines.splitlines():
+        code, adv, left, top, w, h, hexbits = line.split(' ') + [''] * (7 - len(line.split(' ')))
+        w, h = int(w), int(h)
+        bits = bytes.fromhex(hexbits)
+        rb = len(bits) // h if h else 0
+        rows = [[(bits[y * rb + (x >> 3)] >> (7 - (x & 7))) & 1 for x in range(w)] for y in range(h)]
+        out[int(code)] = (int(adv), int(left), int(top), w, h, rows)
+    return out
+
+
+def set_line(glyphs, text, apart=False):
+    '''text laid out as QuickDraw would: (pixels {(x, y)}, width, ascent, descent), y up from the
+    baseline. apart: a pixel more between letters whose serifs would touch on the baseline (Times'
+    bitmaps set "ill" with its serifs joined, which reads as an underline)'''
+    pix, x, asc, desc = set(), 0, 0, 0
+    for ch in text.encode('mac_roman'):
+        adv, left, top, w, h, rows = glyphs[ch]
+        if apart and any((x + left + xx - 1, 1) in pix for xx, v in enumerate(rows[top - 1]) if v):
+            x += 1
+        for yy, row in enumerate(rows):
+            for xx, v in enumerate(row):
+                if v:
+                    pix.add((x + left + xx, top - yy))
+                    asc, desc = max(asc, top - yy), max(desc, yy - top + 1)
+        x += adv
+    return pix, x, asc, desc
+
+
+def text_main():
+    res = resources(os.path.join(ROOT, 'build', 'fonts', 'Web Fonts.bin'))
+    ver = open(os.path.join(ROOT, 'src', 'version.h')).read()
+    year = re.search(r'#define MILL_YEAR "(.*)"', ver).group(1)
+    publisher = re.search(r'#define MILL_PUBLISHER "(.*)"', ver).group(1)
+    bold = next(d for (t, i), (n, d) in res.items() if t == 'Msfn' and n == 'Mill Serif Bold')
+    fond = next(i for (t, i), (n, d) in res.items() if t == 'FOND' and n == 'Mill Serif')
+    plain12 = res.get(('NFNT', fond * 128 + 12)) or res[('FONT', fond * 128 + 12)]
+    name = set_line(outline_glyphs(bold, 24), 'Mill')
+    copy = set_line(strike_glyphs(plain12[1]), '\u00a9 %s %s' % (year, publisher), apart=True)
+    base1 = name[2]                             # "Mill"'s baseline: its tallest pixel in row 0
+    base3 = base1 + GAP + COPY_GAP
+    h = base3 + copy[3] + 1
+    row_bytes = (TEXT_W + 15) // 16 * 2
+    img = [bytearray(row_bytes) for _ in range(h)]
+    for (pix, width, a, d), base in ((name, base1), (copy, base3)):
+        x0 = (TEXT_W - width) // 2
+        for x, y in pix:
+            assert 0 <= base - y < h and 0 <= x0 + x < TEXT_W, 'off the picture'
+            img[base - y][(x0 + x) >> 3] |= 0x80 >> ((x0 + x) & 7)
+    data = struct.pack('>hhh', TEXT_W, h, row_bytes) + b''.join(img)
+    with open(TEXT_OUT, 'w') as f:
+        f.write('/* Generated by tools/splash.py text from Web Fonts (Mill Serif) and src/version.h; edit there. */\n')
+        f.write('/* width, height, row bytes, then 1-bit rows (1 = black). The version goes between the\n')
+        f.write('   lines, its baseline %d rows down (SPLASH_VERSION_Y in mac_start.c). */\n' % (base1 + GAP))
+        f.write("data 'SPLS' (129, \"Splash Text\") {\n")
+        for i in range(0, len(data), 32):
+            f.write('\t$"%s"\n' % data[i:i + 32].hex().upper())
+        f.write('};\n')
+    print('%dx%d, %d bytes; version baseline %d' % (TEXT_W, h, len(data), base1 + GAP))
+
+
 if __name__ == '__main__':
-    main()
+    text_main() if sys.argv[1:] == ['text'] else main()

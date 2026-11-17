@@ -10,6 +10,7 @@
 #include "mac_net.h"
 #include "mac_plugin.h"
 #include "mac_sys.h"
+#include "core/fmt.h"
 #include "mac_upload.h"
 
 enum { AS_FIELD, AS_DATA, AS_MACBINARY, AS_BINHEX };
@@ -189,7 +190,7 @@ static OSErr look_at(Body *b, Part *p, char *why, int why_size)
     snprintf(p->macname, sizeof p->macname, "%s", base);
     if (!*base) { p->as = AS_DATA; p->size = 0; strcpy(p->type, "application/octet-stream"); return noErr; }
     if (file_spec(0, 0, path, &p->spec) != noErr || file_get_info(&p->spec, &p->fi) != noErr) {
-        snprintf(why, why_size, "Mill couldn't find \"%s\" to send.", base);
+        snprintf(why, why_size, "Mill couldn\325t find \322%s\323 to send.", base);
         return fnfErr;
     }
     memset(&pb, 0, sizeof pb);
@@ -297,7 +298,7 @@ void body_rewind(Body *b)
 static void say(Body *b)
 {
     char msg[48];
-    sprintf(msg, "Sending... %ldK of %ldK", (b->sent + 1023) / 1024, (b->size + 1023) / 1024);
+    sprintf(msg, "Sending\311 %ldK of %ldK", done_k(b->sent, b->size), (b->size + 1023) / 1024);
     if (net_status) net_status(msg);
 }
 

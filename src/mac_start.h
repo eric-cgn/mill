@@ -10,4 +10,7 @@
 int mill_run(WindowPtr splash);
 int main(void);
 
+/* While the splash is up, shows "Loading: what" under it; NULL once the browser is up */
+extern void (*splash_say)(const char *what);
+
 #endif

@@ -15,5 +15,5 @@ exec docker run --rm --platform linux/amd64 -v "$PWD/../..":/mill -w /mill/plugi
 	$CC -c ftp.c -o build/ftp.o
 	$CC -c gopher.c -o build/gopher.o
 	m68k-apple-macos-gcc -m68000 build/glue.o build/internet.o build/ftp.o build/gopher.o -o build/Internet.flt -Wl,--mac-flat -Wl,-eMILLMAIN -Wl,--gc-sections -nostartfiles
-	cd build && Rez -I/Retro68-build/toolchain/m68k-apple-macos/RIncludes Internet.r -o "Internet Services.bin" -t MPlg -c MiLL --cc "Internet Services.bin"
+	cd build && Rez -I/Retro68-build/toolchain/m68k-apple-macos/RIncludes -I/mill/sdk/Interfaces Internet.r -o "Internet Services.bin" -t MPlg -c MiLL --cc "Internet Services.bin"
 	ls -l Internet.flt *.bin'

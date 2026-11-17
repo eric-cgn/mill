@@ -1,4 +1,4 @@
-/* What the built-in picture formats (GIF, JPEG, Netpbm) share: a decoder from
+/* What the built-in picture formats (GIF, JPEG) share: a decoder from
    core/picture.h, wrapped as a format. Each plug_*.c defines DECODER_BEGIN, _DATA, and
    _END, then includes this, so each has its own copy in its own segment. */
 #include "core/picture.h"

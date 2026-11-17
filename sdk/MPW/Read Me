@@ -16,5 +16,7 @@ What matters in Finger.make:
 - MillGlue.c.o is linked first, and MillMain is the first function in
   it, so the entry is at byte 0.
 - -t MPlg -c MiLL set the file's type and creator.
+- Rez -a adds MillPlugIn.r's 'MIfc' resource, the interface Finger was
+  built for. Mill skips a Plug-In without it.
 
 For a Plug-In of your own, copy Finger.make and change the file names.
