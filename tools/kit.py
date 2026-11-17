@@ -100,14 +100,16 @@ def copy_kit(into=''):
         shutil.rmtree(tmp)
 
 
-def macbinary(name, ftype, creator, data):
-    """A MacBinary file of a data fork alone"""
+def macbinary(name, ftype, creator, data, when=0):
+    """A MacBinary file of a data fork alone; when: its date, in Unix seconds (0: none)"""
     n = name.encode('mac_roman')
     h = bytearray(128)
     h[1] = len(n)
     h[2:2 + len(n)] = n
     h[65:69], h[69:73] = ftype, creator
     h[83:87] = struct.pack('>I', len(data))
+    if when:
+        h[91:99] = struct.pack('>I', int(when) + 2082844800) * 2    # created and modified, from 1904
     h[122] = h[123] = 129
     crc = 0
     for b in h[:124]:
