@@ -110,7 +110,7 @@ static int add_attr_bytes(Doc *d, const char *s, long len)
    len bytes); returns length. */
 static int page_charset;    /* CHARSET_MAC, CHARSET_LATIN1, or CHARSET_UTF8 */
 
-static long decode(const char *src, long len, char *out)
+__attribute__((optimize("O2"))) static long decode(const char *src, long len, char *out)
 {
     long i = 0, n = 0;
     while (i < len) {
@@ -327,7 +327,7 @@ int html_parse(Doc *doc, const char *src, long len)
     return html_parse_charset(doc, src, len, 0);
 }
 
-int html_parse_charset(Doc *doc, const char *src, long len, int charset)
+__attribute__((optimize("O2"))) int html_parse_charset(Doc *doc, const char *src, long len, int charset)
 {
     Parser p;
     long i = 0, text_start = 0;

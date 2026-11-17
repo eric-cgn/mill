@@ -1,5 +1,5 @@
 /* Picture decoders that read a file a piece at a time, as it arrives, and give pixels
-   as they go: GIF, JPEG (baseline), and Netpbm. Mill's format Plug-Ins wrap them; the
+   as they go: GIF and JPEG (baseline). Mill's format Plug-Ins wrap them; the
    pixels go to a PicSink (Mill's canvas, or a test's). */
 #ifndef MILL_PICTURE_H
 #define MILL_PICTURE_H
@@ -28,9 +28,5 @@ void gif_end(void *d);
 void *jpeg_begin(const PicSink *s);
 int jpeg_data(void *d, const unsigned char *p, long n);
 void jpeg_end(void *d);
-
-void *pnm_begin(const PicSink *s);
-int pnm_data(void *d, const unsigned char *p, long n);
-void pnm_end(void *d);
 
 #endif

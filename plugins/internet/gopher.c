@@ -136,7 +136,7 @@ static short start_menu(GopherPlugIn *me, MillRequest *r)
     header(me, "text/html; charset=macintosh");
     a[0] = (long)r->host;
     H->Printf(me->r, "<TITLE>Gopher: %s</TITLE>", a);
-    out_s(me, "<PRE><FONT SIZE=1>");     /* Courier 9: 80 columns fit the window */
+    out_s(me, "<PRE><FONT SIZE=2>");     /* 10 points: 80 columns fit a Plus's window */
     me->images = H->GetSetting("gopher", "images", me->work, sizeof me->work) == 3 && !strcmp(me->work, "yes");
     return 1;
 }
@@ -233,10 +233,10 @@ OSErr gopher_request(MillPlugIn *self, MillRequest *r)
 }
 
 static const MillSetting settings[] = {
-    { "images", "Show images inline", "Picture items in menus as pictures, above their links.", millCheckbox, "no", 0, 0, NULL },
+    { "images", "Show images inline", "Shows image items in menus as images, above their links.", millCheckbox, "no", 0, 0, NULL },
     kMillProxySetting
 };
-static const MillProtocol protocols[] = { { "gopher", "Gopher", "Internet Gopher Protocol (RFC 1436)", 2, settings } };
+static const MillProtocol protocols[] = { { "gopher", "Gopher", "Internet Gopher Protocol (RFC 1436)", 0, 2, settings } };
 
 /* Internet.c's: the protocol's description and settings, and its state for a request (the caller
    sets base.host, and frees it with FreeMem) */

@@ -23,6 +23,15 @@ const char FILETYPES_DEFAULT[] =
 
 static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
+const char *mac_text_type(const char *by_name)
+{
+    const char *h = "text/html";
+    int i;
+    for (i = 0; h[i] && by_name && lower((unsigned char)by_name[i]) == h[i]; i++) {}
+    if (!h[i] && (!by_name[i] || by_name[i] == ';' || by_name[i] == ' ')) return "text/html; charset=macintosh";
+    return "text/plain; charset=macintosh";
+}
+
 static int is_end(char c) { return c == '\n' || c == '\r' || c == ';' || c == 0; }
 
 /* A rule's parts: the two patterns, and where TYPE/CREA starts */

@@ -24,10 +24,15 @@ int local_image(const char *url, Bitmap1 *out);
 extern long (*local_fetch)(const char *url, char *buf, long size, char *why, int why_size);
 
 #define MILL_DEFAULT_HOME "mill://about"
+#define MILL_WELCOME "http://welcome.1in1e6.com/"   /* opened once, while the welcome setting is on */
+#define MILL_WELCOME_SHOWN "http://welcome.1in1e6.com" /* as Settings says it */
+#define MILL_DEFAULT_PING "a.root-servers.net"      /* the connection check's server */
 #define MILL_DEFAULT_AGENT "Mozilla/1.22 (compatible; Mill/" MILL_VERSION "; Macintosh; 68K)"
 #define MILL_DEFAULT_IMAGE_K 128
 #define MILL_DEFAULT_HISTORY 10
 #define MILL_HISTORY_MAX 32     /* pages kept for Back, at most, in each window */
+#define MILL_DEFAULT_KEEP_ALIVE 300 /* seconds a window keeps an idle connection to its page's server */
+#define MILL_KEEP_ALIVE_MAX 3600
 
 /* A Mac file's full path ("Macintosh HD:Web:index.html") */
 void spec_to_path(const FSSpec *spec, char *path, int size);
@@ -37,6 +42,8 @@ void spec_to_url(const FSSpec *spec, char *out, int size);
 long read_mac_file(const char *path, char **data, long max);
 
 void settings_load(void);
+/* Once the Plug-Ins are read: settings an older Mill saved, brought up to this one's */
+void settings_migrate(void);
 const char *setting(const char *name, const char *dflt);
 /* Change a setting (not yet saved); save them all to the settings file */
 void setting_put(const char *name, const char *value);
@@ -57,6 +64,8 @@ int form_field(const char *body, long len, const char *name, char *out, int size
 long image_memory_k(void);
 /* How many pages each window keeps for Back and Forward, 1 to MILL_HISTORY_MAX */
 int history_size(void);
+/* How long a window keeps an idle connection to its page's server, in seconds; 0: none */
+long keep_alive_secs(void);
 /* Whether pages fetch their images as they open (else a click on one does) */
 int auto_images(void);
 /* The rules that give a saved file its type and creator (see core/filetypes.h) */
@@ -69,6 +78,9 @@ int print_backgrounds(void);
 int accept_cookies(void);
 /* The User-Agent sent with each request; "" sends none */
 const char *user_agent(void);
+/* The bookmarks a new Mill starts with, in slots 1 on */
+extern const char *const first_bookmarks[];
+extern const int n_first_bookmarks;
 
 /* Bookmarks: ten slots, n from 0 (Command-1) to 9 (Command-0), kept in the settings */
 #define BOOKMARKS 10

@@ -1,11 +1,14 @@
 SEGMENT Start
 *mac_start.c.obj
 *mac_init.c.obj
+*migrate.c.obj
 SEGMENT Pages
 *mac_pages.c.obj
+*config.c.obj
 SEGMENT HTTP
 *plug_http.c.obj
 *httpauth.c.obj
+*http11.c.obj
 SEGMENT HTTPS
 *plug_https.c.obj
 SEGMENT File
@@ -17,9 +20,6 @@ SEGMENT JPEG
 *plug_jpeg.c.obj
 *jpeg.c.obj
 *tjpgd.c.obj
-SEGMENT Netpbm
-*plug_pnm.c.obj
-*pnm.c.obj
 SEGMENT Gzip
 *plug_gzip.c.obj
 *inflate.c.obj

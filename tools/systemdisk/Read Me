@@ -1,0 +1,162 @@
+Mill System Disk
+
+make_system_disk.py builds "Mill System Disk", an 800K startup floppy with System 6.0.5 and
+MacTCP 2.0.6, trimmed to leave room for Mill on a 1 MB Mac Plus. It builds the disk from
+Apple's own System 6.0.5 disk set and Apple's System 7.5 Update 2.0, which it downloads, so
+the disk is never given out with Mill.
+
+There are two editions:
+
+    #1E6-DM01-N  Network Edition    for LocalTalk or Ethernet. Has AppleShare.
+    #1E6-DM01-P  Personal Edition   for a modem. Has MacPPP 2.0.1 in place of AppleShare.
+
+Pick the Network Edition if the Mac is on LocalTalk or Ethernet, and the Personal Edition if
+it dials in with a modem. Both are named "Mill System Disk".
+
+    python3 tools/systemdisk/make_system_disk.py OUTDIR [--personal] [--mactcp PATH | --no-mactcp]
+
+It needs Python 3 and an Internet connection, and nothing else (on Debian and Ubuntu,
+the python3-venv package too). It writes the Network Edition, or with --personal the
+Personal Edition:
+
+    OUTDIR/Mill-System-Disk-Network.image   a Disk Copy 4.2 image, for Disk Copy and most emulators
+    OUTDIR/Mill-System-Disk-Network.dsk     the same disk as a raw image
+    OUTDIR/Mill-System-Disk-Personal.image  the same for the Personal Edition
+    OUTDIR/Mill-System-Disk-Personal.dsk
+
+Mini vMac opens Disk Copy images locked. Use the .dsk there, so that MacTCP can save its
+settings.
+
+The first run makes a Python virtual environment in tools/systemdisk/cache, installs pinned
+copies of machfs 1.3 and macresources 1.2 into it (both MIT licensed, checked by hash), and
+downloads Apple's four 6.0.5 disks and one disk of System 7.5 Update 2.0 (about 3 MB in
+all) into the same folder, and MacPPP too for the Personal Edition. Later runs use the cache.
+--cache DIR puts the cache somewhere else. Delete the folder to start over.
+
+
+What it does
+
+1. Downloads SSW_6.0.5_Disk1of4.sea.bin through Disk4of4.sea.bin, and
+   Sys_7.5_Update_2.0-03of14.sea.bin, from the Internet Archive's copies of Apple's old
+   download site (download.info.apple.com). A file whose SHA-256 is not the one in the
+   script is refused.
+2. Unpacks each one in Python: MacBinary, then a StuffIt archive, then a Disk Copy 4.2
+   image. Every CRC and checksum is checked.
+3. Takes MacTCP out of the Installer archive ("System 7.5 Update 2.0 Tome 3") on the
+   Update 2.0 disk, and checks it against the SHA-256 in the script.
+4. For the Personal Edition, downloads mac-ppp-201.hqx from the Info-Mac archive at FUNET
+   (ftp.funet.fi) and checks its SHA-256, then decodes the BinHex and unpacks the StuffIt
+   archive in it, checking every CRC, and checks PPP and Config PPP against the SHA-256s in
+   the script.
+5. Builds the disk from the four 6.0.5 disks (System Tools, Utilities 1, Utilities 2, and
+   Printing Tools), MacTCP, and for the Personal Edition MacPPP.
+
+
+What is on the disk
+
+System Folder, with:
+  - System 6.0.5, less the Mac II ROM patch (PTCH 376), the Mac II video driver
+    (DRVR 120), and three alert sounds (Clink-Klank, Boing, and Monkey). The Network
+    Edition's has AppleShare's drivers, as the Installer adds them.
+  - Finder, General, Clipboard File, Keyboard, Mouse, Sound, and Map
+  - MacTCP 2.0.6 (see "MacTCP" below)
+  - Network Edition: AppleShare. Personal Edition: PPP and Config PPP (see "MacPPP" below).
+  - LaserWriter, Laser Prep, and ImageWriter
+
+There is no MultiFinder, and the fonts are the ones System 6.0.5 comes with. The disk starts
+up with 6.0.5's own boot blocks.
+
+When made, the Network Edition has 78K free and the Personal Edition 80K. Both have about
+52K free after the first startup, once MacTCP DNR and the Finder's Desktop file are made.
+
+--atimagewriter puts AppleTalk ImageWriter on the Network Edition in place of AppleShare.
+--all-disks also writes Apple's four 6.0.5 disks to OUTDIR as raw images.
+
+
+MacTCP
+
+Mill needs MacTCP to reach the network. Apple's System 6.0.5 disks don't include it. In the
+1990s MacTCP came with site licenses and Internet starter kits; Apple later included it in
+the free System 7.5.3 release, which is where the tool takes it from: System 7.5 Update 2.0,
+the free update that brings System 7.5 to 7.5.3, has MacTCP 2.0.6 on its third disk. MacTCP
+2.0.6 runs on System 6.0.5.
+
+The Update's Installer keeps MacTCP compressed in an archive (a "tome"). tome.py, beside the
+script, unpacks it. It reads only as much of that format as MacTCP needs, so the script checks
+the result against a pinned SHA-256.
+
+There is no MacTCP DNR to copy: MacTCP makes it at the first startup. It needs about 20K free
+for that; the disk has more than enough.
+
+To use your own copy of MacTCP instead, pass it with --mactcp:
+
+    --mactcp MacTCP.bin       a MacBinary file of the MacTCP control panel
+    --mactcp folder           a folder with MacTCP.bin in it (MacTCP DNR.bin too, if you
+                              have it)
+    --mactcp disk.image       a disk image (raw or Disk Copy 4.2) with MacTCP on it
+
+--no-mactcp leaves MacTCP off the disk. You can add it later: start up from the Mill System
+Disk, drag MacTCP into the System Folder, and restart.
+
+Set MacTCP up before using Mill: open the Control Panel from the Apple menu,
+click MacTCP, choose LocalTalk or Ethernet (PPP on the Personal Edition), then click More...
+and set how the Mac gets its address, the gateway, and a name server (domain "." and the
+server's address, marked as the default). Restart for the settings to take effect.
+
+
+MacPPP
+
+The Personal Edition has MacPPP 2.0.1, from Merit Network and the University of Michigan:
+PPP, which MacTCP lists as a way to connect, and the Config PPP control panel, where you set
+up the modem and the number to dial. Together they take about 48K on the disk.
+
+The tool downloads it from the Info-Mac archive's copy at FUNET:
+
+    ftp://ftp.funet.fi/pub/mac/info-mac/comm/inet/conn/ppp/mac-ppp-201.hqx
+
+and puts both files on the disk as they are. Its license, from its documentation:
+
+    MacPPP was developed at, and is copyrighted by, the Merit Network, Inc. and the
+    University of Michigan. Merit and the University of Michigan grant an unlimited license
+    for use and redistribution of the executable program provided that it is not sold for
+    profit, either as is or as part of another product. Charges to recover the cost of
+    duplication and distribution are permitted. MacPPP is offered "as is"-neither Merit nor
+    the University of Michigan make any guarantees about the performance or reliability of
+    the software.
+
+Config PPP reserves 128K of system heap at startup. On a 1 MB Plus that leaves Mill about
+30K less memory than the Network Edition does.
+
+Mill opens MacTCP only when it needs the network, so it doesn't dial when it starts, unless
+the connection check is turned on from the Settings page.
+
+
+License
+
+This folder, tools/systemdisk, is licensed separately from the rest of Mill: it is under the
+GNU Lesser General Public License, version 2.1 or (at your option) any later version. The
+full text is in LICENSE beside this file. Mill itself is under the MIT license (LICENSE at
+the top of the repository).
+
+The tool is separate from Mill. Mill doesn't use or include any of its code, and it is not
+part of any Mill binary or disk image Mill offers for download. It only runs on your own
+computer, to build the System Disk.
+
+
+Where the code comes from
+
+stuffit.py reads StuffIt archives. Its method 13 decompressor was written for this tool,
+following compcol 0.8.0 (https://github.com/KarpelesLab/compcol, src/sit13), MIT licensed,
+Copyright (c) 2026 Karpeles Lab Inc. Its fixed Huffman tables are copied from there. The
+MIT notice for those parts is in stuffit.py and in compcol-LICENSE beside it.
+
+compcol's tables may in turn have come from The Unarchiver (XADMaster), which is under the
+LGPL 2.1 or later, so this folder uses the same license.
+
+tome.py reads Apple Installer tomes and their InstaCompOne compression. Its code tables
+come from macresources 1.2 (MIT licensed, Copyright (c) 2018-2020 Maxim Poliakovski and
+Elliot Nunn), the package the script installs, whose instacomp.py decodes the same
+compression; tome.py imports them from there. The rest of the format was worked out for this
+tool from Apple's MacTCP 2.0.6.
+
+make_system_disk.py, tome.py, and the rest of stuffit.py were written for this tool.

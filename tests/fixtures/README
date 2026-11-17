@@ -8,3 +8,11 @@ drawn for The Millionth.
 rainier-t.jpg: its thumbnail of the National Park Service's Mount Rainier from
 Paradise webcam (https://www.nps.gov/webcams-mora/mountain.jpg). Public domain:
 a work of the US government.
+
+tables-nested.html, tables-portal.html, tables-config.html, tables-forum.html: pages
+heavy with tables, made up for timing and checking layout (lorem ipsum again): tables
+nested six deep with most of what a cell can hold, a portal's columns of boxes, a
+settings form like mill://config, and a forum thread with a data table.
+layout.sums: hashes of how test_layout.c lays the pages out, from before layout was
+made faster; it must not change. Remake it only when layout is meant to change:
+test_layout sums > tests/fixtures/layout.sums

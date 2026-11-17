@@ -1,0 +1,11 @@
+Archives, browsed in Mill:
+
+ zip: stored and deflated
+ tar: ustar and V7
+ gzip
+ MacBinary I, II, and III
+ BinHex 4.0
+
+A link to an archive offers Browse or Save. Browse allows archives to be explored as directories.
+
+Each format can be turned off from the Settings page, under Formats.

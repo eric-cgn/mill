@@ -8,6 +8,7 @@ other projects. Their licenses are below.
 <LI><A HREF="#multiversal">Multiversal Interfaces</A>
 <LI><A HREF="#runtime">Retro68 and GCC runtime</A>
 <LI><A HREF="#tjpgd">TJpgDec</A>
+<LI><A HREF="#installer">Install Mill</A>
 </UL>
 
 <HR><H3><A NAME="mill">Mill</A></H3>
@@ -30,8 +31,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 <HR><H3><A NAME="newlib">newlib</A></H3>
-<P>Mill's C library is newlib, as Retro68 builds it. These are the notices for
-the parts of it in Mill.
+<P>Mill&rsquo;s C library is newlib, as built by Retro68. These are the notices for
+the parts Mill includes.
 
 <H4>Red Hat</H4>
 <P>Copyright (c) 1994-2009 Red Hat, Inc. All rights reserved.
@@ -170,13 +171,18 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
 <HR><H3><A NAME="runtime">Retro68 and GCC runtime</A></H3>
-<P>Mill is built with Retro68, Wolfgang Thaller's GCC-based compiler for
-classic Macs. Its runtime library (libretro) and GCC's libgcc, parts of which
-are in Mill, are under the GNU General Public License, version 3 or later, with
+<P>Mill is built with Retro68, Wolfgang Thaller&rsquo;s GCC-based compiler for
+classic Macs. Its runtime library (libretro) and GCC&rsquo;s libgcc, parts of which
+Mill includes, are under the GNU General Public License, version 3 or later, with
 the GCC Runtime Library Exception, which places no conditions on programs built
-with them. libgcc's 68000 floating point routines include code by Pat Wood of
+with them. libgcc&rsquo;s 68000 floating point routines include code by Pat Wood of
 Pipeline Associates, Inc. (1991).
 
 <HR><H3><A NAME="tjpgd">TJpgDec</A></H3>
-<P>Mill decodes JPEG images with TJpgDec R0.03, ChaN's Tiny JPEG Decompressor,
+<P>Mill decodes JPEG images with TJpgDec R0.03, ChaN&rsquo;s Tiny JPEG Decompressor,
 Copyright (C) 2021, ChaN. Its terms place no conditions on programs that use it.
+
+<HR><H3><A NAME="installer">Install Mill</A></H3>
+<P>Install Mill is made with EUP 1.3, from OneInAMillion Software, under the
+same MIT License as Mill. Like Mill, it includes parts of newlib, Multiversal
+Interfaces, and the Retro68 and GCC runtimes; their notices are above.

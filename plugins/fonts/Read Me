@@ -1,0 +1,20 @@
+Web Fonts code
+
+The Plug-In inside Web Fonts that draws Mill Serif and Mill Mono from 18
+point up, from the outlines Web Fonts carries ('Msfn' resources, listed in
+'Mfnt' 128). tools/extras/build.py puts it in the file as MPlg 128 with its
+MIfc; Web Fonts is never a Plug-In file of its own.
+
+A letter is drawn the first time a page needs it at a size, and kept: up to
+24K of letters in all, in purgeable handles, and given back when memory is
+short. Fonts are read from the file's resource fork a letter at a time.
+Bold italic is the italic made one pixel bolder, as QuickDraw makes bold.
+Lines are as tall as each outline's ascender, descender, and line gap
+('hhea') make them at the size.
+
+The engine (tt.h, parse.c, raster.c, glyph.c, strike.c) is written from
+Apple's TrueType Reference Manual: no hinting, nonzero winding, dropout
+control (TT_DROPOUT), integer arithmetic for the 68000. strike.c, a whole
+'FONT' at once, isn't linked.
+
+Build: ./build.sh writes build/Web Fonts.flt (-Os, 68000).

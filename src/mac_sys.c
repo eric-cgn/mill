@@ -10,7 +10,7 @@
 #define FIND_FOLDER_PRESENT 1
 #define ON_SYSTEM_DISK ((short)0x8000)   /* kOnSystemDisk */
 
-Boolean sys_fsspec, sys_new_sf, sys_find_folder, sys_wne;
+Boolean sys_fsspec, sys_new_sf, sys_find_folder, sys_wne, sys_outlines;
 
 /* ------------------------------------------------------------ files */
 
@@ -172,6 +172,28 @@ OSErr file_delete(const FSSpec *spec)
     Str63 name;
     h_pb(&pb, spec, name);
     return PBHDeleteSync(&pb);
+}
+
+OSErr file_rename(const FSSpec *spec, ConstStr255Param name)
+{
+    HParamBlockRec pb;
+    Str63 old, to;
+    h_pb(&pb, spec, old);
+    pcopy(to, name, 63);
+    pb.ioParam.ioMisc = (Ptr)to;
+    return PBHRenameSync(&pb);
+}
+
+OSErr file_lengths(const FSSpec *spec, long *data, long *rsrc)
+{
+    HParamBlockRec pb;
+    Str63 name;
+    OSErr err;
+    h_pb(&pb, spec, name);
+    if ((err = PBHGetFInfoSync(&pb)) != noErr) return err;
+    *data = pb.fileParam.ioFlLgLen;
+    *rsrc = pb.fileParam.ioFlRLgLen;
+    return noErr;
 }
 
 short file_open_res(const FSSpec *spec, SInt8 perm)

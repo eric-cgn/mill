@@ -320,11 +320,117 @@ static int other_scheme(const char *href)
     return colon && (!first || colon < first);
 }
 
+/* ---- members of archives: kit.zip#/docs/readme.txt (Mill 2.1) ---- */
+
+/* Where a member path starts (after "#/"), or NULL */
+static const char *member_at(const char *url)
+{
+    const char *h = strchr(url, '#');
+    return h && h[1] == '/' ? h + 2 : NULL;
+}
+
+size_t url_doc_len(const char *url)
+{
+    const char *m = member_at(url), *h;
+    if (m) return (h = strchr(m, '#')) ? (size_t)(h - url) : strlen(url);
+    return (h = strchr(url, '#')) ? (size_t)(h - url) : strlen(url);
+}
+
+const char *url_anchor(const char *url)
+{
+    const char *m = member_at(url), *h = strchr(m ? m : url, '#');
+    return h ? h + 1 : "";
+}
+
+int url_member(const char *url, char *path, int size)
+{
+    const char *m = member_at(url);
+    if (!m) { if (size > 0) path[0] = 0; return 0; }
+    decode(m, (long)strcspn(m, "#"), path, size);
+    return 1;
+}
+
+int url_member_encode(const char *path, char *out, int size)
+{
+    static const char hexd[] = "0123456789ABCDEF";
+    int o = 0;
+    for (; *path; path++) {
+        unsigned char c = (unsigned char)*path;
+        if (c <= ' ' || c >= 127 || strchr("%#?\"<>&", c)) {
+            if (o + 3 >= size) return -1;
+            out[o++] = '%';
+            out[o++] = hexd[c >> 4];
+            out[o++] = hexd[c & 15];
+        } else {
+            if (o + 1 >= size) return -1;
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* href (no scheme, not starting with '/' or '?') against base's member path: the folder of
+   the member, then href's parts; ".." stops at the archive's top, never above it */
+static int member_resolve(const char *base, const char *m, const char *href, char *out, int out_size)
+{
+    char path[300];
+    const char *hash = strchr(href, '#'), *p;
+    long n = 0, hlen = hash ? hash - href : (long)strlen(href);
+    int o;
+    if (hlen == 0) {
+        /* "#name": an anchor in the same member */
+        size_t d = url_doc_len(base);
+        if ((int)(d + strlen(href) + 1) > out_size) return -1;
+        memcpy(out, base, d);
+        strcpy(out + d, href);
+        return 0;
+    }
+    /* the member's folder, then href */
+    for (p = m; *p && *p != '#'; p++) {}
+    while (p > m && p[-1] != '/') p--;
+    if (p - m + hlen + 1 > (long)sizeof path) return -1;
+    memcpy(path, m, p - m);
+    memcpy(path + (p - m), href, hlen);
+    path[(p - m) + hlen] = 0;
+    /* "." and ".." parts, in place */
+    {
+        char *r = path, *w = path;
+        while (*r) {
+            char *e = strchr(r, '/');
+            long len = e ? e - r : (long)strlen(r);
+            if (len == 1 && r[0] == '.') {}
+            else if (len == 2 && r[0] == '.' && r[1] == '.') {
+                if (w > path) { w--; while (w > path && w[-1] != '/') w--; }
+            } else if (len > 0) {
+                memmove(w, r, len);
+                w += len;
+                if (e) *w++ = '/';
+            }
+            if (!e) break;
+            r = e + 1;
+        }
+        *w = 0;
+        n = w - path;
+    }
+    o = (int)(m - base);
+    if (o + n + (hash ? (long)strlen(hash) : 0) + 1 > out_size) return -1;
+    memcpy(out, base, o);
+    memcpy(out + o, path, n);
+    out[o + n] = 0;
+    if (hash) strcat(out, hash);
+    return 0;
+}
+
 int url_resolve(const char *base, const char *href, char *out, int out_size)
 {
     Url b, r;
+    const char *frag = NULL, *m;
     while (*href == ' ') href++;
+    if ((m = member_at(base)) != NULL && !url_has_scheme(href) && !other_scheme(href) && href[0] != '/' && href[0] != '?')
+        return member_resolve(base, m, href, out, out_size);
     if (url_has_scheme(href)) {
+        frag = strchr(href, '#');
         if (url_parse(href, &r)) return -1;  /* a scheme Mill doesn't know */
         if (r.scheme != SCHEME_OTHER) normalize(r.path);  /* a Plug-In's paths are its own */
     } else if (other_scheme(href)) {
@@ -334,7 +440,7 @@ int url_resolve(const char *base, const char *href, char *out, int out_size)
         r = b;
         r.fragment[0] = 0;
         if (href[0] == '#') {
-            strncpy(r.fragment, href + 1, sizeof r.fragment - 1);
+            frag = href;
         } else if (href[0] == '/' && href[1] == '/') {
             char tmp[300];
             if (b.scheme == SCHEME_OTHER) snprintf(tmp, sizeof tmp, "%s:%s", b.name, href);
@@ -363,13 +469,19 @@ int url_resolve(const char *base, const char *href, char *out, int out_size)
             strncpy(r.path, path, sizeof r.path - 1);
             r.path[sizeof r.path - 1] = 0;
             normalize(r.path);
-            if (hash) strncpy(r.fragment, hash + 1, sizeof r.fragment - 1);
+            frag = hash;
         }
     }
     url_format(&r, out, out_size);
-    if (r.fragment[0] && (int)(strlen(out) + strlen(r.fragment) + 2) < out_size) {
-        strcat(out, "#");
-        strcat(out, r.fragment);
-    }
+    /* the fragment as it was written (a member path may be longer than Url's) */
+    if (frag && frag[1] && (int)(strlen(out) + strlen(frag) + 1) < out_size) strcat(out, frag);
     return 0;
+}
+
+int url_scroll_only(const char *url, const char *shown, int how)
+{
+    /* the document's part: a member's "#/" path is in it (a new member is a new page) */
+    size_t n = url_doc_len(url);
+    if (how == URL_OPEN_RELOAD || (how == URL_OPEN_LINK && url[n] != '#')) return 0;
+    return n == url_doc_len(shown) && !strncmp(url, shown, n);
 }

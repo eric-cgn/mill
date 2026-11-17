@@ -1,0 +1,21 @@
+LDAP
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder.
+
+  ldap://host/                              The server's directories
+  ldap://host/dn                            An entry
+  ldap://host/dn?attributes?scope?filter    A search
+
+The scope is base, one, or sub; the filter is as RFC 1960 has it, such as
+(cn=Smith*). Lightweight Directory Access Protocol, version 2 (version 3 for
+a server that takes only that). Read-only. Results as records (each entry
+a small table) or one table, from Settings or the address (x-layout=table).
+Values that aren't text are shown by their size. When the server asks,
+Mill asks for a DN and password.
+
+plugin://ldap/about has a form, filled in from Settings.
+
+Written from the published specifications (RFC 1777, 1779, 1959,
+1960, 2251, 2254, 2255, and X.690's Basic Encoding Rules).
+
+Build: ./build.sh writes build/LDAP.bin.

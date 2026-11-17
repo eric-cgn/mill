@@ -4,11 +4,14 @@
 #define MILL_CHARSET_H
 
 /* What a page is in. GUESS: its META tag says, else valid UTF-8 is UTF-8, else Latin-1 */
-enum { CHARSET_GUESS, CHARSET_MAC, CHARSET_LATIN1, CHARSET_UTF8 };
+enum { CHARSET_GUESS, CHARSET_MAC, CHARSET_LATIN1, CHARSET_UTF8,
+       CHARSET_CP437 /* IBM PC code page 437: names in zip files, never pages */ };
 
 /* A charset's name ("utf-8", "ISO-8859-1", "macintosh"...), or CHARSET_GUESS if Mill
    doesn't know it */
 int charset_named(const char *name, int len);
+/* The charset a content type names ("text/plain; charset=macintosh"), or CHARSET_GUESS */
+int charset_of_type(const char *type);
 /* What a page with no charset from its server is in: its META tag's, else UTF-8 if it's
    valid UTF-8 with something beyond ASCII, else Latin-1 */
 int charset_sniff(const char *src, long len);
@@ -26,5 +29,14 @@ int utf8_char(const unsigned char *s, long n, long *u);
 /* Decode the entity name or number between '&' and ';' (name not including either).
    Returns the Mac Roman byte, or 0 if unknown. */
 unsigned char entity_to_mac(const char *name, int len);
+
+/* Names (an archive's members): a byte in cs as Mac Roman ('?' for what it lacks), and a
+   whole name, into out; its length */
+unsigned char charset_byte_to_mac(unsigned char c, int cs);
+long charset_name_to_mac(const char *in, int cs, char *out, long size);
+/* A Mac Roman name to save a file as on the Mac: its last '/' part, ':' as '-', no control
+   characters, no leading '.' (the Device Manager's), at most 31 bytes with a short
+   extension kept; "Untitled" if nothing's left. out has 32 bytes. */
+void hfs_name(const char *mac, char out[32]);
 
 #endif

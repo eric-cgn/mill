@@ -4,9 +4,20 @@ A Plug-In adds URL schemes (protocols) or file formats to Mill. It is a
 code resource of type 'MPlg', ID 128, with its entry point at byte 0, in
 a file of type 'MPlg' and creator 'MiLL'. Put the file in the "Mill
 Plug-Ins" folder next to Mill; mill://plugins lists what Mill found.
+A font file (type 'FFIL') there may hold one too, to draw its families
+from outlines (see Fonts in MillPlugIn.h).
+
+Interface
+  Every Plug-In file also has an 'MIfc' resource, ID 128: 2 bytes, the
+  interface it was built for (kMillInterface, in MillInterface.h).
+  Interfaces:MillPlugIn.r makes it, and Finger's MPW make file adds it
+  (for CodeWarrior, see its Read Me). Mill reads it before it loads any
+  code and skips a Plug-In without it or with another number. When a
+  new Mill changes the interface, build again with its kit.
 
 Folders
-  Interfaces    MillPlugIn.h: the interface, with notes on every call
+  Interfaces    MillPlugIn.h: the interface, with notes on every call;
+                MillPlugIn.r: the 'MIfc' resource
   Glue          MillGlue.c: the entry point; add it to every Plug-In
   Examples      Finger: a small protocol Plug-In
   MPW           Finger.make, for MPW 3.4 (SC and Link)
@@ -37,4 +48,6 @@ Rules (MillPlugIn.h has the rest)
 - No static or global data that holds an address (a table of strings or
   functions). Fill such tables in at run time, as Finger does.
 - Write HTTP's CR LF as MILL_CRLF: '\r' and '\n' differ by compiler.
+- For gzip or deflate data, use Mill's own inflate (GzBegin and the
+  rest), not a copy of your own.
 - Host functions marked "moves memory" may compact the heap.

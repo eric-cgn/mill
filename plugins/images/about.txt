@@ -1,0 +1,12 @@
+Images in these formats, in pages and on their own:
+
+ MacPaint
+ PICT, version 1 and 2 (version 2: its images only)
+ XBM, X10 and X11
+ BMP: 1, 4, 8, or 24 bits, RLE4 and RLE8
+ Netpbm: PBM, PGM, and PPM
+ PNG: every kind, with transparency and interlacing
+
+PNG: Transparency is not blended. CRC checks optional, see settings.
+
+Each format can be turned off from the Settings page, under Formats.

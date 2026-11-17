@@ -9,4 +9,8 @@
    returns the length the whole would have. */
 long mill_format(char *out, long size, const char *fmt, const long *args);
 
+/* For "Reading... 3K of 4K": done in K rounded down, the total's K (rounded up) only once
+   all of total is done; total 0 (unknown): rounded up */
+long done_k(long done, long total);
+
 #endif

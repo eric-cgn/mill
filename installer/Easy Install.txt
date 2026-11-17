@@ -1,0 +1,7 @@
+Mill is a web browser for monochrome Macs. It reads HTML 3.2, with images, tables, and forms.
+
+Easy Install includes Mill, the Internet Services Plug-In (Finger, Whois, Dict, Time, FTP, and Gopher), the SMB, NFS, News, LDAP, IMAP, Image Formats, and Archives Plug-Ins, and Web Fonts. Custom Install also offers the Mill Plug-In SDK.
+
+Mill requires Mac Plus with 1 MB RAM, System 6.0.3, and MacTCP 1.1, or later. Recommended: System 6.0.8, 2 MB RAM.
+
+Freeware from OneInAMillion Software.

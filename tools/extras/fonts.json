@@ -1,6 +1,6 @@
 {
   "name": "Web Fonts",
-  "version": "1.0",
+  "version": "2.0",
   "sources": {
     "adobe75": {
       "name": "Adobe 75 dpi X11 bitmap fonts 1.0.4",
@@ -8,9 +8,9 @@
       "url": "https://www.x.org/releases/individual/font/font-adobe-75dpi-1.0.4.tar.xz",
       "sha256": "1281a62dbeded169e495cae1a5b487e1f336f2b4d971d92911c59c103999b911",
       "licence_name": "Adobe/DEC X11 notice",
-      "summary": "Adobe and Digital Equipment Corporation notice (X11 licence): use, copy, modify, distribute, and sell allowed with the copyright notices and the permission notice in supporting documentation; the names of Adobe Systems and Digital Equipment Corporation are not to be used in advertising or publicity without written permission.",
+      "summary": "Adobe and Digital Equipment Corporation notice (X11 license): use, copy, modify, distribute, and sell allowed with the copyright notices and the permission notice in supporting documentation; the names of Adobe Systems and Digital Equipment Corporation are not to be used in advertising or publicity without written permission.",
       "license": {
-        "member": "COPYING"
+        "file": "fonts/adobe-x11/COPYING"
       },
       "archive": "fonts/adobe-x11.tar.xz",
       "dir": "75dpi"
@@ -21,12 +21,55 @@
       "url": "https://www.x.org/releases/individual/font/font-adobe-100dpi-1.0.4.tar.xz",
       "sha256": "b67aff445e056328d53f9732d39884f55dd8d303fc25af3dbba33a8ba35a9ccf",
       "licence_name": "Adobe/DEC X11 notice",
-      "summary": "Adobe and Digital Equipment Corporation notice (X11 licence): use, copy, modify, distribute, and sell allowed with the copyright notices and the permission notice in supporting documentation; the names of Adobe Systems and Digital Equipment Corporation are not to be used in advertising or publicity without written permission.",
+      "summary": "Adobe and Digital Equipment Corporation notice (X11 license): use, copy, modify, distribute, and sell allowed with the copyright notices and the permission notice in supporting documentation; the names of Adobe Systems and Digital Equipment Corporation are not to be used in advertising or publicity without written permission.",
       "license": {
-        "member": "COPYING"
+        "file": "fonts/adobe-x11/COPYING"
       },
       "archive": "fonts/adobe-x11.tar.xz",
       "dir": "100dpi"
+    },
+    "tinos": {
+      "name": "Tinos 1.340",
+      "format": "files",
+      "fetched": "2026-11-16, from google/fonts main (ofl/tinos)",
+      "licence_name": "SIL Open Font License 1.1",
+      "summary": "SIL Open Font License 1.1, no Reserved Font Name: use, study, copy, modify, embed, and redistribute allowed, with the copyright notice and the license in every copy; the fonts and modified versions stay under the license and are not sold by themselves.",
+      "license": {
+        "file": "fonts/tinos/OFL.txt"
+      },
+      "archive": "fonts/tinos.tar.xz",
+      "dir": "tinos",
+      "urls": {
+        "Tinos-Regular.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/tinos/Tinos-Regular.ttf",
+        "Tinos-Bold.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/tinos/Tinos-Bold.ttf",
+        "Tinos-Italic.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/tinos/Tinos-Italic.ttf"
+      },
+      "members": {
+        "Tinos-Regular.ttf": "60a0e8ef0c04dd5dd69ffe91025fa2ae5836cbd35600a82ba031977557e2cb61",
+        "Tinos-Bold.ttf": "393269dbab8899f938db19783eca5eac92eb431f7ae0ab45b8349ca895f1a06b",
+        "Tinos-Italic.ttf": "5942266ed398b155d7dc23e36833e7ec6be988f2439bdbeb8ef1bede808eaa91"
+      }
+    },
+    "bitstream": {
+      "name": "Bitstream Type 1 fonts 1.0.4 (Courier 10 Pitch)",
+      "format": "tar.xz",
+      "url": "https://www.x.org/releases/individual/font/font-bitstream-type1-1.0.4.tar.xz",
+      "sha256": "de2f238b4cd72db4228a0ba67829d76a2b7c039e22993d66a722ee385248c628",
+      "licence_name": "Bitstream notice",
+      "summary": "Bitstream notice: use, copy, modify, sublicense, sell, and redistribute allowed for any purpose, with the notice left intact on all copies.",
+      "license": {
+        "file": "fonts/bitstream/COPYING"
+      },
+      "archive": "fonts/bitstream.tar.xz",
+      "dir": "bitstream",
+      "members": {
+        "c0419bt_.pfb": "0e15626ca60d95e49ac15352f5c7f1837eb6dc9b6a353357012ce54a5b37015c",
+        "c0419bt_.afm": "c89c57fcfb7e048b2602ed22cca9103681689cf1416ea50bcbd5a4b55a797d76",
+        "c0583bt_.pfb": "708bbc1a259fbdf4f8c0fde683dd604f1e0677a72078567d70328f9a428248b7",
+        "c0583bt_.afm": "508589a8aa0935af70ed0d847d0a481822ceb034cf5e60595006ad224b961340",
+        "c0582bt_.pfb": "9ecc1d370c5ee96c8b58d144d92a9fbeb416e2a33746f4ef86ed4e7490389dc6",
+        "c0582bt_.afm": "99d7dcd6d6790468cb7795a2dd6eabd4f9fdb4ce8276d05e57aefd82936ce6e9"
+      }
     }
   },
   "fonts": [
@@ -49,28 +92,13 @@
         "14": [
           "adobe75",
           "timR14.bdf"
-        ],
-        "18": [
-          "adobe75",
-          "timR18.bdf"
-        ],
-        "24": [
-          "adobe75",
-          "timR24.bdf"
-        ],
-        "36": [
-          "adobe100",
-          "timR24.bdf"
         ]
       },
       "sizes": [
         9,
         10,
         12,
-        14,
-        18,
-        24,
-        36
+        14
       ],
       "from": "converted from Adobe's X11 bitmaps of the Times design (timR, timB, timI)",
       "styles": {
@@ -92,18 +120,6 @@
             "14": [
               "adobe75",
               "timB14.bdf"
-            ],
-            "18": [
-              "adobe75",
-              "timB18.bdf"
-            ],
-            "24": [
-              "adobe75",
-              "timB24.bdf"
-            ],
-            "36": [
-              "adobe100",
-              "timB24.bdf"
             ]
           }
         },
@@ -125,20 +141,30 @@
             "14": [
               "adobe75",
               "timI14.bdf"
-            ],
-            "18": [
-              "adobe75",
-              "timI18.bdf"
-            ],
-            "24": [
-              "adobe75",
-              "timI24.bdf"
-            ],
-            "36": [
-              "adobe100",
-              "timI24.bdf"
             ]
           }
+        }
+      },
+      "outlines": {
+        "sizes": [
+          18,
+          72
+        ],
+        "from": "reduced from Tinos (Regular, Bold, and Italic)",
+        "0": {
+          "source": "tinos",
+          "file": "Tinos-Regular.ttf",
+          "sha256": "0da171aa03727759b452c5a32fdcf8559ebdb3c598a1453fdb64dff56ba2bf6a"
+        },
+        "1": {
+          "source": "tinos",
+          "file": "Tinos-Bold.ttf",
+          "sha256": "194e1c915324136716b6c9f9fccc75c8d8f49c8f17d1ef8412e3ee00864e1f40"
+        },
+        "2": {
+          "source": "tinos",
+          "file": "Tinos-Italic.ttf",
+          "sha256": "6ed9486a608db669af98bb8ff711230be71a12e76c3c838b9ce26fa16ccaf5f8"
         }
       }
     },
@@ -161,28 +187,13 @@
         "14": [
           "adobe75",
           "courR14.bdf"
-        ],
-        "18": [
-          "adobe75",
-          "courR18.bdf"
-        ],
-        "24": [
-          "adobe75",
-          "courR24.bdf"
-        ],
-        "36": [
-          "adobe100",
-          "courR24.bdf"
         ]
       },
       "sizes": [
         9,
         10,
         12,
-        14,
-        18,
-        24,
-        36
+        14
       ],
       "from": "converted from Adobe's X11 bitmaps of the Courier design (courR, courB, courO; the oblique is the italic)",
       "styles": {
@@ -204,18 +215,6 @@
             "14": [
               "adobe75",
               "courB14.bdf"
-            ],
-            "18": [
-              "adobe75",
-              "courB18.bdf"
-            ],
-            "24": [
-              "adobe75",
-              "courB24.bdf"
-            ],
-            "36": [
-              "adobe100",
-              "courB24.bdf"
             ]
           },
           "sizes": [
@@ -243,18 +242,6 @@
             "14": [
               "adobe75",
               "courO14.bdf"
-            ],
-            "18": [
-              "adobe75",
-              "courO18.bdf"
-            ],
-            "24": [
-              "adobe75",
-              "courO24.bdf"
-            ],
-            "36": [
-              "adobe100",
-              "courO24.bdf"
             ]
           },
           "sizes": [
@@ -264,7 +251,51 @@
             14
           ]
         }
-      }
+      },
+      "outlines": {
+        "sizes": [
+          18,
+          72
+        ],
+        "from": "converted and reduced from Bitstream's Courier 10 Pitch (Regular, Bold, and Italic)",
+        "0": {
+          "source": "bitstream",
+          "type1": [
+            "c0419bt_.pfb",
+            "c0419bt_.afm",
+            "Courier 10 Pitch",
+            "Regular"
+          ],
+          "sha256": "7923880ff49fa223e01115931579ca3506628a81e5b9ad0cfac268a4f283affe"
+        },
+        "1": {
+          "source": "bitstream",
+          "type1": [
+            "c0583bt_.pfb",
+            "c0583bt_.afm",
+            "Courier 10 Pitch",
+            "Bold"
+          ],
+          "sha256": "64872349b06eebbbef2efd9846811538748015080a56359e1f10da365ed46c1a"
+        },
+        "2": {
+          "source": "bitstream",
+          "type1": [
+            "c0582bt_.pfb",
+            "c0582bt_.afm",
+            "Courier 10 Pitch",
+            "Italic"
+          ],
+          "sha256": "484d970ee3af856da1c143192c8d024b440601598f565581b648773b047b92a3"
+        }
+      },
+      "fixed": true
     }
-  ]
+  ],
+  "code": {
+    "name": "Mill Serif and Mill Mono outline code",
+    "license": "../../LICENSE",
+    "licence_name": "MIT License",
+    "summary": "MIT License: use, copy, modify, merge, publish, distribute, sublicense, and sell allowed, with the copyright notice and the permission notice in all copies."
+  }
 }

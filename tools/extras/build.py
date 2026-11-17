@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
-'''Mill Extras: builds "Web Fonts", a font suitcase of Mill Serif and Mill Mono at the sizes
-HTML 3.2 asks for, from Adobe's X11 bitmap fonts (BDF, hand-tuned at each size), or from fonts
-rendered with FreeType. Nothing it makes is committed; it downloads the sources, checks
-their SHA-256, and converts them.
+'''Mill Extras: builds "Web Fonts", Mill Serif and Mill Mono for Mill: a font suitcase of bitmaps
+at 9, 10, 12, and 14 point, from Adobe's X11 bitmap fonts (BDF, hand-tuned at each size), their
+outlines for 18 point and up (outlines.py: Tinos, and Bitstream's Courier 10 Pitch), and the
+code that draws them (the Plug-In in plugins/fonts, given with --code). It reads the fonts'
+releases from the archives kept in fonts/ (--download: from the releases themselves), checks
+their SHA-256, converts them, and checks the outlines it makes against their SHA-256 too.
 
   python3 build.py [--config fonts.json] [--out dist] [--cache cache] [--preview] [--styles]
+                   [--code "Web Fonts.flt"] [--table]
 
-Needs freetype-py and macresources (and Pillow for --preview). Writes, in --out:
+Needs freetype-py, macresources, and fontTools (and Pillow for --preview). Writes, in --out:
   Web Fonts.bin             MacBinary: type FFIL, creator MiLL, resource fork only
-  Web Fonts Read Me.txt     what it is and the license (CR line ends, Mac Roman)
+  Web Fonts Read Me.txt     what it is and the licenses (CR line ends, Mac Roman)
 
 A family with "files" in fonts.json is converted from BDF strikes, one file per size and style
 (its characters are Unicode, ISO 10646-1: each Mac Roman 32 to 255 character is looked up by
 its Unicode value; those a strike lacks show as the missing glyph, and are listed). One with a
 "ttf" is rendered at its size in pixels per em (72 dpi) with FreeType's monochrome mode. Either
-is written as FONT resources (family ID * 128 + size, purgeable) with a FOND for each family.'''
+is written as FONT resources (family ID * 128 + size, purgeable) with a FOND for each family.
+A family's "outlines" are 'Msfn' resources (TrueType data the Font Manager doesn't see: only
+Mill's Plug-In draws them), listed in 'Mfnt' 128 with the sizes they're for.'''
 
-import argparse, gzip, hashlib, io, json, os, struct, sys, tarfile, time, urllib.request, zipfile
+import argparse, hashlib, io, json, os, struct, sys, tarfile, tempfile, urllib.request, zipfile, zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import freetype
 import macresources
 
 UA = 'Mill-extras/1.0 (+https://github.com/eric-cgn/mill; font build script)'
 MAC_EPOCH = 2082844800
+PERIOD = 882921600                            # 1997-12-25: the files' date unless SOURCE_DATE_EPOCH says
 
 
 def get(url, sha256, cache):
@@ -56,12 +64,14 @@ def members(data, kind):
     return out
 
 
-def source_notice(src, cache, files):
-    '''The text a source's license asks to stay with every copy: its license file from the
-    archive, or the files the config names (downloaded and checked), and, if it says where, the
-    copyright notice cut out of one of them'''
+def source_notice(src, cache, files, here):
+    '''The text a source's license asks to stay with every copy: its license file (kept in this
+    folder, or a member of the archive), or the files the config names (downloaded and
+    checked), and, if it says where, the copyright notice cut out of one of them'''
     parts = []
     lic = src['license']
+    if 'file' in lic:
+        parts.append(open(os.path.join(here, lic['file']), 'rb').read().decode('utf-8', 'replace').strip())
     if 'member' in lic:
         parts.append(files[lic['member']].decode('utf-8', 'replace').strip())
     for item in lic.get('urls', []):
@@ -71,6 +81,31 @@ def source_notice(src, cache, files):
             text = text[a:text.index(item['end'], a)]
         parts.append(text.strip())
     return '\n\n'.join(parts)
+
+
+def read_source(key, src, here, a):
+    '''{file name: bytes} of a source: from its archive here (the files of its "dir"), or with
+    --download from its release ("url") or its files ("urls"); each file "members" names
+    checked against its SHA-256'''
+    if 'archive' in src and not a.download:
+        out = {}
+        with tarfile.open(os.path.join(here, src['archive'])) as t:
+            for m in t.getmembers():
+                if m.isfile() and os.path.dirname(m.name) == src['dir']:
+                    out[os.path.basename(m.name)] = t.extractfile(m).read()
+    elif 'url' in src:
+        out = members(get(src['url'], src['sha256'], a.cache), src['format'])
+    elif 'urls' in src:                       # loose files, each checked by its "members" SHA-256
+        out = {name: get(url, src['members'][name], a.cache) for name, url in src['urls'].items()}
+    else:
+        sys.exit('%s: no release to download; build from %s' % (key, src['archive']))
+    for name, sha in src.get('members', {}).items():
+        if name not in out:
+            sys.exit('%s: %s is missing' % (key, name))
+        got = hashlib.sha256(out[name]).hexdigest()
+        if got != sha:
+            sys.exit('%s: %s: SHA-256 is %s, expected %s' % (key, name, got, sha))
+    return out
 
 
 def method_for(f, size):
@@ -283,6 +318,14 @@ def vers(version, short, long_):
     return struct.pack('>BBBBH', bcd(major), minor << 4, 0x80, 0, 0) + bytes([len(s)]) + s + bytes([len(l)]) + l
 
 
+def gzip(data):
+    '''A gzip member with a fixed header (no name, time 0, OS unknown), so the bytes are the same
+    whichever Python makes them: gzip.compress's OS byte differs between Python versions'''
+    z = zlib.compressobj(9, zlib.DEFLATED, -15)
+    body = z.compress(data) + z.flush()
+    return b'\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff' + body + struct.pack('<II', zlib.crc32(data), len(data) & 0xFFFFFFFF)
+
+
 def mac_text(text):
     return text.replace('\r\n', '\n').replace('\n', '\r').encode('mac_roman', 'replace')
 
@@ -293,20 +336,26 @@ STYLE_NAMES = {'1': 'bold', '2': 'italic', '3': 'bold italic'}
 def about_text(cfg, fonts, a):
     '''What the suitcase is, and what each family comes from'''
     lines = ['%s %s' % (cfg['name'], cfg['version']), '',
-             'Optional fonts for Mill, the web browser. Put this file in the "Mill Plug-Ins" folder',
-             'beside Mill. Mill uses them for sizes the System lacks, and lists them in Settings.', '']
+             'Fonts for Mill, the web browser. Put this file in the "Mill Plug-Ins" folder beside',
+             'Mill. Mill Serif and Mill Mono then become Mill\'s default fonts.', '']
     for f in fonts:
         sizes = ', '.join(str(z) for z in f['sizes'])
         real = [STYLE_NAMES[k] for k in sorted(f.get('styles', {})) if a.styles]
         lines += ['%s (%s point; regular%s):' % (f['family'], sizes, ''.join(', ' + r for r in real)), '  ' + f['from'] + '.']
+        if f.get('outlines') and a.code:
+            lo, hi = f['outlines']['sizes']
+            lines += ['%s outlines (%d to %d point; regular, bold, and italic):' % (f['family'], lo, hi),
+                      '  ' + f['outlines']['from'] + '.']
     lines += ['', 'The font names are Mill\'s own, not the designs\'.', '',
-              'The fonts keep the license they came under, which requires its copyright notices and',
-              'permission notice to stay with every copy: resource TXGZ 129 "License" of this file,',
+              'The fonts keep the licenses they came under, which require their copyright notices',
+              'and license texts to stay with every copy: resource TXGZ 129 "License" of this file,',
               'shown on Mill\'s license page. In short:']
     shown = {}
-    for key in sorted({k for f in fonts for k in source_keys(f)}):
+    for key in sorted({k for f in fonts for k in source_keys(f) | (outline_keys(f) if a.code else set())}):
         src = cfg['sources'][key]
         shown.setdefault(src['summary'], []).append(src['name'])
+    if a.code:
+        shown.setdefault(cfg['code']['summary'], []).append(cfg['code']['name'])
     for summary, names in shown.items():
         lines += ['  %s: %s' % (' and '.join(names), summary)]
     return '\n'.join(lines)
@@ -337,6 +386,58 @@ def source_keys(f):
         return {f['source']}
     keys = {k for v in [f['files']] + [st['files'] for st in f.get('styles', {}).values()] for pair in v.values() for k in [pair[0]]}
     return keys
+
+
+def outline_keys(f):
+    """The sources a family's outlines read"""
+    return {v['source'] for k, v in f.get('outlines', {}).items() if k.isdigit()}
+
+
+def outline_data(f, files):
+    '''{style: the reduced TrueType font's bytes} for a family's "outlines": a TrueType file of
+    its source reduced (outlines.py), or a Type 1 font converted first; each checked against
+    its SHA-256, so the build gives the same fonts every time'''
+    import outlines
+    out = {}
+    for k, v in sorted((k, v) for k, v in f.get('outlines', {}).items() if k.isdigit()):
+        src = files[v['source']]
+        if 'type1' in v:
+            pfb, afm, fam, style = v['type1']
+            with tempfile.TemporaryDirectory() as d:
+                for name in (pfb, afm):
+                    open(os.path.join(d, name), 'wb').write(src[name])
+                outlines.convert(os.path.join(d, pfb), os.path.join(d, afm), os.path.join(d, 'out.ttf'), fam, style)
+                ttf = open(os.path.join(d, 'out.ttf'), 'rb').read()
+        else:
+            ttf = src[v['file']]
+        data, missing = outlines.reduce(ttf)
+        got = hashlib.sha256(data).hexdigest()
+        if got != v['sha256']:
+            sys.exit('%s %s outline: SHA-256 is %s, expected %s' % (f['family'], STYLE_NAMES.get(k, 'regular'), got, v['sha256']))
+        print('%s %s outline: %d bytes%s' % (f['family'], STYLE_NAMES.get(k, 'regular'), len(data),
+                                            ', lacks ' + ' '.join(missing) if missing else ''))
+        out[int(k)] = data
+    return out
+
+
+def mfnt_resource(entries):
+    '''Mfnt 128, the outlines' index for the Plug-In: a count, then for each family its name
+    (a Pascal string in 32 bytes), the smallest and largest size it's drawn at, whether every
+    letter is one width, and the 'Msfn' ID of its plain, bold, italic, and bold italic (0: none)'''
+    out = struct.pack('>h', len(entries))
+    for name, lo, hi, fixed, ids in entries:
+        n = name.encode('mac_roman')
+        out += (bytes([len(n)]) + n).ljust(32, b'\0') + struct.pack('>hhh4h', lo, hi, fixed, *ids)
+    return out
+
+
+def interface_number(header):
+    '''kMillInterface from sdk/Interfaces/MillInterface.h'''
+    for line in open(header):
+        w = line.split()
+        if len(w) == 3 and w[:2] == ['#define', 'kMillInterface']:
+            return int(w[2])
+    sys.exit('%s: no kMillInterface' % header)
 
 
 def build(cfg, a, files, notices):
@@ -388,9 +489,28 @@ def build(cfg, a, files, notices):
                     dump_preview(st, os.path.join(a.out, '%s %d.png' % (rname, size)), data)
         resources.append(macresources.Resource(b'FOND', f['id'], f['family'], 0x20, fond_resource(f['id'], strikes, assoc)))
         built.append(f)
+    index = []
+    for f in built:
+        ol = f.get('outlines')
+        if not ol or not a.code:              # nothing draws them without the Plug-In
+            continue
+        ids = [0, 0, 0, 0]
+        for style, data in outline_data(f, files).items():
+            fid = f['id'] if style == 0 else f['styles'][str(style)]['id']
+            resources.append(macresources.Resource(b'Msfn', fid, '%s%s' % (f['family'], '' if style == 0 else ' ' + STYLE_NAMES[str(style)].title()), 0x20, data))
+            ids[style] = fid
+            table.append((f['family'], style, 'outline', len(data)))
+        index.append((f['family'], ol['sizes'][0], ol['sizes'][1], 1 if f.get('fixed') else 0, ids))
+    if index:
+        resources.append(macresources.Resource(b'Mfnt', 128, 'Outlines', 0, mfnt_resource(index)))
+    if a.code:
+        flt = open(a.code, 'rb').read()
+        resources.append(macresources.Resource(b'MPlg', 128, cfg['name'], 0, flt))
+        resources.append(macresources.Resource(b'MIfc', 128, 'Interface', 0, struct.pack('>h', interface_number(a.interface))))
+        table.append(('code', 0, 'code', len(flt)))
     ver = cfg['version']
     froms = '; '.join(f['from'] for f in built)
-    lic = ', '.join(sorted({cfg['sources'][k]['licence_name'] for f in built for k in source_keys(f)}))
+    lic = ', '.join(sorted({cfg['sources'][k]['licence_name'] for f in built for k in source_keys(f) | (outline_keys(f) if a.code else set())}))
     if absent:
         by_char = {}
         for member, codes in sorted(absent.items()):
@@ -399,32 +519,46 @@ def build(cfg, a, files, notices):
         print('Mac Roman characters some strikes lack (shown as the missing glyph):')
         for c in sorted(by_char):
             print('  %02X %s: %d of %d strikes' % (c, mac_roman(c), len(by_char[c]), len(absent)))
-    resources.append(macresources.Resource(b'vers', 1, '', 0, vers(ver, ver, '%s %s, from %s' % (cfg['name'], ver, froms))))
-    resources.append(macresources.Resource(b'vers', 2, '', 0, vers(ver, '%s %s' % (cfg['name'], ver),
-                                                               'Bitmaps rendered from %s (%s)' % (froms, lic))))
+    resources.append(macresources.Resource(b'vers', 1, '', 0, vers(ver, ver, '%s %s, %s' % (cfg['name'], ver, ' and '.join(f['family'] for f in built)))))
+    resources.append(macresources.Resource(b'vers', 2, '', 0, vers(ver, '%s %s' % (cfg['name'], ver), 'Fonts for Mill (%s)' % lic)))
     about = about_text(cfg, built, a)
     resources.append(macresources.Resource(b'TEXT', 128, 'About %s' % cfg['name'], 0, mac_text(about)))
     # the license, gzipped ('TXGZ'; Mill reads it only when it builds mill://license): ID 129, "License"
-    resources.append(macresources.Resource(b'TXGZ', 129, 'License', 0, gzip.compress(mac_text(notices), 9, mtime=0)))
+    resources.append(macresources.Resource(b'TXGZ', 129, 'License', 0, gzip(mac_text(notices))))
     return resources, about, table
 
 
 def size_table(table):
-    '''Bytes of each FONT resource by family, style, and size'''
-    sizes = sorted({t[2] for t in table})
+    '''Bytes of each FONT resource by family, style, and size; then the outlines and the code'''
+    bitmaps = [t for t in table if isinstance(t[2], int)]
+    sizes = sorted({t[2] for t in bitmaps})
     out = ['%-22s' % 'FONT resource bytes' + ''.join('%8d' % z for z in sizes) + '   total']
     fams = []
-    for fam, style, size, n in table:
+    for fam, style, size, n in bitmaps:
         if (fam, style) not in fams:
             fams.append((fam, style))
     for fam, style in fams:
-        row = {size: n for f, st, size, n in table if f == fam and st == style}
+        row = {size: n for f, st, size, n in bitmaps if f == fam and st == style}
         name = '%s %s' % (fam, ['plain', 'bold', 'italic', 'bold italic'][style])
         out.append('%-22s' % name + ''.join('%8s' % (row.get(z, '-')) for z in sizes) + '%8d' % sum(row.values()))
     for fam, style in fams:
         if style == 0 and any(k[0] == fam for k in PIXELS):
             out.append('%-22s' % (fam + ' pixels') + ''.join('%8s' % PIXELS.get((fam, 0, z), ('-',))[0] for z in sizes))
+    for fam, style, kind, n in table:
+        if kind == 'outline':
+            out.append('%-22s %8d  Msfn' % ('%s %s' % (fam, ['plain', 'bold', 'italic', 'bold italic'][style]), n))
+        elif kind == 'code':
+            out.append('%-22s %8d  MPlg' % ('code', n))
     return '\n'.join(out)
+
+
+def split(resources):
+    '''The file's bytes in three: bitmaps (FONT and FOND), outlines (Msfn and Mfnt), and code
+    (MPlg and MIfc); the rest (About, License, vers) and the map with the bitmaps'''
+    whole = len(macresources.make_file(resources))
+    outlines = sum(len(r) + 4 for r in resources if r.type in (b'Msfn', b'Mfnt'))
+    code = sum(len(r) + 4 for r in resources if r.type in (b'MPlg', b'MIfc'))
+    return whole - outlines - code, outlines, code
 
 
 def main():
@@ -436,29 +570,26 @@ def main():
     ap.add_argument('--preview', action='store_true', help='also write a PNG of each strike')
     ap.add_argument('--styles', action='store_true', help='also make the real bold and italic strikes fonts.json lists, at the sizes it lists (QuickDraw makes the styles from the plain strike otherwise)')
     ap.add_argument('--allow-partial-styles', action='store_true', help='skip the check that refuses real style strikes missing a size half or double one that exists (for testing)')
-    ap.add_argument('--download', action='store_true', help='read the sources from their release files (url and sha256 in fonts.json) instead of the copies in this folder')
+    ap.add_argument('--download', action='store_true', help='read the sources from their release files (url and sha256, or urls and members, in fonts.json) instead of the copies in this folder')
+    ap.add_argument('--code', help='the Plug-In that draws the outlines, a flat code resource (plugins/fonts/build.sh makes it), put in as MPlg 128 with its MIfc')
+    ap.add_argument('--interface', default=os.path.join(here, '..', '..', 'sdk', 'Interfaces', 'MillInterface.h'), help='where kMillInterface is defined, for the MIfc')
     ap.add_argument('--table', action='store_true', help='print the size of every strike, and the suitcase with and without the real styles, and stop')
     a = ap.parse_args()
     cfg = json.load(open(a.config))
     files, notices = {}, []
     texts = {}
-    for key in sorted({k for f in cfg['fonts'] for k in source_keys(f)}):
+    here = os.path.dirname(os.path.abspath(a.config))
+    for key in sorted({k for f in cfg['fonts'] for k in source_keys(f) | outline_keys(f)}):
         src = cfg['sources'][key]
-        if 'archive' in src and not a.download:          # the copy kept in the repository, one archive
-            here_ = os.path.dirname(os.path.abspath(a.config))
-            files[key] = {}
-            with tarfile.open(os.path.join(here_, src['archive'])) as t:
-                for m in t.getmembers():
-                    if m.isfile() and os.path.dirname(m.name) == src['dir']:
-                        files[key][os.path.basename(m.name)] = t.extractfile(m).read()
-            files[key]['COPYING'] = open(os.path.join(here_, os.path.dirname(src['archive']), 'adobe-x11', 'COPYING'), 'rb').read()
-        else:
-            files[key] = members(get(src['url'], src['sha256'], a.cache), src['format'])
-        texts.setdefault(source_notice(src, a.cache, files[key]), []).append(src['name'])
+        files[key] = read_source(key, src, here, a)
+        texts.setdefault(source_notice(src, a.cache, files[key], here), []).append(src['name'])
+    if a.code:                                # the Plug-In's code: Mill's own license
+        code = cfg['code']
+        texts.setdefault(open(os.path.join(here, code['license']), 'rb').read().decode('utf-8', 'replace').strip(), []).append(code['name'])
     for text, names in texts.items():         # one notice for sources that share it
         notices.append('=== %s ===\n\n%s' % (', '.join(names), text))
     notices = ('\n\n' + '-' * 70 + '\n\n').join(notices)
-    when = int(os.environ.get('SOURCE_DATE_EPOCH', time.time())) + MAC_EPOCH
+    when = int(os.environ.get('SOURCE_DATE_EPOCH', PERIOD)) + MAC_EPOCH
     if a.table:
         a.styles = True
         res, _, table = build(cfg, a, files, notices)
@@ -474,7 +605,8 @@ def main():
     open(os.path.join(a.out, cfg['name'] + '.bin'), 'wb').write(out)
     open(os.path.join(a.out, cfg['name'] + ' Read Me.txt'), 'wb').write(
         mac_text(about + '\n\n' + '-' * 70 + '\n\n' + notices + '\n'))
-    print('%s.bin: %d bytes' % (cfg['name'], len(out)))
+    b, o, c = split(resources)
+    print('%s.bin: %d bytes; resource fork %d: bitmaps %d, outlines %d, code %d' % (cfg['name'], len(out), b + o + c, b, o, c))
 
 
 def dump_preview(st, path, data):

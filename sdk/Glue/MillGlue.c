@@ -62,6 +62,18 @@ static OSErr MILL_FORMAT(MillPlugIn *self, short selector, MillFormatParams *f);
 #   else
 #       define GLUE_FORMAT(me, s, f) millUnknown
 #   endif
+#   ifdef MILL_FONT
+static OSErr MILL_FONT(MillPlugIn *self, MillFontParams *f);
+#       define GLUE_FONT(me, f) MILL_FONT(me, f)
+#   else
+#       define GLUE_FONT(me, f) millUnknown
+#   endif
+#   ifdef MILL_GZOUT
+static OSErr MILL_GZOUT(MillPlugIn *self, MillGzOutParams *g);
+#       define GLUE_GZOUT(me, g) MILL_GZOUT(me, g)
+#   else
+#       define GLUE_GZOUT(me, g) millUnknown
+#   endif
 #   ifdef MILL_PURGE
 static long MILL_PURGE(MillPlugIn *self, long wanted);
 #       define GLUE_PURGE(me, w) MILL_PURGE(me, w)
@@ -73,6 +85,8 @@ static long MILL_PURGE(MillPlugIn *self, long wanted);
 #   define GLUE_REQUEST(me, r) ((me)->methods->request ? (me)->methods->request(me, r) : millUnknown)
 #   define GLUE_FORMAT(me, s, f) ((me)->methods->format ? (me)->methods->format(me, s, f) : millUnknown)
 #   define GLUE_PURGE(me, w) ((me)->methods->purge ? (me)->methods->purge(me, w) : 0)
+#   define GLUE_FONT(me, f) ((me)->methods->font ? (me)->methods->font(me, f) : millUnknown)
+#   define GLUE_GZOUT(me, g) ((me)->methods->gzOut ? (me)->methods->gzOut(me, g) : millUnknown)
 #endif
 
 static void glue_answer(const MillHost *h, MillRequest *r, short code, const char *why);
@@ -89,13 +103,14 @@ pascal OSErr MILL_ENTRY(short selector, void *params, void **self)
     switch (selector) {
     case millOpen: {
         MillOpenParams *op = (MillOpenParams *)params;
-        /* a Mill older than this kit: say which interface is needed */
-        if (op->interface < kMillInterface) { op->interface = kMillInterface; err = millUnknown; break; }
+        /* a Mill older or newer than this kit: say which interface it has */
+        if (op->interface != kMillInterface) { op->interface = kMillInterface; err = millUnknown; break; }
         me = MILL_NEW(op->host, op->resFile, &op->info);
         if (!me) { err = memFullErr; break; }
         me->host = op->host;
         me->resFile = op->resFile;
         *self = me;
+        op->interface = kMillInterface;    /* which this kit is: Mill opens only its own */
         break;
     }
     case millClose:
@@ -117,8 +132,14 @@ pascal OSErr MILL_ENTRY(short selector, void *params, void **self)
         mp->freed = me ? GLUE_PURGE(me, mp->wanted) : 0;
         break;
     }
-    case millFormatBegin: case millFormatData: case millFormatEnd:
+    case millFormatBegin: case millFormatData: case millFormatEnd: case millFormatPull:
         err = me ? GLUE_FORMAT(me, selector, (MillFormatParams *)params) : paramErr;
+        break;
+    case millFont:
+        err = me ? GLUE_FONT(me, (MillFontParams *)params) : paramErr;
+        break;
+    case millGzOut:
+        err = me ? GLUE_GZOUT(me, (MillGzOutParams *)params) : paramErr;
         break;
     default:
         err = millUnknown;
