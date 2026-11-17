@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''Mill's download site (mill.1in1e6.com), plain HTML 3.2 for classic Macs, built from
-the release files in <site>/download (Install-Mill-VERSION.hqx and .bin, and Mill-VERSION.image,
+the release files in <site>/download (Install-Mill-VERSION.hqx and .bin, and Mill-VERSION.image and .image.bin,
 the Mill Program Disk; older releases have Mill-VERSION.hqx, .bin, and .dsk) and src/changes.html.
 The newest release's list ends with the Mill System Disk, which is not offered: its line links to
 how to make one (SYSTEM_DISK). The disks carry their part numbers (tools/disk.py's for the
@@ -16,7 +16,7 @@ sys.path.insert(0, here)
 from disk import part_number
 # (file name pattern, what it is), in the order they're listed
 KINDS = [('Install-Mill-%s.hqx', 'Install Mill, BinHex'), ('Install-Mill-%s.bin', 'Install Mill, MacBinary'),
-         ('Mill-%s.image', 'Mill Program Disk, disk image'), ('Mill-%s.hqx', 'BinHex'), ('Mill-%s.bin', 'MacBinary'), ('Mill-%s.dsk', 'disk image')]
+         ('Mill-%s.image', 'Mill Program Disk, disk image'), ('Mill-%s.image.bin', 'Mill Program Disk, MacBinary'), ('Mill-%s.hqx', 'BinHex'), ('Mill-%s.bin', 'MacBinary'), ('Mill-%s.dsk', 'disk image')]
 SHOWN = 3   # releases on the page: the newest, and the two before it
 SITE = 'http://mill.1in1e6.com/'
 # How to make the Mill System Disk from your own Apple disks: it holds Apple's System, so it is
@@ -43,7 +43,7 @@ def releases(download):
     """[(version, [(file name, size)])], newest first"""
     found = {}
     for f in os.listdir(download):
-        m = re.match(r'(?:Install-)?Mill-([0-9.]+)\.(hqx|bin|dsk|image)$', f)
+        m = re.match(r'(?:Install-)?Mill-([0-9.]+)\.(hqx|bin|dsk|image|image\.bin)$', f)
         if m:
             found.setdefault(m.group(1), {})[f] = os.path.getsize(os.path.join(download, f))
     out = []
@@ -56,6 +56,7 @@ def links(v, files):
     what = dict((pat % v, w) for pat, w in KINDS)
     if vkey(v) >= [2, 1]:       # the disks before 2.1 have no part number
         what['Mill-%s.image' % v] = 'Mill Program Disk %s, disk image' % part_number(v)
+        what['Mill-%s.image.bin' % v] = 'Mill Program Disk %s, MacBinary' % part_number(v)
     return ['<A HREF="download/%s">%s</A> (%s, %dK)' % (f, f, what[f], (size + 1023) // 1024) for f, size in files]
 
 
