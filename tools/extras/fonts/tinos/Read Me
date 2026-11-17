@@ -1,0 +1,13 @@
+Tinos 1.340, the outlines of Mill Serif (Regular, Bold, and Italic), kept in ../tinos.tar.xz so
+Web Fonts can be rebuilt without a download. The three files are unchanged from the Google Fonts
+build (name table: "Copyright 2026 The Tinos Project Authors", version 1.340), fetched on
+2026-11-16 from google/fonts, ofl/tinos (raw.githubusercontent.com/google/fonts/main/ofl/tinos/);
+fonts.json lists each file's address and SHA-256, and build.py checks them. outlines.py reduces
+them for Mill (Mac Roman only, no hints, 256 units per em) and build.py checks the results'
+SHA-256 too.
+
+Tinos is under the SIL Open Font License 1.1, with no Reserved Font Name; the reduced fonts are a
+Modified Version and stay under it. OFL.txt is the license as Google Fonts gives it for each
+family: the font's own copyright line, then the license text (the same text as in its sister
+families' OFL.txt files). It goes into Web Fonts (TXGZ 129) and its Read Me. Inside Mill the family
+is called Mill Serif.

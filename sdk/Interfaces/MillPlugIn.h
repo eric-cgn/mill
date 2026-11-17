@@ -1,8 +1,12 @@
-/* MillPlugIn.h: how Mill and its Plug-Ins talk. Interface version 1.
+/* MillPlugIn.h: how Mill and its Plug-Ins talk (interface kMillInterface, MillInterface.h).
 
    A Plug-In is a code resource of type 'MPlg' with its entry point at byte 0, in a
    file in the "Mill Plug-Ins" folder next to Mill. It provides protocols, formats,
-   or both.
+   or both; or, in a font file, fonts (see Fonts, below).
+
+   Interface: the file also has an 'MIfc' resource, ID 128, of 2 bytes: the interface
+   it was built for, kMillInterface (MillInterface.h). MillPlugIn.r makes it. Mill reads
+   it before it loads any code, and skips a file without it or with another number.
 
    A protocol is a URL scheme with its own heading and settings under Protocols on
    Mill's settings page. For each request it is given the whole HTTP request and
@@ -16,7 +20,8 @@
    - No int in this interface: short is 16 bits, long is 32.
    - Every call between Mill and a Plug-In uses the pascal convention.
    - Mill calls only the entry point, MillMain. A pointer to any other function
-     inside a Plug-In must never reach Mill.
+     inside a Plug-In must never reach Mill. (What GzData inflates comes back
+     through the entry point too, as millGzOut.)
    - No static or global data that holds an address (a table of strings or
      functions): MPW's and CodeWarrior's code resources can't fix it up. Fill
      such tables in at run time (see Examples/Finger).
@@ -44,14 +49,24 @@
    keeps it loaded while any window shows a page it made or any request to it is
    running. When the last such window closes or goes elsewhere, Mill closes it
    and unloads its code again. Anything that has to outlast a close goes in
-   settings (SetSetting).
+   settings (SetSetting), or with a connection Mill keeps (TcpKeep).
 
-   Settings: each protocol lists its settings in MillProtocol. Mill shows them
-   under that protocol's heading, after its own "Enable" checkbox (SCHEME.enable,
-   on at first), checks them, and saves them; the Plug-In reads them with
-   GetSetting. A protocol that's turned off is never loaded or called for. A protocol that can go through Mill's HTTP proxy
+   Settings: each protocol lists its settings in MillProtocol, and each format in
+   MillFormat. Mill shows them under that protocol's or format's heading, after its
+   own "Enable" checkbox (SCHEME.enable or KEY.enable, on at first), checks them, and
+   saves them; the Plug-In reads them with GetSetting. A protocol that's turned off is
+   never loaded or called for, nor is a format. A protocol that can go through Mill's HTTP proxy
    lists the standard setting (kMillProxySetting) and, when it's on, answers
-   with ProxyRequest instead of its own TCP. */
+   with ProxyRequest instead of its own TCP.
+
+   Parts of files: a request may carry "Range: bytes=first-last" (or "first-", to
+   the end; RFC 2068 14.36), and only ever one range. A protocol that can seek
+   answers 206 Partial Content with Content-Range and just those bytes; one that
+   can't answers 200 with the whole file, as for no Range. A protocol that can seek
+   says so on every file it sends whole: Content-Length and Accept-Ranges: bytes
+   when it knows the size. FileHead writes each of these heads. It gives its
+   blockSize in MillProtocol and lists kMillRandomAccessSetting: Mill reads parts
+   only while that is on. */
 
 #ifndef MILL_PLUGIN_H
 #define MILL_PLUGIN_H
@@ -59,7 +74,7 @@
 #include <Types.h>
 #include <Quickdraw.h>
 
-#define kMillInterface 1
+#include "MillInterface.h"      /* kMillInterface */
 
 /* CR LF, the same with every compiler */
 #define MILL_CRLF "\015\012"
@@ -72,7 +87,10 @@ enum {
     millPurge   = 3,    /* params: MillPurgeParams */
     millFormatBegin = 4,    /* params: MillFormatParams */
     millFormatData  = 5,    /* params: MillFormatParams */
-    millFormatEnd   = 6     /* params: MillFormatParams */
+    millFormatEnd   = 6,    /* params: MillFormatParams */
+    millFormatPull  = 7,    /* params: MillFormatParams */
+    millFont        = 8,    /* params: MillFontParams */
+    millGzOut       = 9     /* params: MillGzOutParams */
 };
 /* A selector a Plug-In doesn't know is answered with millUnknown, so later
    versions of Mill can add selectors without breaking older Plug-Ins. */
@@ -91,8 +109,9 @@ enum {
     millChoice   = 3        /* one of choices */
 };
 
-/* One setting, shown as a row under its protocol's heading. C strings. Saved
-   in Mill Settings as SCHEME.KEY ("ftp.passive"). */
+/* One setting, shown as a row under its protocol's or format's heading. C strings.
+   Saved in Mill Settings as SCHEME.KEY ("ftp.passive"), or a format's KEY.KEY
+   ("png.crc"). */
 typedef struct MillSetting {
     const char *key;        /* letters, digits, and _ */
     const char *label;      /* "Passive mode" */
@@ -108,12 +127,20 @@ typedef struct MillSetting {
 #define kMillProxySetting { "proxy", "Use HTTP Proxy", "Send URLs with HTTP verbs to the configured HTTP proxy", \
                            millCheckbox, "no", 0, 0, NULL }
 
+/* The standard setting for reading parts of files (see Parts of files, above): a
+   checkbox, key "random_access", shown as "Support Random Access", on ("yes") or off
+   ("no") at first */
+#define kMillRandomAccessSetting(dflt) { "random_access", "Support Random Access", \
+                                         "Browse archives in place.", millCheckbox, dflt, 0, 0, NULL }
+
 /* One protocol a Plug-In provides */
 typedef struct MillProtocol {
     const char *scheme;     /* "ftp", lower case */
     const char *heading;    /* its heading under Protocols: "FTP" */
     const char *description;    /* under its Enable row: the protocol, and its version
                                    or RFC ("File Transfer Protocol (RFC 959)") */
+    long blockSize;         /* parts of files: the most it reads well in one request, in
+                               bytes (Mill asks for parts this size); 0 if it can't seek */
     short settingCount;
     const MillSetting *settings;
 } MillProtocol;
@@ -123,9 +150,32 @@ typedef struct MillProtocol {
    it's application/octet-stream, does it go by the address's extension (or, for
    file:, the Finder type). An explicit other type is never overridden.
 
-   A decode is three calls: millFormatBegin, millFormatData for each piece as it
-   arrives, and millFormatEnd. A format never needs its whole input at once.
-   Format Plug-Ins are loaded for a decode and unloaded when it ends.
+   A run starts with millFormatBegin, when the reply's headers and its first bytes
+   are in. Mill gives the input's size (-1 if not known), whether it's seekable,
+   and its first bytes (up to 512; fewer only when that is all of it), and the
+   format answers what Mill is to do with it (MillFormatParams.answer):
+   - millShowNow: Data follows for each piece, from the start (the first bytes
+     again), then End. A picture, HTML, a stream, or a member's bytes.
+   - millBrowseNow: Mill shows the listing, or the member the address names.
+     With pull set, the stream ends and Mill calls millFormatPull once; the format
+     reads with ReadAt and Size (only when seekable). Without it, Data and End
+     follow as for millShowNow.
+   - millBrowseAfterSaving: it can't be browsed from here (an archive whose
+     directory is at its end, from a stream).
+     Mill offers to save it, then to browse the saved copy; reason, if set, says
+     why (Mill says why when the source can't seek).
+   - millSaveOnly: Mill saves it (Save As); an inline picture shows broken.
+   End follows every Begin that returned noErr, whatever the answer.
+   Format Plug-Ins are loaded for a run and unloaded when it ends.
+   What a format writes during Begin is kept, and sent on once Mill has its answer
+   and knows where the output goes; it's dropped if the output goes nowhere (Mill
+   saves the input, or stops).
+
+   Formats are known by key. A format with the key of one Mill already has
+   replaces that one whole: its types, extensions, Finder types, Enable, and
+   settings are the new one's. Mill's own come first, then the Plug-Ins folder's in
+   its order; of several with one key, the last wins. mill://plugins says which
+   replaced which.
 
    What a format gives (MillFormat.gives, one or more):
    - millGivesPicture: when it knows the picture's own size it calls PictureSize,
@@ -134,25 +184,47 @@ typedef struct MillProtocol {
      Mill's picture memory). It then gives pixels at its own size with
      PictureRect, in any order; Mill scales them, and dithers the whole when the
      data ends. Mill keeps the picture only at the size it's drawn.
-   - millGivesElements: HTML, written with Write as it goes. Mill shows it, but
+   - millGivesElements: HTML, written with Write as it goes. Begin may set outType
+     to say its character set ("text/html; charset=macintosh"); Mill reads it so,
+     where it would otherwise guess (a META tag, else UTF-8 if it is, else
+     Latin-1). Mill shows it, but
      the original bytes stay the document (View Source, Save, Back, Reload), the
      HTML's relative addresses go by the original's, and it's never a page the
      Plug-In made (PlugInPage). Where only a picture will do (IMG, BACKGROUND,
      image maps), Mill asks for millGivesPicture only.
    - millGivesStream: other bytes, written with Write, whose type is
-     MillFormatParams.outType, set by millFormatBegin (gzip: "text/plain"...).
-     Mill passes them to the format for that type, and so on. */
+     MillFormatParams.outType, set by millFormatBegin. Mill passes them to the
+     format for that type, and so on. Text a page shows takes its character set
+     from outType too ("text/plain; charset=macintosh").
+   - millGivesMembers: an archive. Mill makes the listing page from Entry calls,
+     and a member is named in the address after "#/":
+     http://host/kit.tar#/docs/readme.txt. Mill fetches the address without its
+     fragment and gives the format the whole of it (url), and the member path
+     meant for it (path): the fragment after "#/", %-decoded, up to any second '#'
+     (an anchor in the member); for an archive inside another, what the outer one
+     left. A path that is empty or ends in '/' asks for the listing: call Entry for
+     every member (Mill shows those in the folder named). Any other path names a
+     member: take names from it until one is a file, set rest to what's left (a
+     pointer into path, "" if nothing), call Entry once for that member, then
+     Write its bytes: its data fork, or with forks set (Mill sets it during that
+     Entry call, to save the member as a Mac file) its data fork and then its
+     resource fork. Mill gives the bytes to the format for the member's type, so
+     an archive inside another continues the path. A member name with a ".." part
+     is refused, never followed. */
 
 enum {
     millGivesPicture  = 1L << 0,
     millGivesElements = 1L << 1,
-    millGivesStream   = 1L << 2
+    millGivesStream   = 1L << 2,
+    millGivesMembers  = 1L << 3
 };
 
 /* One format a Plug-In reads */
 typedef struct MillFormat {
-    const char *key;        /* for its settings, KEY.SETTING: "gif" */
-    const char *heading;    /* its heading under Formats: "GIF" */
+    const char *key;        /* for its settings, KEY.SETTING: "gif"; one that's taken replaces
+                               that format (see Formats) */
+    const char *heading;    /* its heading under Formats: "GIF"; with millGivesMembers, Mill's
+                               dialog calls it "a HEADING archive" */
     const char *description;    /* "Graphics Interchange Format (GIF87a, GIF89a)" */
     const char *types;      /* content types, first is its own, by spaces: "image/gif" */
     const char *extensions; /* by spaces, lower case, no dots: "gif" */
@@ -162,29 +234,114 @@ typedef struct MillFormat {
     const MillSetting *settings;
 } MillFormat;
 
-/* Identifies one decode in calls to the host */
+/* Identifies one run in calls to the host */
 typedef struct MillFormatRun *MillFormatRef;
 
-/* Why a decode ended early (MillFormatParams.cut) */
-enum { millCutNone = 0, millCutStop = 1, millCutLimit = 2, millCutMemory = 3, millCutBroken = 4 };
+/* Why a run ended early (MillFormatParams.cut) */
+enum { millCutNone = 0, millCutStop = 1, millCutLimit = 2, millCutMemory = 3, millCutBroken = 4,
+       millCutClosed = 5 /* the connection closed early (EndedEarly) */ };
 
-/* millFormatBegin, Data, and End: the same block each time */
+/* millFormatBegin's answer (MillFormatParams.answer) */
+enum { millShowNow = 0, millBrowseNow = 1, millBrowseAfterSaving = 2, millSaveOnly = 3 };
+
+/* millFormatBegin, Data, End, and Pull: the same block each time */
 typedef struct MillFormatParams {
     MillFormatRef ref;      /* for host calls (and Write: it's a MillReqRef too) */
     short format;           /* which of the Plug-In's formats, from 0 */
     const char *type;       /* the content type, with its parameters ("; charset=") */
-    const char *url;        /* where it came from */
+    const char *url;        /* where it came from: the whole address, with its fragment */
     short width, height;    /* WIDTH and HEIGHT asked for; 0 if not given */
     long wants;             /* what Mill can use: millGives..., one or more */
-    const char *data;       /* millFormatData: this piece */
+    long size;              /* Begin: the input's length, -1 if not known */
+    short seekable;         /* Begin: nonzero if ReadAt and Size work (and pull may be set) */
+    const char *data;       /* Begin: the first bytes; Data: this piece */
     long len;
-    short cut;              /* millFormatEnd: millCut..., if it ended early */
-    char outType[64];       /* millGivesStream: set by millFormatBegin */
-    void *state;            /* the format's own, for this decode: kept between calls */
+    short answer;           /* Begin, out: millShowNow... */
+    short pull;             /* Begin, out: with millBrowseNow, millFormatPull instead of Data */
+    char reason[100];       /* Begin, out: with millBrowseAfterSaving, why (a sentence), or "" */
+    const char *path;       /* millGivesMembers: the member path for this format ("" lists) */
+    const char *rest;       /* out: what's left of path after the member opened */
+    unsigned long pos;      /* the member's Entry pos, when hasPos: a hint, checked by name */
+    short hasPos;
+    short forks;            /* set during the member's Entry: write both forks */
+    short cut;              /* End: millCut..., if it ended early */
+    char outType[64];       /* set by millFormatBegin: millGivesStream's type; millGivesElements'
+                               "text/html; charset=...", or "" to let Mill guess */
+    void *state;            /* the format's own, for this run: kept between calls */
 } MillFormatParams;
 /* millFormatData returns noErr to go on, millDone when it needs no more, or an
-   error; millFormatEnd follows either way. */
+   error; millFormatEnd follows either way. millFormatPull returns noErr when it
+   has listed or given the member, or an error (fnfErr: no such member). */
 enum { millDone = 1 };
+
+/* One member of an archive, for Entry. Strings are valid for the call. */
+enum { millMemberFile = 0, millMemberFolder = 1, millMemberLink = 2 };
+enum {
+    millMemberMac = 1,      /* fileType, creator, finderFlags, dataLen, and rsrcLen are set */
+    millMemberClosed = 2    /* listed, but it can't be opened (encrypted, or packed a way not read) */
+};
+typedef struct MillEntry {
+    const char *name;       /* its path in the archive, '/' between folders, none at the end */
+    short charset;          /* the name's bytes: millMacRoman, millLatin1, millCP437, millUTF8 */
+    short kind;             /* millMemberFile, Folder, or Link */
+    long size;              /* its length, -1 if not known */
+    long packed;            /* its length in the archive, -1 if not known */
+    unsigned long modified; /* seconds since 1904, 0 if not known */
+    long mode;              /* Unix permission bits, -1 if none */
+    const char *comment;    /* NULL if none */
+    short flags;            /* millMember... */
+    OSType fileType, creator;
+    unsigned short finderFlags;
+    long dataLen, rsrcLen;
+    unsigned long pos;      /* the format's own: Mill hands it back to open this member */
+} MillEntry;
+
+/* ---- Fonts ----------------------------------------------------------------
+   A font file (type 'FFIL' in the Plug-Ins folder, like Web Fonts) may also hold a
+   Plug-In ('MPlg' and 'MIfc' beside its fonts) that draws font families itself, from
+   outlines of its own. Its MillInfo lists them (fontCount, fonts); a family of the same
+   name in the file's FONDs gives the bitmaps. Mill opens it when a run of text first
+   needs it and keeps it until Mill quits, or until memory is short. The font file's
+   resources stay open all along: resFile is the font file's own. It draws only its own
+   families, never the System's fonts, TrueType or not.
+
+   Mill picks what draws each run of text, a size and a style at a time. In a font
+   file's family (Mill Serif, Mill Mono): its bitmaps at their sizes; the Plug-In from
+   minSize to maxSize, in every style; any other size, the nearest of those. A run the
+   Plug-In draws is measured and drawn with millFont in place of QuickDraw's text calls:
+   - millFontOpen: get ready to draw font at size in face. An error if it can't (no
+     memory): Mill uses the nearest bitmap then.
+   - millFontWidth: text's width in pixels, as Draw would advance.
+   - millFontDraw: draw text in the current port from pen, on the baseline, in mode
+     (srcOr; srcBic for white text on a dark background), and give its width.
+   A face without outlines is the Plug-In's to make (Web Fonts: bold italic is the
+   italic made bold, as QuickDraw makes it: one pixel wider). Mill draws underlines.
+   millFontOpen also gives the size's ascent, descent, and leading, which Mill makes
+   lines of; at a bitmap size, the bitmap's own (GetFontInfo). millPurge is a good
+   time to free what it keeps of drawn letters. */
+
+/* One family a Plug-In draws */
+typedef struct MillFont {
+    const char *name;       /* "Mill Serif" */
+    short minSize, maxSize; /* the sizes it draws, in points (pixels per em) */
+    short fixed;            /* nonzero if every letter is one width */
+} MillFont;
+
+enum { millFontOpen = 0, millFontWidth = 1, millFontDraw = 2 };
+
+/* millFont */
+typedef struct MillFontParams {
+    short what;             /* millFontOpen, Width, or Draw */
+    short font;             /* which of MillInfo's fonts, from 0 */
+    short size;             /* in points */
+    short face;             /* bold 1 and italic 2, as QuickDraw's */
+    const unsigned char *text;  /* Width and Draw: Mac Roman */
+    long len;
+    Point pen;              /* Draw: where the baseline starts, in the port's coordinates */
+    short mode;             /* Draw: srcOr or srcBic */
+    long width;             /* out: Width and Draw */
+    short ascent, descent, leading; /* out: Open, in pixels, as FontInfo's */
+} MillFontParams;
 
 /* Flags in MillInfo */
 enum {
@@ -205,12 +362,19 @@ typedef struct MillInfo {
     const MillProtocol *protocols;
     short formatCount;
     const MillFormat *formats;
+    short fontCount;        /* in a font file (see Fonts) */
+    const MillFont *fonts;
 } MillInfo;
 
 /* Identifies one request in calls to the host; Mill's own, not to be looked into */
 typedef struct MillRequestRef *MillReqRef;
 /* An open TCP connection */
 typedef long MillConn;
+/* The most a kept connection's note (and its bye) may hold: TcpKeep */
+#define kMillNoteMax 512
+/* One inflate (GzBegin), and the memory it needs */
+typedef struct MillGz *MillGzRef;
+#define kMillGzMem 36864L
 
 /* The functions Mill provides. Valid from millOpen until millClose. */
 typedef struct MillHost {
@@ -248,6 +412,32 @@ typedef struct MillHost {
     pascal OSErr (*TcpListen)(MillReqRef r, unsigned long *addr, unsigned short *port, MillConn *conn);
     pascal OSErr (*TcpAccept)(MillConn conn);
 
+    /* Kept connections. Between requests each window may keep one idle connection,
+       to its page's server, so the next page there needn't connect and log in again.
+       The key is the address's scheme, host, and port, and login: a string the
+       Plug-In makes from who it logged in as ("" for anonymous); Mill only
+       compares it.
+       TcpKept gives the window's kept connection for this address and login, with
+       the note it was kept with (*noteLen: in, the room in note; out, its length),
+       and it works like one from TcpOpen. fnfErr if there's none (*conn 0): open
+       one with TcpOpen as usual.
+       TcpKeep: when the request ends, keep conn instead of closing it, with a note
+       of up to kMillNoteMax bytes (what state it's in: "logged in, in /pub") and
+       bye, sent if Mill closes it later (FTP's "QUIT" CR LF), up to kMillNoteMax
+       too. Call it once the conversation is at rest, nothing left unread. Mill
+       keeps it only if the request ends without being stopped, and only for the
+       window's page (an image's request may give back the kept connection it was
+       given, but not keep a new one). TcpClose on it after cancels the keeping.
+       Mill closes a kept connection after the idle time in its settings, when the
+       window goes to another server or closes, on Clear Logins, and on Quit. One
+       that the server has closed or spoken on meanwhile is never given out.
+       If a kept connection fails before anything comes back on it, Mill asks the
+       Plug-In again, once, with a new connection (GET only, never POST); whatever
+       it wrote or said (Fail, AskLogin) the first time is dropped. */
+    pascal OSErr (*TcpKept)(MillReqRef r, const char *login, MillConn *conn, void *note, long *noteLen);
+    pascal void (*TcpKeep)(MillReqRef r, MillConn conn, const char *login, const void *note, long noteLen,
+                           const void *bye, long byeLen);
+
     /* The response: status line, headers, blank line, then the body, in pieces
        of any size. Returns 0 when Mill wants no more (stopped, or over the page
        limit); finish up then. Moves memory. */
@@ -260,9 +450,10 @@ typedef struct MillHost {
     /* millNoProxy also when the proxy is off, or the host is one of its
        exclusions: go direct then. */
 
-    /* A protocol's settings: those it lists, and any others it keeps for
-       itself (not shown). GetSetting returns the value's length (the default
-       if unchanged), or -1 if there's none. SetSetting moves memory. */
+    /* A protocol's or a format's settings (by scheme, or by format key): those it
+       lists, and any others it keeps for itself (not shown). GetSetting returns the
+       value's length (the default if unchanged), or -1 if there's none. SetSetting
+       moves memory. */
     pascal long (*GetSetting)(const char *scheme, const char *key, char *out, long size);
     pascal OSErr (*SetSetting)(const char *scheme, const char *key, const char *value);
 
@@ -274,6 +465,16 @@ typedef struct MillHost {
        wanted; Printf writes to the response, like Write. */
     pascal long (*Format)(char *out, long size, const char *fmt, const long *args);
     pascal short (*Printf)(MillReqRef r, const char *fmt, const long *args);
+
+    /* The head of a reply that carries a file of size bytes (-1 if unknown) as type,
+       blank line and all (see Parts of files, above): 206 with Content-Range if the
+       request asks for a part of it, else 200, and Content-Length and Accept-Ranges:
+       bytes when the size is known. Returns 1 for a part, 0 for the whole; either way
+       send the bytes *first to *last (-1 when the size is unknown: all there is). A
+       range that starts past the end is ignored, as RFC 2068 has it. With type NULL
+       it writes nothing, only says which bytes, to ask for them first (FTP's REST);
+       then call it again with the type and the same size. Moves memory. */
+    pascal short (*FileHead)(MillReqRef r, const char *type, long size, long *first, long *last);
 
     /* Helpers a Plug-In may use or ignore. Each returns the length written to
        out, or -1 if not found or it won't fit. */
@@ -319,6 +520,15 @@ typedef struct MillHost {
        the first call on, or never) */
     pascal void (*PictureRect)(MillFormatRef f, short x, short y, short w, short h,
                                const unsigned char *gray, const unsigned char *opaque);
+    /* Formats (millGivesMembers): a member, listed or about to be given (see Formats).
+       Returns noErr to go on, or userCanceledErr to stop. Moves memory. */
+    pascal OSErr (*Entry)(MillFormatRef f, const MillEntry *e);
+    /* Formats, in millFormatPull: len bytes at offset into buf; the count read (fewer
+       only at the end), or -1 if the read failed (end then, returning ioErr). Mill
+       reads whole blocks of the protocol's size and keeps the last, so small reads
+       near each other cost little. Size: the input's length. Both move memory. */
+    pascal long (*ReadAt)(MillFormatRef f, unsigned long offset, void *buf, long len);
+    pascal long (*Size)(MillFormatRef f);
 
     /* The content type for a file name, from Mill's own table and every format's
        extensions ("application/octet-stream" if none), and for a Finder type
@@ -349,6 +559,11 @@ typedef struct MillHost {
        may call it too: its decode just stops, with no alert. */
     pascal void (*Fail)(MillReqRef r, const char *text);
 
+    /* The response ended early (the connection closed before all of it came): Mill
+       shows what was written, marked as cut off, as after Stop, and doesn't save it
+       to a file. Write nothing after it. */
+    pascal void (*EndedEarly)(MillReqRef r);
+
     /* Logins. A Plug-In names who is asking for one with a loginKey: a string
        Mill never reads, only compares, so a protocol makes it say what it
        needs (which server, which realm, which proxy) and keeps it the same each
@@ -376,7 +591,28 @@ typedef struct MillHost {
     /* The login kept under loginKey (or just typed for it): nonzero if there's
        one. Whether to send it before being asked is the Plug-In's choice. */
     pascal short (*SavedLogin)(const char *loginKey, char *name, long nameSize, char *password, long passwordSize);
+
+    /* Inflate: deflate data (RFC 1951), in a gzip file (RFC 1952) unless raw, read as
+       it comes, for request r (a format's run: its MillFormatRef). mem is the caller's, kMillGzMem bytes or more (the 32K window and
+       the state), and stays so: free it after GzEnd. ref comes back with the output,
+       which Mill gives through the entry point (millGzOut) in pieces of up to 1K, during
+       GzData. GzBegin: NULL if memSize is too small. GzData, with each piece: 0 to go on,
+       1 at the end of the data (of the first member, for gzip), -1 for data it can't
+       read, -2 if millGzOut said to stop. GzUnused, after 1: how many bytes at the end
+       of that piece weren't deflate data (a gzip trailer, or what follows). */
+    pascal MillGzRef (*GzBegin)(MillReqRef r, void *mem, long memSize, short raw, void *ref);
+    pascal short (*GzData)(MillGzRef gz, const void *data, long len);
+    pascal long (*GzUnused)(MillGzRef gz);
+    pascal void (*GzEnd)(MillGzRef gz);
 } MillHost;
+
+/* millGzOut: inflated bytes for the ref given to GzBegin. Return noErr to go on,
+   anything else to stop (GzData returns -2). */
+typedef struct MillGzOutParams {
+    void *ref;
+    const unsigned char *data;
+    long len;
+} MillGzOutParams;
 
 /* Mill's shared listing icons: 'ics#' resources (a 16x16 picture and its mask)
    in Mill, so every Plug-In can show them as
@@ -396,8 +632,8 @@ enum {
     kMillIconLink = 73
 };
 
-/* For ToMacRoman */
-enum { millGuess = 0, millLatin1 = 2, millUTF8 = 3 };
+/* For ToMacRoman, and MillEntry.charset (millMacRoman and millCP437 there only) */
+enum { millGuess = 0, millMacRoman = 1, millLatin1 = 2, millUTF8 = 3, millCP437 = 4 };
 
 /* Answers from From() */
 enum {
@@ -411,7 +647,8 @@ enum {
 /* millOpen. The first two fields never change in any version, so Mill and a
    Plug-In can always agree on which interface they share. */
 typedef struct MillOpenParams {
-    long interface;         /* in: Mill's kMillInterface */
+    long interface;         /* in: Mill's kMillInterface; out: the Plug-In's (Mill opens
+                               only Plug-Ins made for its own) */
     const MillHost *host;   /* in */
     short resFile;          /* in: the Plug-In file's resource refnum */
     MillInfo info;          /* out */
@@ -481,8 +718,10 @@ typedef struct MillMethods {
     void (*close)(MillPlugIn *self);                        /* free self */
     OSErr (*request)(MillPlugIn *self, MillRequest *r);     /* protocols; else NULL */
     long (*purge)(MillPlugIn *self, long wanted);           /* may be NULL */
-    /* formats (else NULL): millFormatBegin, millFormatData, or millFormatEnd */
+    /* formats (else NULL): millFormatBegin, Data, End, or Pull */
     OSErr (*format)(MillPlugIn *self, short selector, MillFormatParams *f);
+    OSErr (*font)(MillPlugIn *self, MillFontParams *f);    /* fonts; else NULL */
+    OSErr (*gzOut)(MillPlugIn *self, MillGzOutParams *g);  /* with GzBegin; else NULL */
 } MillMethods;
 
 struct MillPlugIn {

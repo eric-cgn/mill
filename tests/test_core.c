@@ -9,6 +9,7 @@
 #include "../src/core/cookie.h"
 #include "../src/core/filetypes.h"
 #include "../src/core/fmt.h"
+#include "../src/core/fontsize.h"
 #include "../src/core/form.h"
 #include "../src/core/html.h"
 #include "../src/core/imagemap.h"
@@ -16,6 +17,7 @@
 #include "../src/core/inflate.h"
 #include "../src/core/macenc.h"
 #include "../src/core/picture.h"
+#include "../src/core/resume.h"
 #include "../src/core/layout.h"
 #include "../src/core/update.h"
 #include "../src/core/url.h"
@@ -46,7 +48,7 @@ static int failures = 0;
 
 static long fake_width(void *ctx, const MStyle *s, const char *t, long len) { (void)ctx; (void)t; return len * s->size / 2; }
 static void fake_metrics(void *ctx, const MStyle *s, short *a, short *d, short *l) { (void)ctx; *a = s->size * 3 / 4; *d = s->size / 4; *l = 1; }
-static Metrics M = { fake_width, fake_metrics, NULL, NULL, NULL, NULL, NULL, 0, 0 };
+static Metrics M = { fake_width, fake_metrics, NULL, NULL, NULL, NULL, NULL, 0, 0, NULL };
 
 static char *slurp(const char *path, long *len)
 {
@@ -85,6 +87,12 @@ static void test_charset(void)
     }
     CHECK(charset_named("UTF-8", 5) == CHARSET_UTF8 && charset_named("iso-8859-1", 10) == CHARSET_LATIN1);
     CHECK(charset_named("shift_jis", 9) == CHARSET_GUESS);
+    /* the character set a format's output type says (MillFormatParams.outType) */
+    CHECK(charset_of_type("text/plain; charset=macintosh") == CHARSET_MAC);
+    CHECK(charset_of_type("text/html;CHARSET=\"UTF-8\"") == CHARSET_UTF8);
+    CHECK(charset_of_type("text/html; level=3; charset=iso-8859-1") == CHARSET_LATIN1);
+    CHECK(charset_of_type("text/html") == CHARSET_GUESS && charset_of_type("") == CHARSET_GUESS && charset_of_type(NULL) == CHARSET_GUESS);
+    CHECK(charset_of_type("text/plain; charset=") == CHARSET_GUESS && charset_of_type("text/plain; charset=koi8-r") == CHARSET_GUESS);
     CHECK(charset_sniff("caf\xC3\xA9", 5) == CHARSET_UTF8);
     CHECK(charset_sniff("caf\xE9", 4) == CHARSET_LATIN1);
     CHECK(charset_sniff("plain", 5) == CHARSET_LATIN1);
@@ -247,10 +255,37 @@ static void test_pre_tabs(void)
         if (d.text[r->text] == 'c') x_c = r->x;
         if (d.text[r->text] == 'd') x_d = r->x;
     }
-    /* the fake font is 5 wide for a space: stops every 40 from the left margin, 8 */
-    CHECK(x_b == 8 + 40);
-    CHECK(x_c == 8 + 80);          /* "12345678" is 8 characters, 40 wide: the next stop is 80 */
-    CHECK(x_d == 8 + 40);
+    /* the fake font at 12 is 6 wide for a space: stops every 48 from the left margin, 8 */
+    CHECK(x_b == 8 + 48);
+    CHECK(x_c == 8 + 96);          /* "12345678" is 8 characters, 48 wide: the next stop is 96 */
+    CHECK(x_d == 8 + 48);
+    layout_free(&L);
+    html_free(&d);
+}
+
+/* HTML sizes 1 to 7 are 9, 10, 12, 14, 18, 24, and 36 points, one to one, in PRE as elsewhere */
+static void test_size_ladder(void)
+{
+    static const short pt[7] = { 9, 10, 12, 14, 18, 24, 36 };
+    const char *html = "<FONT SIZE=1>a1</FONT><FONT SIZE=2>a2</FONT><FONT SIZE=3>a3</FONT><FONT SIZE=4>a4</FONT>"
+                       "<FONT SIZE=5>a5</FONT><FONT SIZE=6>a6</FONT><FONT SIZE=7>a7</FONT>"
+                       "<PRE><FONT SIZE=1>b1</FONT><FONT SIZE=2>b2</FONT><FONT SIZE=3>b3</FONT><FONT SIZE=4>b4</FONT>"
+                       "<FONT SIZE=5>b5</FONT><FONT SIZE=6>b6</FONT><FONT SIZE=7>b7</FONT></PRE><PRE>b0</PRE>";
+    Doc d;
+    Layout L;
+    const Run *a, *b;
+    char w[3] = "a1";
+    int k;
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(layout_doc(&L, &d, &M, 2000) == 0);
+    for (k = 0; k < 7; k++) {
+        w[0] = 'a'; w[1] = (char)('1' + k); a = find(&L, &d, w);
+        w[0] = 'b'; b = find(&L, &d, w);
+        CHECK(a && a->size == pt[k] && a->font == FONT_PROP);
+        CHECK(b && b->size == pt[k] && b->font == FONT_FIXED);
+    }
+    b = find(&L, &d, "b0");
+    CHECK(b && b->size == 12);                                  /* a bare PRE is size 3 */
     layout_free(&L);
     html_free(&d);
 }
@@ -293,7 +328,7 @@ static void test_zoom(void)
     }
     CHECK(nine0 == 9 && nine2 == 18 && nine4 == 36);          /* HTML size 1: 9 points, times the factor */
     CHECK(big0 == 36 && big4 == 144);                          /* size 7 at step 6 is 144 */
-    CHECK(pre0 == 10 && pre4 == 40);
+    CHECK(pre0 == 12 && pre4 == 48);                          /* PRE is size 3 too */
     CHECK(x0 == 8 && x2 == 16 && x4 == 32);                   /* the page margin */
     CHECK(img0 && img2 && img4);
     if (img0 && img2 && img4) {                                /* width and height plus the border, scaled together */
@@ -723,7 +758,6 @@ static int image_decode(const unsigned char *d, long len, short w, short h, Bitm
     s.ref = &t; s.size = tp_size; s.drawn = tp_drawn; s.rect = tp_rect;
     if (len >= 4 && !memcmp(d, "GIF8", 4)) { begin = gif_begin; data = gif_data; end = gif_end; }
     else if (len >= 2 && d[0] == 0xFF && d[1] == 0xD8) { begin = jpeg_begin; data = jpeg_data; end = jpeg_end; }
-    else if (len >= 2 && d[0] == 'P') { begin = pnm_begin; data = pnm_data; end = pnm_end; }
     else return -1;
     if (!(dec = begin(&s))) return IMAGE_NO_MEMORY;
     while (pos < len && r == 0) {
@@ -760,34 +794,6 @@ static int image_dims(const unsigned char *d, long len, short *w, short *h)
     return 0;
 }
 
-static void test_pnm(void)
-{
-    static const char *const plain[] = { "P1\n# a comment\n3 2\n1 0 1\n0 1 0\n", "P1 3 2 101010" };
-    static const unsigned char raw[] = { 'P', '4', ' ', '3', ' ', '2', '\n', 0xA0, 0x40 };
-    static const unsigned char gray[] = { 'P', '5', ' ', '2', ' ', '1', ' ', '2', '5', '5', '\n', 0, 255 };
-    static const unsigned char rgb[] = { 'P', '6', '\n', '1', ' ', '1', '\n', '2', '5', '5', '\n', 255, 255, 255 };
-    static const char *const ppm_plain = "P3 2 1 15 0 0 0 15 15 15\n";
-    Bitmap1 b;
-    int k;
-    for (k = 0; k < 2; k++) {
-        CHECK(image_decode((const unsigned char *)plain[k], strlen(plain[k]), 0, 0, &b, NULL, NULL) == 0);
-        CHECK(b.w == 3 && b.h == 2 && b.bits[0] == 0xA0 && b.bits[2] == 0x40 && !b.mask);
-        image_free(&b);
-    }
-    for (piece = 1; piece <= 9; piece += 8) {
-        CHECK(image_decode(raw, sizeof raw, 0, 0, &b, NULL, NULL) == 0 && b.w == 3 && b.h == 2 && b.bits[0] == 0xA0 && b.bits[2] == 0x40);
-        image_free(&b);
-    }
-    piece = 7;
-    CHECK(image_decode(gray, sizeof gray, 0, 0, &b, NULL, NULL) == 0 && b.w == 2 && b.h == 1 && b.bits[0] == 0x80);
-    image_free(&b);
-    CHECK(image_decode(rgb, sizeof rgb, 0, 0, &b, NULL, NULL) == 0 && b.w == 1 && b.h == 1 && b.bits[0] == 0);
-    image_free(&b);
-    CHECK(image_decode((const unsigned char *)ppm_plain, strlen(ppm_plain), 0, 0, &b, NULL, NULL) == 0 && b.w == 2 && b.bits[0] == 0x80);
-    image_free(&b);
-    CHECK(image_decode((const unsigned char *)"P7 1 1", 6, 0, 0, &b, NULL, NULL) == -1 && !b.bits);
-}
-
 typedef struct { unsigned char *buf; long len; } Collected;
 static int gz_collect(void *ref, const unsigned char *p, long n)
 {
@@ -797,6 +803,20 @@ static int gz_collect(void *ref, const unsigned char *p, long n)
     c->len += n;
     return 0;
 }
+
+/* Memory from one block, as Mill's GzBegin takes it (mac_plugin.c) */
+typedef struct { unsigned char *p; long used, size; } Carve;
+static void *carve(void *ref, long n)
+{
+    Carve *c = ref;
+    void *q;
+    n = (n + 3) & ~3L;
+    if (c->used + n > c->size) return NULL;
+    q = c->p + c->used;
+    c->used += n;
+    return q;
+}
+static void carve_keep(void *ref, void *p) { (void)ref; (void)p; }
 
 static void test_inflate(void)
 {
@@ -835,6 +855,33 @@ static void test_inflate(void)
         CHECK(gz_data(d, (const unsigned char *)"not gzip", 8) == -1);
         gz_end(d);
         free(c.buf);
+    }
+    {
+        /* A Plug-In's inflate (the host's GzBegin): all of it in the caller's kMillGzMem
+           (36864) bytes, after Mill's own few at the start (64 here, for a host's pointers) */
+        static unsigned char block[36864];
+        Carve cv;
+        GzMem mem;
+        Collected c = { NULL, 0 };
+        long gzlen, want_len;
+        unsigned char *gz = (unsigned char *)slurp("tests/fixtures/inflate-9.txt.gz", &gzlen);
+        unsigned char *want = (unsigned char *)slurp("tests/fixtures/inflate.txt", &want_len);
+        void *d;
+        CHECK(64 + gz_size() + 4 <= (long)sizeof block);
+        cv.p = block;
+        cv.used = 64;
+        cv.size = sizeof block;
+        mem.ref = &cv;
+        mem.alloc = carve;
+        mem.release = carve_keep;
+        CHECK((d = gz_begin_with(&mem, 0, gz_collect, &c)) != NULL);
+        if (d && gz && want) {
+            CHECK(gz_data(d, gz, gzlen) == 1 && c.len == want_len && !memcmp(c.buf, want, want_len));
+            gz_end(d);
+        }
+        free(c.buf);
+        free(gz);
+        free(want);
     }
 }
 
@@ -921,7 +968,7 @@ static void test_forms(void)
         if (f->type == FIELD_SUBMIT) go = i;
     }
     CHECK(text >= 0 && r1 >= 0 && r2 >= 0 && area >= 0 && sel >= 0 && go >= 0);
-    if (area >= 0) CHECK(!strcmp(F.fields[area].value, "line <B>one</B>\nline two"));
+    if (area >= 0) CHECK(!strcmp(F.fields[area].value, "line <B>one</B>\rline two"));   /* a Mac line break, for TextEdit */
     if (sel >= 0) CHECK(F.fields[sel].noptions == 2 && !F.fields[sel].selected[0] && F.fields[sel].selected[1]);
     CHECK(forms_find(&F, F.fields[3].node) == 3);
 
@@ -939,7 +986,7 @@ static void test_forms(void)
     CHECK(F.fields[r1].checked && !F.fields[r2].checked && !strcmp(F.fields[text].value, "caf\x8E au lait"));
     CHECK(!forms_changed(&F, &d));
     /* what counts as a change: typing, a choice, a checkbox; not a value typed back */
-    forms_set_value(&F.fields[area], "line <B>one</B>\nline two");
+    forms_set_value(&F.fields[area], "line <B>one</B>\rline two");
     CHECK(!forms_changed(&F, &d));
     forms_set_value(&F.fields[area], "other");
     CHECK(forms_changed(&F, &d));
@@ -981,6 +1028,44 @@ static void test_forms(void)
     for (i = q = 0; i < L.nruns; i++) if (L.runs[i].kind == RUN_CONTROL) q++;
     CHECK(q == 10);
     layout_free(&L);
+    forms_free(&F);
+    html_free(&d);
+}
+
+/* A textarea's line breaks: the page's (LF, or CR LF) shown as TextEdit's CR, and every
+   one, the page's or typed, sent as CR LF, in a GET, a POST, and multipart */
+static void test_textarea_lines(void)
+{
+    Doc d;
+    Forms F;
+    Submission sub;
+    const char *html =
+        "<FORM ACTION=/get><TEXTAREA NAME=a>Some text\non two lines</TEXTAREA>"
+        "<TEXTAREA NAME=b>one\r\ntwo\r\n</TEXTAREA></FORM>"
+        "<FORM METHOD=post ACTION=/post><TEXTAREA NAME=c>x\ny</TEXTAREA></FORM>"
+        "<FORM METHOD=post ENCTYPE=\"multipart/form-data\"><TEXTAREA NAME=m>p\nq</TEXTAREA></FORM>";
+    CHECK(html_parse(&d, html, strlen(html)) == 0);
+    CHECK(forms_build(&F, &d) == 0);
+    CHECK(F.n == 4);
+    if (F.n != 4) { forms_free(&F); html_free(&d); return; }
+    CHECK(!strcmp(F.fields[0].value, "Some text\ron two lines"));
+    CHECK(!strcmp(F.fields[1].value, "one\rtwo\r"));
+    CHECK(!forms_changed(&F, &d));
+
+    CHECK(forms_submit(&F, &d, F.fields[0].form, -1, 0, 0, &sub) == 0);
+    CHECK(!sub.post && !strcmp(sub.data, "a=Some+text%0D%0Aon+two+lines&b=one%0D%0Atwo%0D%0A"));
+    submission_free(&sub);
+
+    /* typed in TextEdit: CR */
+    forms_set_value(&F.fields[2], "typed\rin two");
+    CHECK(forms_changed(&F, &d));
+    CHECK(forms_submit(&F, &d, F.fields[2].form, -1, 0, 0, &sub) == 0);
+    CHECK(sub.post && !sub.multipart && !strcmp(sub.data, "c=typed%0D%0Ain+two"));
+    submission_free(&sub);
+
+    CHECK(forms_submit(&F, &d, F.fields[3].form, -1, 0, 0, &sub) == 0);
+    CHECK(sub.multipart && sub.nparts == 1 && !strcmp(sub.parts[0].value, "p\r\nq"));
+    submission_free(&sub);
     forms_free(&F);
     html_free(&d);
 }
@@ -1142,6 +1227,12 @@ static void test_filetypes(void)
     int i;
     unsigned short crc = 0;
     check_type(FILETYPES_DEFAULT, "application/octet-stream", "Tool.sit", "SIT!/SITx");
+    /* a Mac's TEXT file is Mac Roman (an archive's member, read-me.bin's) */
+    CHECK(!strcmp(mac_text_type("text/plain"), "text/plain; charset=macintosh"));
+    CHECK(!strcmp(mac_text_type("application/octet-stream"), "text/plain; charset=macintosh"));
+    CHECK(!strcmp(mac_text_type("Text/HTML"), "text/html; charset=macintosh"));
+    CHECK(!strcmp(mac_text_type("text/htmlx"), "text/plain; charset=macintosh"));
+    CHECK(charset_of_type(mac_text_type("text/plain")) == CHARSET_MAC);
     check_type(FILETYPES_DEFAULT, "text/plain", "Tool.HQX", "TEXT/SITx");          /* names before types */
     check_type(FILETYPES_DEFAULT, "application/mac-binhex40; x=y", "get", "TEXT/SITx");
     check_type(FILETYPES_DEFAULT, "text/html", "index.html", "TEXT/ttxt");
@@ -1190,6 +1281,44 @@ static void test_filetypes(void)
     CHECK(macbinary_header(h, &mb) == -1);
 }
 
+static void test_member_urls(void)
+{
+    char path[300];
+    const char *z = "http://h/a/kit.zip#/docs/page.html";
+    /* relative links in a member resolve against the path after "#/" */
+    check_resolve(z, "pic.gif", "http://h/a/kit.zip#/docs/pic.gif");
+    check_resolve(z, "sub/x.html#p2", "http://h/a/kit.zip#/docs/sub/x.html#p2");
+    check_resolve(z, "../top.html", "http://h/a/kit.zip#/top.html");
+    check_resolve(z, "../../../out.html", "http://h/a/kit.zip#/out.html");    /* never above the archive */
+    check_resolve(z, "..", "http://h/a/kit.zip#/");
+    check_resolve(z, "./", "http://h/a/kit.zip#/docs/");
+    check_resolve(z, "#part2", "http://h/a/kit.zip#/docs/page.html#part2");
+    check_resolve("http://h/a/kit.zip#/docs/page.html#old", "#new", "http://h/a/kit.zip#/docs/page.html#new");
+    check_resolve(z, "/b/other.zip", "http://h/b/other.zip");     /* the server's, not the archive's */
+    check_resolve(z, "http://x/y.zip#/z", "http://x/y.zip#/z");
+    check_resolve(z, "mailto:a@b", NULL);
+    check_resolve("http://h/k.tar.gz#/kit.tar/docs/a.html", "b.html", "http://h/k.tar.gz#/kit.tar/docs/b.html");
+    check_resolve("http://h/kit.zip#/", "docs/", "http://h/kit.zip#/docs/");
+    check_resolve("file:///Disk/kit.zip#/a%20b/c.html", "d%20e.html", "file:///Disk/kit.zip#/a%20b/d%20e.html");
+    /* a long member path survives an absolute link (Url's fragment is short) */
+    check_resolve("http://h/", "http://h/k.zip#/a-folder-with-a-long-name/another-folder-with-a-long-name/file.txt",
+                  "http://h/k.zip#/a-folder-with-a-long-name/another-folder-with-a-long-name/file.txt");
+    /* the document's part, and the anchor */
+    CHECK(url_doc_len("http://h/k.zip#/d/p.html#x") == strlen("http://h/k.zip#/d/p.html"));
+    CHECK(url_doc_len("http://h/p.html#x") == strlen("http://h/p.html"));
+    CHECK(url_doc_len("http://h/p.html") == strlen("http://h/p.html"));
+    CHECK(!strcmp(url_anchor("http://h/k.zip#/d/p.html#x"), "x"));
+    CHECK(!strcmp(url_anchor("http://h/k.zip#/d/p.html"), ""));
+    CHECK(!strcmp(url_anchor("http://h/p.html#top"), "top"));
+    /* the member path, decoded */
+    CHECK(url_member("http://h/k.zip#/a%20b/c.txt#y", path, sizeof path) && !strcmp(path, "a b/c.txt"));
+    CHECK(url_member("http://h/k.zip#/", path, sizeof path) && !strcmp(path, ""));
+    CHECK(!url_member("http://h/k.zip#top", path, sizeof path) && !path[0]);
+    CHECK(!url_member("http://h/k.zip", path, sizeof path));
+    CHECK(url_member_encode("a b/c#d%e.txt", path, sizeof path) > 0 && !strcmp(path, "a%20b/c%23d%25e.txt"));
+    CHECK(url_member_encode("x", path, 1) == -1);
+}
+
 static void test_urls(void)
 {
     const char *b = "http://www.example.com/news/story.html";
@@ -1234,6 +1363,20 @@ static void test_urls(void)
         CHECK(url_parse("http://h:/", &u) == 0 && u.port == 0);
         CHECK(url_parse("http://:80/", &u) == -1);
         /* Plug-In schemes, once Mill knows them */
+        /* only a scroll: a link to a #name on the page shown, or Back and Forward on it; never Reload */
+        CHECK(url_scroll_only("http://h/a#x", "http://h/a", URL_OPEN_LINK));
+        CHECK(!url_scroll_only("http://h/a", "http://h/a", URL_OPEN_LINK));
+        CHECK(!url_scroll_only("http://h/b#x", "http://h/a", URL_OPEN_LINK));
+        CHECK(url_scroll_only("http://h/a", "http://h/a#x", URL_OPEN_HISTORY));
+        CHECK(!url_scroll_only("http://h/ab", "http://h/a", URL_OPEN_HISTORY));
+        CHECK(!url_scroll_only("time://time.nist.gov/", "time://time.nist.gov/", URL_OPEN_RELOAD));
+        CHECK(!url_scroll_only("http://h/a#x", "http://h/a#x", URL_OPEN_RELOAD));
+        /* members of archives: another member is another page; an anchor in one is a scroll */
+        CHECK(!url_scroll_only("http://h/k.zip#/b.html", "http://h/k.zip#/a.html", URL_OPEN_LINK));
+        CHECK(!url_scroll_only("http://h/k.zip#/", "http://h/k.zip", URL_OPEN_LINK));
+        CHECK(!url_scroll_only("http://h/k.zip#/a.html", "http://h/k.zip#/", URL_OPEN_HISTORY));
+        CHECK(url_scroll_only("http://h/k.zip#/a.html#p", "http://h/k.zip#/a.html", URL_OPEN_LINK));
+        CHECK(url_scroll_only("http://h/k.zip#/a.html", "http://h/k.zip#/a.html#p", URL_OPEN_HISTORY));
         url_schemes("gopher ftp");
         CHECK(url_parse("Gopher://Floodgap.com/1/world", &u) == 0 && u.scheme == SCHEME_OTHER && !strcmp(u.name, "gopher") &&
               !strcmp(u.host, "Floodgap.com") && u.port == 0 && url_port(&u) == 0 && !strcmp(u.path, "/1/world"));
@@ -1884,6 +2027,9 @@ static void test_format(void)
     CHECK(mill_format(out, sizeof out, "%.*s /", a) == 5 && !strcmp(out, "GET /"));
     a[0] = 4000000000UL;
     CHECK(mill_format(out, sizeof out, "%lu", a) == 10 && !strcmp(out, "4000000000"));
+    /* "4K of 4K" only when it's all in */
+    CHECK(done_k(4000, 4000) == 4 && done_k(3999, 4000) == 3 && done_k(4095, 4096) == 3 && done_k(4096, 4096) == 4);
+    CHECK(done_k(0, 4000) == 0 && done_k(1, 0) == 1 && done_k(5000, 4000) == 4);
 }
 
 static void test_macenc(void)
@@ -1917,11 +2063,130 @@ static void test_macenc(void)
     }
 }
 
+/* A System of 1-bit Times (9 10 12 14 18 24), with Web Fonts' Mill Serif (the ladder, 36 too,
+   in plain and real bold) or with TrueType (Times, Times Bold, and Times Italic outlines; tt 2:
+   a run of 10 point or less, Times Bold's left out, as sys_has does): 1 the System's strike,
+   2 Web Fonts', 3 an outline in the style */
+typedef struct { int pack, tt; } TFonts;
+static int t_times(void *ctx, short n, int style)
+{
+    const TFonts *t = ctx;
+    int ladder = n == 9 || n == 10 || n == 12 || n == 14 || n == 18 || n == 24;
+    if (!style) {
+        if (ladder || t->tt) return 1;
+        return t->pack && n == 36 ? 2 : 0;
+    }
+    if (t->tt && (style == 2 || (style == 1 && t->tt == 1))) return 3;
+    return t->pack && style == 1 && (ladder || n == 36) ? 2 : 0;
+}
+static int t_none(void *ctx, short n, int style) { (void)ctx; (void)n; (void)style; return 0; }
+
+static void test_nearest_size(void)
+{
+    TFonts sys = { 0, 0 }, pack = { 1, 0 }, tt = { 0, 1 }, tt_small = { 0, 2 };
+    int w;
+    CHECK(font_pick(12, 0, t_times, &sys, &w) == 12 && w == 1);
+    CHECK(font_pick(20, 0, t_times, &sys, &w) == 18 && w == 1);     /* 18 zoomed once: within an eighth */
+    CHECK(font_pick(11, 0, t_times, &sys, &w) == 10 && w == 1);
+    CHECK(font_pick(13, 0, t_times, &sys, &w) == 12 && w == 1);     /* 12 and 14 tie: the smaller */
+    CHECK(font_pick(16, 0, t_times, &sys, &w) == 14 && w == 1);
+    CHECK(font_pick(27, 0, t_times, &sys, &w) == 24 && w == 1);
+    CHECK(font_pick(8, 0, t_times, &sys, &w) == 9 && w == 1);
+    CHECK(font_pick(30, 0, t_times, &sys, &w) == 30 && w == 0);     /* 24 too far: the Font Manager scales */
+    CHECK(font_pick(40, 0, t_times, &sys, &w) == 40 && w == 0);
+    CHECK(font_pick(40, 0, t_times, &pack, &w) == 36 && w == 2);    /* Web Fonts' 36 */
+    CHECK(font_pick(31, 0, t_times, &pack, &w) == 31 && w == 0);
+    CHECK(font_pick(21, 0, t_times, &pack, &w) == 21 && w == 0);    /* 18 is 3 away, over 21/8 */
+    CHECK(font_pick(24, 1, t_times, &sys, &w) == 24 && w == 1);     /* no bold: plain, made bold */
+    CHECK(font_pick(20, 1, t_times, &sys, &w) == 18 && w == 1);
+    CHECK(font_pick(24, 1, t_times, &pack, &w) == 24 && w == 2);    /* real bold beats exact plain */
+    CHECK(font_pick(20, 1, t_times, &pack, &w) == 18 && w == 2);
+    CHECK(font_pick(24, 3, t_times, &pack, &w) == 24 && w == 1);    /* no real bold italic: plain */
+    CHECK(font_pick(24, 2, t_times, &tt, &w) == 24 && w == 3);      /* Times Italic's outline */
+    CHECK(font_pick(27, 2, t_times, &tt, &w) == 27 && w == 3);
+    CHECK(font_pick(24, 1, t_times, &tt, &w) == 24 && w == 3);      /* Times Bold's outline */
+    CHECK(font_pick(27, 1, t_times, &tt, &w) == 27 && w == 3);
+    CHECK(font_pick(11, 1, t_times, &tt, &w) == 11 && w == 3);
+    CHECK(font_pick(10, 1, t_times, &tt_small, &w) == 10 && w == 1);    /* 10 and less: the bitmap, made bold */
+    CHECK(font_pick(9, 1, t_times, &tt_small, &w) == 9 && w == 1);
+    CHECK(font_pick(10, 2, t_times, &tt_small, &w) == 10 && w == 3);    /* italic: still its outline */
+    CHECK(font_pick(13, 0, t_times, &tt, &w) == 13 && w == 1);
+    CHECK(font_pick(20, 0, t_none, NULL, &w) == 20 && w == 0);      /* nothing: left to the Font Manager */
+    CHECK(font_pick(20, 1, t_none, NULL, &w) == 20 && w == 0);
+}
+
+/* Mill Serif: Web Fonts' bitmaps (9 to 14, with bold and italic) and its outlines (18 to 72,
+   every style), nothing else */
+static int t_mill(void *ctx, short n, int style)
+{
+    (void)ctx;
+    if ((n == 9 || n == 10 || n == 12 || n == 14) && style < 3) return 2;
+    return n >= 18 && n <= 72 ? 4 : 0;
+}
+
+static void test_mill_sizes(void)
+{
+    int w;
+    CHECK(font_pick(12, 0, t_mill, NULL, &w) == 12 && w == 2);
+    CHECK(font_pick(12, 1, t_mill, NULL, &w) == 12 && w == 2);
+    CHECK(font_pick(12, 3, t_mill, NULL, &w) == 12 && w == 2);     /* no real bold italic: QuickDraw's */
+    CHECK(font_pick(18, 1, t_mill, NULL, &w) == 18 && w == 4);
+    CHECK(font_pick(36, 3, t_mill, NULL, &w) == 36 && w == 4);
+    CHECK(font_pick(16, 0, t_mill, NULL, &w) == 14 && w == 2);     /* never an outline under 18 */
+    CHECK(font_pick(16, 1, t_mill, NULL, &w) == 14 && w == 2);
+    CHECK(font_pick(17, 0, t_mill, NULL, &w) == 18 && w == 4);
+    CHECK(font_pick(11, 0, t_mill, NULL, &w) == 10 && w == 2);
+    CHECK(font_pick(80, 0, t_mill, NULL, &w) == 72 && w == 4);     /* past the outlines: the largest */
+    CHECK(font_pick(8, 2, t_mill, NULL, &w) == 9 && w == 2);
+}
+
+/* Download resume: the part file's name, where the stream goes on, and what Save As does */
+static void test_resume(void)
+{
+    char out[32];
+    unsigned char h[128];
+    MacBinary mb;
+    int dec;
+    part_name("kit.zip", out);
+    CHECK(!strcmp(out, "part.kit.zip"));
+    part_name("A very long name for a file.sit", out);     /* 31: cut to 26 */
+    CHECK(strlen(out) == 31 && !strcmp(out, "part.A very long name for a fil"));
+    part_name("abcdefghijklmnopqrstuvwxyz", out);           /* 26 exactly */
+    CHECK(!strcmp(out, "part.abcdefghijklmnopqrstuvwxyz"));
+    part_name("", out);
+    CHECK(!strcmp(out, "part."));
+    CHECK(resume_ask(0, 1) == RESUME_FRESH && resume_ask(0, 0) == RESUME_FRESH);
+    CHECK(resume_ask(1, 1) == RESUME_ASK && resume_ask(1, 0) == RESUME_REPLACE);
+    CHECK(resume_appends(206) && !resume_appends(200) && !resume_appends(416));
+    /* as it came: the data fork's length */
+    CHECK(resume_at(NULL, "ZIP ", "SITx", 348160, 0, &mb, &dec) == 348160 && !dec);
+    CHECK(resume_at(NULL, "ZIP ", "SITx", 100, 5, &mb, &dec) == -1);     /* forks, but not decoded now */
+    /* MacBinary: 300 bytes of data (padded to 384), 1000 of resources; header 0-127 */
+    macbinary_make(h, "Tool", "APPL", "TOOL", 0, 300, 1000, 1, 2);
+    CHECK(resume_at(h, "APPL", "TOOL", 0, 0, &mb, &dec) == 128 && dec);
+    CHECK(resume_at(h, "APPL", "TOOL", 200, 0, &mb, &dec) == 328 && dec);
+    CHECK(resume_at(h, "APPL", "TOOL", 300, 0, &mb, &dec) == 512 && dec);       /* past the padding */
+    CHECK(resume_at(h, "APPL", "TOOL", 300, 640, &mb, &dec) == 1152 && dec);
+    CHECK(resume_at(h, "APPL", "TOOL", 300, 1000, &mb, &dec) == 1512 && dec);   /* all there */
+    CHECK(resume_at(h, "APPL", "TOOL", 200, 10, &mb, &dec) == -1);              /* resources before the data's end */
+    CHECK(resume_at(h, "APPL", "TOOL", 301, 0, &mb, &dec) == -1);               /* more than the header says */
+    CHECK(resume_at(h, "APPL", "TOOL", 300, 1001, &mb, &dec) == -1);
+    /* saved as it came (not decoded then): the stream's own bytes */
+    CHECK(resume_at(h, "BINA", "????", 4096, 0, &mb, &dec) == 4096 && !dec);
+    /* no data fork: the resources start at 128 */
+    macbinary_make(h, "Font", "FFIL", "DMOV", 0, 0, 500, 1, 2);
+    CHECK(resume_at(h, "FFIL", "DMOV", 0, 100, &mb, &dec) == 228 && dec);
+    /* not MacBinary at all */
+    memset(h, 'x', sizeof h);
+    CHECK(resume_at(h, "TEXT", "ttxt", 77, 0, &mb, &dec) == 77 && !dec);
+}
+
 int main(void)
 {
+    test_nearest_size();
+    test_mill_sizes();
     test_format();
     test_macenc();
-    test_pnm();
     test_inflate();
     test_charset();
     test_fixed_width();
@@ -1931,6 +2196,7 @@ int main(void)
     test_layout();
     test_faces();
     test_zoom();
+    test_size_ladder();
     test_rule_and_cell_height();
     test_pre_tabs();
     test_lists();
@@ -1942,16 +2208,19 @@ int main(void)
     test_isindex();
     test_cookies();
     test_urls();
+    test_member_urls();
     test_auth();
     test_logins();
     test_referer();
     test_transparent();
+    test_resume();
     test_out_of_memory();
     test_form_state();
     test_update();
     test_tables();
     test_html32();
     test_forms();
+    test_textarea_lines();
     test_image("masthead-s.gif", 318, 57, 318, 57);
     test_image("partly.gif", 32, 32, 32, 32);
     test_image("partly.gif", 32, 32, 64, 64);

@@ -2,6 +2,7 @@
 
 #include "mac_save.h"
 #include "mac_sys.h"
+#include "core/resume.h"
 
 static OSType os_type(const char *c)
 {
@@ -9,13 +10,56 @@ static OSType os_type(const char *c)
            ((OSType)(unsigned char)c[2] << 8) | (unsigned char)c[3];
 }
 
-void saver_begin(Saver *s, const FSSpec *spec, const char type[4], const char creator[4], Boolean decode)
+void saver_part_spec(const FSSpec *spec, FSSpec *part)
+{
+    char name[64], cut[32];
+    *part = *spec;
+    memcpy(name, spec->name + 1, spec->name[0]);
+    name[spec->name[0]] = 0;
+    part_name(name, cut);
+    part->name[0] = (unsigned char)strlen(cut);
+    memcpy(part->name + 1, cut, part->name[0]);
+}
+
+void saver_begin(Saver *s, const FSSpec *spec, const char type[4], const char creator[4], Boolean decode,
+                 Boolean in_part)
 {
     memset(s, 0, sizeof *s);
     s->spec = *spec;
+    s->in_part = in_part;
+    if (in_part) saver_part_spec(spec, &s->part);
+    else s->part = *spec;
     memcpy(s->type, type, 4);
     memcpy(s->creator, creator, 4);
     s->decode = decode;
+}
+
+OSErr saver_resume(Saver *s, const FSSpec *spec, Boolean decoded, const MacBinary *mb, long at)
+{
+    memset(s, 0, sizeof *s);
+    s->spec = *spec;
+    s->in_part = s->decided = true;
+    saver_part_spec(spec, &s->part);
+    s->macbinary = decoded;
+    if (decoded) s->mb = *mb;
+    s->pos = at;
+    if ((s->err = file_open(&s->part, fsWrPerm, &s->df)) != noErr) { s->df = 0; return s->err; }
+    if ((s->err = SetFPos(s->df, fsFromLEOF, 0)) != noErr) return s->err;
+    if (decoded && mb->rsrc_len > 0) {
+        if ((s->err = file_open_rf(&s->part, fsWrPerm, &s->rf)) != noErr) { s->rf = 0; return s->err; }
+        s->err = SetFPos(s->rf, fsFromLEOF, 0);
+    }
+    return s->err;
+}
+
+void saver_begin_forks(Saver *s, const FSSpec *spec, const MacBinary *mb)
+{
+    memset(s, 0, sizeof *s);
+    s->spec = s->part = *spec;
+    s->mb = *mb;
+    s->mb.data_at = 0;
+    s->mb.rsrc_at = mb->data_len;
+    s->forks = true;
 }
 
 static void put(short ref, const char *data, long len, OSErr *err)
@@ -47,14 +91,15 @@ static void decide(Saver *s)
 {
     OSType type = os_type(s->type), creator = os_type(s->creator);
     s->decided = true;
-    s->macbinary = s->decode && s->nhead == 128 && !macbinary_header(s->head, &s->mb);
+    s->macbinary = s->forks || (s->decode && s->nhead == 128 && !macbinary_header(s->head, &s->mb));
     if (s->macbinary) { type = os_type(s->mb.type); creator = os_type(s->mb.creator); }
-    file_delete(&s->spec);  /* Standard File already asked about replacing it */
-    if ((s->err = file_create(&s->spec, creator, type)) != noErr) return;
-    if ((s->err = file_open(&s->spec, fsWrPerm, &s->df)) != noErr) { s->df = 0; return; }
+    /* Standard File already asked about replacing the file; a part file is written over */
+    file_delete(&s->part);
+    if ((s->err = file_create(&s->part, creator, type)) != noErr) return;
+    if ((s->err = file_open(&s->part, fsWrPerm, &s->df)) != noErr) { s->df = 0; return; }
     if (s->macbinary && s->mb.rsrc_len > 0) {
-        /* the resource fork as the MacBinary file has it, map and all */
-        if ((s->err = file_open_rf(&s->spec, fsWrPerm, &s->rf)) != noErr) { s->rf = 0; return; }
+        /* the resource fork as the file has it, map and all */
+        if ((s->err = file_open_rf(&s->part, fsWrPerm, &s->rf)) != noErr) { s->rf = 0; return; }
     }
     put_data(s, (const char *)s->head, s->nhead);
 }
@@ -92,13 +137,18 @@ OSErr saver_end(Saver *s)
     close_forks(s);
     if (s->err == noErr && s->macbinary) {
         FInfo fi;
-        if (file_get_info(&s->spec, &fi) == noErr) {
+        if (file_get_info(&s->part, &fi) == noErr) {
             fi.fdFlags = s->mb.flags;
             fi.fdLocation.h = fi.fdLocation.v = 0;
-            file_set_info(&s->spec, &fi);
+            file_set_info(&s->part, &fi);
         }
     }
-    if (s->err != noErr) file_delete(&s->spec);
+    if (s->err == noErr && s->in_part) {
+        /* complete: it takes the name (Standard File asked about replacing a file there) */
+        file_delete(&s->spec);
+        s->err = file_rename(&s->part, s->spec.name);
+    }
+    if (s->err != noErr && !s->in_part) file_delete(&s->part);
     FlushVol(NULL, s->spec.vRefNum);
     return s->err;
 }
@@ -106,5 +156,7 @@ OSErr saver_end(Saver *s)
 void saver_abort(Saver *s)
 {
     close_forks(s);
-    if (s->decided) file_delete(&s->spec);
+    if (!s->decided) return;
+    if (!s->in_part) file_delete(&s->part);
+    FlushVol(NULL, s->spec.vRefNum);
 }

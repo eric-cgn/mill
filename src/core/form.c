@@ -62,6 +62,18 @@ void forms_option_label(const Doc *d, long option, char *out, int size)
     free(t);
 }
 
+/* Line breaks as TextEdit makes them: CR LF, LF, and CR each one CR (they're sent as CR LF) */
+static void mac_lines(char *s)
+{
+    char *o = s;
+    if (!s) return;
+    for (; *s; s++) {
+        if (*s == '\r' && s[1] == '\n') continue;
+        *o++ = *s == '\n' ? '\r' : *s;
+    }
+    *o = 0;
+}
+
 /* A field as the page gave it; -1 if there wasn't the memory for its text */
 static int initial(Field *f, const Doc *d)
 {
@@ -72,7 +84,7 @@ static int initial(Field *f, const Doc *d)
     f->value = NULL;
     f->scroll = 0;
     f->checked = html_attr(d, n, "checked") != NULL;
-    if (f->type == FIELD_TEXTAREA) f->value = text_of(d, f->node);
+    if (f->type == FIELD_TEXTAREA) mac_lines(f->value = text_of(d, f->node));
     else if (f->type == FIELD_TEXT || f->type == FIELD_PASSWORD || f->type == FIELD_HIDDEN)
         f->value = copy((v = html_attr(d, n, "value")) ? v : "");
     else if (f->type == FIELD_FILE) f->value = copy("");

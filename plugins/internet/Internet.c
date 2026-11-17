@@ -324,7 +324,7 @@ static OSErr do_dict(Inet *me, MillRequest *r)
                 put_esc(me, desc[0] ? desc : dname);
                 put(me, "</B> (");
                 put_esc(me, dname);
-                put(me, ")</P>\n<PRE>");
+                put(me, ")</P>\n<PRE><FONT SIZE=2>");
                 section = 1;
                 any = 1;
             } else if (!strncmp(me->line, "152", 3)) {
@@ -345,7 +345,7 @@ static OSErr do_dict(Inet *me, MillRequest *r)
             continue;
         }
         if (me->line[0] == '.' && !me->line[1]) {
-            put(me, section == 1 ? "</PRE>\n" : "</UL>\n");
+            put(me, section == 1 ? "</FONT></PRE>\n" : "</UL>\n");
             section = 0;
             continue;
         }
@@ -367,7 +367,7 @@ static OSErr do_dict(Inet *me, MillRequest *r)
             }
         }
     }
-    if (section) put(me, section == 1 ? "</PRE>\n" : "</UL>\n");
+    if (section) put(me, section == 1 ? "</FONT></PRE>\n" : "</UL>\n");
     if (!any && !me->stopped) put(me, "<P>No answer from the server.</P>\n");
     put(me, "</BODY></HTML>\n");
     h->TcpClose(c);
@@ -491,7 +491,7 @@ static OSErr do_time(Inet *me, MillRequest *r)
         long n = sizeof body - 1, off = 0;
         const char *p = v;
         short neg = 0, digits = 0;
-        if (h->From(r->ref) != millFromOwnPage) { h->Fail(r->ref, "Time: Only this Plug-In's own page can set the clock."); return noErr; }
+        if (h->From(r->ref) != millFromOwnPage) { h->Fail(r->ref, "Time: Only this Plug-In\325s own page can set the clock."); return noErr; }
         if (h->ReadBody(r->ref, body, &n) != noErr || n < 0) n = 0;
         body[n] = 0;
         if (h->FormField(body, n, "offset", v, sizeof v) <= 0) { h->Fail(r->ref, "Time: The offset is missing."); return noErr; }
@@ -507,7 +507,7 @@ static OSErr do_time(Inet *me, MillRequest *r)
         SetDateTime(mac);
         time_page(me, "Time");
         show_time(me, mac, t2, sizeof t2);
-        put1(me, "<P>This Mac's clock is set: %s</P>\n", (long)t2);
+        put1(me, "<P>This Mac&rsquo;s clock is set: %s</P>\n", (long)t2);
         h->HtmlEscape(host, hh, sizeof hh);
         put2(me, "<P><A HREF=\"time://%s/\">Check again</A></P></BODY></HTML>\n", (long)hh, 0);
         return noErr;
@@ -516,9 +516,9 @@ static OSErr do_time(Inet *me, MillRequest *r)
     h->HtmlEscape(host, hh, sizeof hh);
     time_page(me, "Time");
     if (daytime) {
-        put(me, "<P>No time service on port 37. The daytime service (RFC 867) says:</P><PRE>");
+        put(me, "<P>No time service on port 37. The daytime service (RFC 867) says:</P><PRE><FONT SIZE=2>");
         put_esc(me, me->line);
-        put(me, "</PRE></BODY></HTML>\n");
+        put(me, "</FONT></PRE></BODY></HTML>\n");
         return noErr;
     }
     tz = map_offset(&zone_set);
@@ -535,7 +535,7 @@ static OSErr do_time(Inet *me, MillRequest *r)
     if (!zone_set && (diff > 1800 || diff < -1800)) put(me, "<P>Set the time zone in the Map control panel before setting the clock.</P>\n");
     put1(me, "<FORM METHOD=POST ACTION=\"time://%s/\">", (long)hh);
     put1(me, "<INPUT TYPE=HIDDEN NAME=offset VALUE=\"%ld\">", diff);
-    put(me, "<INPUT TYPE=SUBMIT VALUE=\"Set this Mac's clock\"></FORM>\n</BODY></HTML>\n");
+    put(me, "<INPUT TYPE=SUBMIT VALUE=\"Set this Mac&rsquo;s clock\"></FORM>\n</BODY></HTML>\n");
     return noErr;
 }
 
@@ -573,11 +573,11 @@ static OSErr do_about(Inet *me)
     me->base.host->PlugInPage(me->r);
     header(me, "text/html");
     put(me, "<HTML><HEAD><TITLE>Internet Services</TITLE></HEAD><BODY><H2>Internet Services</H2>\n"
-        "<P>Every address names its server:<UL>"
+        "<P>Address formats:<UL>"
         "<LI>finger://host/user"
         "<LI>whois://host/query"
         "<LI>dict://host/d:word, or m:word for the words that match"
-        "<LI>time://host/, to check this Mac's clock"
+        "<LI>time://host/, to check this Mac&rsquo;s clock"
         "<LI>ftp://host/path"
         "<LI>gopher://host/"
         "</UL>The forms below fill in the address.</P>\n");
@@ -609,7 +609,7 @@ static OSErr do_go(Inet *me, MillRequest *r)
         if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '-' || c == ':') host[o++] = c;
     }
     host[o] = 0;
-    if (!host[0]) { h->Fail(r->ref, "Internet Services: Name a server."); return noErr; }
+    if (!host[0]) { h->Fail(r->ref, "Internet Services: Enter a server name."); return noErr; }
     for (i = 0; word[i]; i++) if ((unsigned char)word[i] < 32) word[i] = ' ';
     h->UrlEncode(word, enc, sizeof enc);
     for (i = o = 0; enc[i] && o < (long)sizeof esc - 4; i++) {      /* dict's colons separate the word from the database */
@@ -677,6 +677,7 @@ static void protocol(MillProtocol *p, const char *scheme, const char *heading, c
     p->scheme = scheme;
     p->heading = heading;
     p->description = desc;
+    p->blockSize = 0;       /* none of these can seek */
     p->settingCount = n;
     p->settings = s;
 }
@@ -690,6 +691,8 @@ MillPlugIn *PlugInNew(const MillHost *host, short resFile, MillInfo *info)
     me->methods.request = inet_request;
     me->methods.purge = 0;
     me->methods.format = 0;
+    me->methods.font = 0;
+    me->methods.gzOut = 0;
     me->base.methods = &me->methods;
     setting(&me->whoisSet[0], "server", "Default server", "Fills in the form on plugin://internet-services/about", millText, "whois.iana.org", 0, 0);
     setting(&me->dictSet[0], "server", "Default server", "Fills in the form on plugin://internet-services/about", millText, "dict.org", 0, 0);

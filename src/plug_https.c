@@ -17,13 +17,13 @@ static OSErr https_request(MillPlugIn *self, MillRequest *r)
     OSErr err;
     /* on (Mill's own Enable) means through the HTTP proxy; none set, an alert */
     if ((err = self->host->ProxyRequest(r->ref)) != millNoProxy) return err;
-    self->host->Fail(r->ref, "TLS requires an HTTP proxy.");
+    self->host->Fail(r->ref, "SSL (https) pages require an HTTP proxy.");
     return noErr;
 }
 
 static void https_close(MillPlugIn *self) { self->host->FreeMem(self); }
 
-static const MillProtocol protocols[] = { { "https", "HTTPS", "Secure HTTP via proxy", 0, NULL } };
+static const MillProtocol protocols[] = { { "https", "HTTPS", "Secure HTTP via proxy", 0, 0, NULL } };
 
 MillPlugIn *https_new(const MillHost *host, short resFile, MillInfo *info)
 {

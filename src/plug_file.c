@@ -1,6 +1,7 @@
 /* file: as a built-in Plug-In: this Mac's disks, folders, and the files Mill can show.
    It uses the Plug-In interface like any other; for the File Manager it shares Mill's
-   System 6 and 7 wrappers (mac_sys.h). */
+   System 6 and 7 wrappers (mac_sys.h). A file's data fork is read from any offset, so a
+   Range gets just that part (FileHead). */
 #include <Multiverse.h>
 #include <string.h>
 
@@ -16,7 +17,6 @@
 #define ROOT_PARENT 1                   /* fsRtParID: what a volume's root folder is in */
 #define IS_FOLDER 0x10
 #define IS_INVISIBLE 0x4000
-#define MAX_FILE (192L * 1024)
 #define HTML_MAC "text/html; charset=macintosh"
 
 typedef struct {
@@ -76,7 +76,7 @@ static void pstr(const char *c, Str255 p)
 static void not_found(FilePlugIn *me, const char *what)
 {
     head(me, 404, HTML_MAC);
-    out_s(me, "<TITLE>Not found</TITLE><H2>Not found</H2><P>There's nothing at <TT>");
+    out_s(me, "<TITLE>Not found</TITLE><H2>Not found</H2><P>There\325s nothing at <TT>");
     out_text(me, what);
     out_s(me, "</TT>.");
 }
@@ -164,12 +164,12 @@ static void list_folder(FilePlugIn *me, short vref, long dir, const char *path)
     }
 }
 
-static void send_file(FilePlugIn *me, FSSpec *spec, OSType type, const char *path)
+static void send_file(FilePlugIn *me, FSSpec *spec, OSType type, long size, const char *path)
 {
     const char *ctype;
     char chunk[1024], found[64];
     short ref;
-    long n, total = 0;
+    long n, first, last;
     /* by its name, then by its Finder type; text here is Mac Roman */
     H->TypeForName(path, found, sizeof found);
     if (!strcmp(found, "application/octet-stream")) H->TypeForFinderType(type, found, sizeof found);
@@ -178,19 +178,22 @@ static void send_file(FilePlugIn *me, FSSpec *spec, OSType type, const char *pat
     else if (strcmp(found, "application/octet-stream")) ctype = found;
     else {
         head(me, 200, HTML_MAC);
-        out_s(me, "<TITLE>Can't show this file</TITLE><P>Mill can't show <TT>");
+        out_s(me, "<TITLE>Can\325t show this file</TITLE><P>Mill can\325t show <TT>");
         out_text(me, path);
-        out_s(me, "</TT>. It shows text, HTML, and the formats in Settings.");
+        out_s(me, "</TT>. It shows text, HTML, and the formats listed on the Settings page.");
         return;
     }
     if (file_open(spec, fsRdPerm, &ref) != noErr) { not_found(me, path); return; }
-    head(me, 200, ctype);
-    do {
-        n = sizeof chunk;
-        FSRead(ref, &n, chunk);
-        out(me, chunk, n);
-        total += n;
-    } while (n == sizeof chunk && total < MAX_FILE && !me->stopped);
+    /* the whole, or the part a Range asks for, from its offset */
+    H->FileHead(me->r, ctype, size, &first, &last);
+    if (SetFPos(ref, fsFromStart, first) == noErr) {
+        while (first <= last && !me->stopped) {
+            n = last - first + 1 < (long)sizeof chunk ? last - first + 1 : (long)sizeof chunk;
+            if (FSRead(ref, &n, chunk) != noErr && n == 0) break;
+            out(me, chunk, n);
+            first += n;
+        }
+    }
     FSClose(ref);
 }
 
@@ -225,13 +228,13 @@ static OSErr file_request(MillPlugIn *self, MillRequest *r)
     pb.hFileInfo.ioDirID = spec.parID;
     if (PBGetCatInfoSync(&pb) != noErr) not_found(me, path);
     else if (pb.hFileInfo.ioFlAttrib & IS_FOLDER) list_folder(me, spec.vRefNum, pb.dirInfo.ioDrDirID, path);
-    else send_file(me, &spec, pb.hFileInfo.ioFlFndrInfo.fdType, path);
+    else send_file(me, &spec, pb.hFileInfo.ioFlFndrInfo.fdType, pb.hFileInfo.ioFlLgLen, path);
     return noErr;
 }
 
 static void file_close(MillPlugIn *self) { self->host->FreeMem(self); }
 
-static const MillProtocol protocols[] = { { "file", "File", "Files on this Mac (RFC 1738)", 0, NULL } };
+static const MillProtocol protocols[] = { { "file", "File", "Files on this Mac (RFC 1738)", 8192, 0, NULL } };
 
 MillPlugIn *file_new(const MillHost *host, short resFile, MillInfo *info)
 {
@@ -243,7 +246,7 @@ MillPlugIn *file_new(const MillHost *host, short resFile, MillInfo *info)
     info->version = "1.0";
     info->copyright = "\251 " MILL_YEAR " " MILL_PUBLISHER;
     info->by = MILL_PUBLISHER;
-    info->description = "This Mac's disks and files.";
+    info->description = "This Mac\325s disks and files.";
     info->protocolCount = 1;
     info->protocols = protocols;
     return &me->base;

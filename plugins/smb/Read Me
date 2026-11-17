@@ -1,0 +1,16 @@
+SMB
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder.
+
+  smb://host/                The server's shares
+  smb://host/share/path      Server Message Block (CIFS, NT LM 0.12)
+
+Folders are pages; files come as they are. Read-only. A guest first; if the
+server refuses, Mill asks for a name and password (DOMAIN\name for a domain).
+
+plugin://smb/about has a form, filled in from Settings.
+
+Written from the published specifications (RFC 1001/1002, MS-CIFS, MS-NLMP,
+MS-RAP, RFC 1320, FIPS 46).
+
+Build: ./build.sh writes build/SMB.bin.

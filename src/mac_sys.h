@@ -30,6 +30,7 @@ extern Boolean sys_fsspec;      /* the File Manager's FSSpec calls */
 extern Boolean sys_new_sf;      /* StandardGetFile and StandardPutFile */
 extern Boolean sys_find_folder; /* FindFolder, and so a Preferences folder */
 extern Boolean sys_wne;         /* WaitNextEvent (System 7, or MultiFinder on System 6) */
+extern Boolean sys_outlines;    /* TrueType: the Font Manager's outline calls */
 
 /* Like FSMakeFSSpec: name is a file's name in folder dir, or a full path ("Disk:a:b")
    with vref and dir 0. fnfErr means only the file itself doesn't exist (spec is filled). */
@@ -40,6 +41,9 @@ OSErr file_create(const FSSpec *spec, OSType creator, OSType type);
 OSErr file_delete(const FSSpec *spec);
 OSErr file_get_info(const FSSpec *spec, FInfo *fi);
 OSErr file_set_info(const FSSpec *spec, const FInfo *fi);
+OSErr file_rename(const FSSpec *spec, ConstStr255Param name);
+/* Its forks' lengths; fnfErr if there's no such file */
+OSErr file_lengths(const FSSpec *spec, long *data, long *rsrc);
 /* Open a file's resources for the Resource Manager; its refNum, or -1 */
 short file_open_res(const FSSpec *spec, SInt8 perm);
 

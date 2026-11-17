@@ -4,6 +4,8 @@
 #ifndef MILL_URL_H
 #define MILL_URL_H
 
+#include <stddef.h>
+
 enum { SCHEME_HTTP, SCHEME_FILE, SCHEME_MILL, SCHEME_HTTPS, SCHEME_OTHER };
 
 typedef struct {
@@ -50,5 +52,24 @@ int url_with_login(const char *url, const char *user, const char *pass, char *ou
    none should go: page isn't a whole address Mill knows, it won't fit, or page is https:
    and target isn't (RFC 2616 15.1.3). */
 int url_referer(const char *page, const char *target, char *out, int out_size);
+/* How an address is opened, for url_scroll_only */
+enum { URL_OPEN_LINK, URL_OPEN_HISTORY, URL_OPEN_RELOAD };
+/* Whether opening url while the page at shown is showing only scrolls that page, not asking
+   for it again: a link to a #name on it, or Back and Forward between two places on it.
+   Reload always asks again. */
+int url_scroll_only(const char *url, const char *shown, int how);
+
+/* Members of archives, named after "#/": http://host/kit.zip#/docs/page.html#part2.
+   The document's part of url: up to the first '#', or for a member up to the second
+   (a change there is a new document; after it, only a scroll) */
+size_t url_doc_len(const char *url);
+/* The anchor to scroll to: after the '#' (a member's: after the second), or "" */
+const char *url_anchor(const char *url);
+/* The member path after "#/", %-decoded, without the anchor, into path: 1, or 0 (path
+   "") if url names no member. A relative link in a member resolves against this path
+   (url_resolve), not stopping above the archive's top. */
+int url_member(const char *url, char *path, int size);
+/* A member path for an address: %XX for what can't go in it as it is; its length, or -1 */
+int url_member_encode(const char *path, char *out, int size);
 
 #endif

@@ -8,14 +8,15 @@ Example = {Kit}Examples:Finger:
 # goes first: its MillMain is the first function, and has to be at byte 0.
 COptions = -b -mbg off -opt space -i {Kit}Interfaces:
 
-Finger ƒ MillGlue.c.o Finger.c.o
+Finger ƒ MillGlue.c.o Finger.c.o {Kit}Interfaces:MillPlugIn.r {Kit}Interfaces:MillInterface.h
 	Link -rt MPlg=128 -m MILLMAIN -sg Finger -t MPlg -c MiLL ∂
 		MillGlue.c.o Finger.c.o ∂
 		"{Libraries}Interface.o" "{CLibraries}StdCLib.o" ∂
 		-o Finger
+	Rez -a -i {Kit}Interfaces: {Kit}Interfaces:MillPlugIn.r -o Finger
 
-Finger.c.o ƒ {Example}Finger.c {Kit}Interfaces:MillPlugIn.h
+Finger.c.o ƒ {Example}Finger.c {Kit}Interfaces:MillPlugIn.h {Kit}Interfaces:MillInterface.h
 	SC {COptions} {Example}Finger.c -o Finger.c.o
 
-MillGlue.c.o ƒ {Kit}Glue:MillGlue.c {Kit}Interfaces:MillPlugIn.h
+MillGlue.c.o ƒ {Kit}Glue:MillGlue.c {Kit}Interfaces:MillPlugIn.h {Kit}Interfaces:MillInterface.h
 	SC {COptions} {Kit}Glue:MillGlue.c -o MillGlue.c.o

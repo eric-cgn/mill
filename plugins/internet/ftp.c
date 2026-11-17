@@ -1,6 +1,10 @@
 /* ftp: (RFC 959, addresses as RFC 1738) in Internet Services: folders become pages,
    files come through as they are, and with a name and password, files can be sent up
-   with a form. Passive mode by default; active mode (PORT) waits for the server. */
+   with a form. Passive mode by default; active mode (PORT) waits for the server. The
+   control connection is kept between pages (TcpKeep), logged in and in the folder last
+   shown; a data connection is made for each transfer. A Range is a SIZE, then REST and
+   RETR (RFC 959 4.1.3; SIZE and REST in stream mode as most servers have them), closing
+   the data connection once the part has come. */
 #include <Multiverse.h>
 #include <string.h>
 
@@ -21,6 +25,9 @@ typedef struct {
     char notes[NOTES];      /* messages from the login and folder replies (230, 250) */
     short nlen;
     char path[NAME * 2];    /* as in the address, %-encoded */
+    short clean;            /* the control connection is at rest: every reply read */
+    char home[NAME * 2];    /* the folder logging in put it in (PWD), "" if not known */
+    char at[NAME * 2];      /* the folder it's in now: the address's path, %-encoded */
     char shown[NAME * 2];   /* decoded, for the page */
     char work[NAME * 2], esc[NAME * 4];
 } FtpPlugIn;
@@ -82,7 +89,7 @@ static short reply(FtpPlugIn *me)
         if (!nl) {
             long n = CTL - me->have;
             if (n <= 0) me->have = 0, n = CTL;    /* a line too long: dropped */
-            if (H->TcpRecv(me->ctl, me->in + me->have, &n) != noErr || n == 0) return 0;
+            if (H->TcpRecv(me->ctl, me->in + me->have, &n) != noErr || n == 0) { me->clean = 0; return 0; }
             me->have += (short)n;
             continue;
         }
@@ -128,8 +135,16 @@ static short command(FtpPlugIn *me, const char *fmt, const char *arg)
     if (n >= (long)sizeof c - 2) return 0;
     c[n++] = '\r';
     c[n++] = '\n';
-    if (H->TcpSend(me->ctl, c, n) != noErr) return 0;
+    if (H->TcpSend(me->ctl, c, n) != noErr) { me->clean = 0; return 0; }
     return reply(me);
+}
+
+/* Into the folder name (decoded) from the one it's in: at follows */
+static void enter(FtpPlugIn *me, const char *name)
+{
+    long n = strlen(me->at);
+    if (H->UrlEncode(name, me->at + n, sizeof me->at - n - 1) < 0 || strchr(name, '/')) me->home[0] = 0;  /* lost track */
+    else strcat(me->at, "/");
 }
 
 /* ------------------------------------------------------------ the data connection */
@@ -267,7 +282,7 @@ static OSErr listing(FtpPlugIn *me, MillRequest *r, short active, short upload, 
     if ((err = data_open(me, r, active, &d)) != noErr) { fail(me, "FTP: "); return noErr; }
     code = command(me, "LIST", "");
     if (code != 125 && code != 150) { H->TcpClose(d); fail(me, "FTP: "); return noErr; }
-    if ((err = data_start(me, active, d)) != noErr) return err;
+    if ((err = data_start(me, active, d)) != noErr) { me->clean = 0; return err; }
     H->PlugInPage(me->r);
     page_head(me, 200, "OK", "text/html; charset=macintosh");
     out_s(me, "\r\n<TITLE>FTP: ");
@@ -280,7 +295,7 @@ static OSErr listing(FtpPlugIn *me, MillRequest *r, short active, short upload, 
     if (me->nlen && show_notes) {
         /* the server's messages, a line at a time */
         char *p = me->notes, *e;
-        out_s(me, "<PRE><FONT SIZE=1>");
+        out_s(me, "<PRE><FONT SIZE=2>");     /* 10 points: 80 columns fit a Plus's window */
         while (p < me->notes + me->nlen && (e = memchr(p, '\n', me->notes + me->nlen - p))) {
             *e = 0;
             out_text(me, p);
@@ -305,8 +320,9 @@ static OSErr listing(FtpPlugIn *me, MillRequest *r, short active, short upload, 
     }
     if (at) { line[at] = 0; list_line(me, line); }
     H->TcpClose(d);
-    if (err != noErr && err != userCanceledErr) { strcpy(me->msg, "The connection was lost."); fail(me, "FTP: "); return noErr; }
-    reply(me);
+    if (err != noErr && err != userCanceledErr) { me->clean = 0; strcpy(me->msg, "The connection was lost."); fail(me, "FTP: "); return noErr; }
+    if (err == noErr && !me->stopped) reply(me);
+    else me->clean = 0;
     if (upload) out_s(me, "<FORM METHOD=POST ENCTYPE=\"multipart/form-data\"><HR><INPUT TYPE=file NAME=file> "
                           "<INPUT TYPE=submit VALUE=\"Upload\"></FORM>");
     return err == userCanceledErr ? err : noErr;
@@ -317,34 +333,60 @@ static OSErr retrieve(FtpPlugIn *me, MillRequest *r, short active, const char *n
     MillConn d;
     OSErr err;
     char buf[1024];
-    long n, a[1];
-    short code;
+    long n, a[1], size = -1, got = 0, first = 0, last = -1, want = -1;
+    short code, ranged, part = 0, rest = 1;
     char *p;
+    /* a part: the file's size first, to know which bytes */
+    ranged = H->Header(me->r, "Range", buf, sizeof buf) > 0;
+    if (ranged && command(me, "SIZE %s", name) == 213 && me->msg[0] >= '0' && me->msg[0] <= '9') size = number(me->msg);
+    if (ranged) part = H->FileHead(me->r, NULL, size, &first, &last);
     if ((err = data_open(me, r, active, &d)) != noErr) { fail(me, "FTP: "); return noErr; }
+    /* REST just before RETR, which then starts there (RFC 959 4.1.3) */
+    if (part) {
+        a[0] = first;
+        H->Format(buf, sizeof buf, "%ld", a);
+        if (command(me, "REST %s", buf) != 350) part = rest = 0;
+    }
     code = command(me, "RETR %s", name);
     if (code != 125 && code != 150) {
         H->TcpClose(d);
         /* a folder asked for without its slash: there, with one */
         if (command(me, "CWD %s", name) / 100 == 2) {
+            enter(me, name);
             page_head(me, 301, "Moved", "text/html");
             a[0] = (long)r->url;
             H->Printf(me->r, "Location: %s/\r\n\r\n", a);
         } else fail(me, "FTP: ");
         return noErr;
     }
-    if ((err = data_start(me, active, d)) != noErr) return err;
-    page_head(me, 200, "OK", content_type(me, name));
+    if ((err = data_start(me, active, d)) != noErr) { me->clean = 0; return err; }
     /* "150 Opening BINARY mode data connection for x (1234 bytes)" */
-    if ((p = strrchr(me->msg, '(')) && p[1] >= '0' && p[1] <= '9') { a[0] = number(p + 1); H->Printf(me->r, "Content-Length: %ld\r\n", a); }
-    out_s(me, "\r\n");
+    if (!ranged && (p = strrchr(me->msg, '(')) && p[1] >= '0' && p[1] <= '9') size = number(p + 1);
+    if (rest) {
+        /* the part (206), or the whole with its size (200): the same bytes FileHead said */
+        part = H->FileHead(me->r, content_type(me, name), size, &first, &last);
+        if (part) want = last - first + 1;
+    } else {
+        /* the server refused REST: the whole, and it can't be read in parts */
+        page_head(me, 200, "OK", content_type(me, name));
+        if (size >= 0) { a[0] = size; H->Printf(me->r, "Content-Length: %ld\r\n", a); }
+        out_s(me, "\r\n");
+    }
+    if (!part) want = size;
     for (;;) {
         n = sizeof buf;
-        if ((err = H->TcpRecv(d, buf, &n)) != noErr || n == 0 || me->stopped) break;
+        if (part && n > want - got) n = want - got;
+        if (n == 0 || (err = H->TcpRecv(d, buf, &n)) != noErr || n == 0 || me->stopped) break;
+        got += n;
         out(me, buf, n);
     }
+    /* a part, once it's all come: the server ends the transfer when its data connection
+       closes (426, or 226 if it had sent the rest already) */
     H->TcpClose(d);
-    if (err != noErr && err != userCanceledErr) { strcpy(me->msg, "The connection was lost."); fail(me, "FTP: "); return noErr; }
-    if (!me->stopped) reply(me);
+    if (err != noErr && err != userCanceledErr) { me->clean = 0; strcpy(me->msg, "The connection was lost."); fail(me, "FTP: "); return noErr; }
+    /* all of it (Mill wants no more once it has the size the server gave): the 226 follows */
+    if (err == noErr && (!me->stopped || got == want)) reply(me);
+    else me->clean = 0;
     return err == userCanceledErr ? err : noErr;
 }
 
@@ -366,10 +408,11 @@ static const char *store(FtpPlugIn *me, MillRequest *r, short active, char *note
     if (!*filename || strlen(filename) >= NAME) { H->Fail(me->r, "Choose a file to upload."); return ""; }
     strcpy(name, filename);
     if (H->GetSetting("ftp", "eol", eol, sizeof eol) < 0) strcpy(eol, "Unix [LF]");
-    text = type && !strcmp(type, "text/plain") && strcmp(eol, "Don't convert");
+    text = type && !strcmp(type, "text/plain") && strcmp(eol, "Don\325t convert");
     if (data_open(me, r, active, &d) != noErr) goto refused;
     code = command(me, "STOR %s", name);
-    if ((code != 125 && code != 150) || data_start(me, active, d) != noErr) { H->TcpClose(d); goto refused; }
+    if (code != 125 && code != 150) { H->TcpClose(d); goto refused; }
+    if (data_start(me, active, d) != noErr) { me->clean = 0; H->TcpClose(d); goto refused; }
     for (;;) {
         n = sizeof in;
         if ((err = H->ReadBody(me->r, in, &n)) != noErr || n == 0) break;
@@ -394,6 +437,7 @@ static const char *store(FtpPlugIn *me, MillRequest *r, short active, char *note
         /* stopped: what got there is deleted, quietly (Mill gives a few seconds for it) */
         reply(me);
         command(me, "DELE %s", name);
+        me->clean = 0;
         return NULL;
     }
     code = reply(me);
@@ -407,10 +451,53 @@ refused:
     return "";
 }
 
+/* The folder the last PWD reply names (257 "/pub/mac" ...: RFC 959 5.4, quotes doubled
+   inside), into home; "" if it can't be read */
+static void read_home(FtpPlugIn *me)
+{
+    const char *p = strchr(me->msg, '"');
+    short n = 0;
+    me->home[0] = 0;
+    if (!p) return;
+    for (p++; *p && n < (short)sizeof me->home - 1; p++) {
+        if (*p == '"' && p[1] != '"') { me->home[n] = 0; return; }
+        if (*p == '"') p++;
+        me->home[n++] = *p;
+    }
+    me->home[0] = 0;
+}
+
+/* From the folder it's in to the address's (RFC 1738: from the login's, a CWD for each
+   part): further down goes on from where it is; anywhere else starts again from home.
+   0 if a CWD failed (with Fail). */
+static short go_to(FtpPlugIn *me, const char *folder)
+{
+    char part[NAME];
+    const char *seg, *p;
+    long n = strlen(me->at);
+    if (strncmp(folder, me->at, n)) {
+        if (!me->home[0] || command(me, "CWD %s", me->home) / 100 != 2) { fail(me, "FTP: "); return 0; }
+        strcpy(me->at, "/");
+        n = 1;
+    }
+    for (seg = folder + n; (p = strchr(seg, '/')); seg = p + 1) {
+        n = p - seg;
+        if (n >= NAME) n = NAME - 1;
+        memcpy(part, seg, n);
+        part[n] = 0;
+        H->UrlDecode(part, part, sizeof part);
+        if (!part[0]) continue;
+        if (command(me, "CWD %s", part) / 100 != 2) { fail(me, "FTP: "); return 0; }
+        enter(me, part);
+    }
+    return 1;
+}
+
 OSErr ftp_request(MillPlugIn *self, MillRequest *r)
 {
     FtpPlugIn *me = (FtpPlugIn *)self;
-    char user[NAME], pass[NAME], anon_pass[NAME], key[NAME + 16], prompt[NAME + 64], setting[8], note[NAME + 16], *p, *seg;
+    char user[NAME], pass[NAME], anon_pass[NAME], key[NAME + 16], prompt[NAME + 64], setting[8], note[NAME + 16], *seg;
+    char kept[kMillNoteMax], folder[NAME * 2];
     const char *said = NULL;
     short code, active, anonymous;
     long a[2];
@@ -453,8 +540,25 @@ OSErr ftp_request(MillPlugIn *self, MillRequest *r)
     memcpy(me->path, r->path, n);
     me->path[n] = 0;
     H->UrlDecode(me->path, me->shown, sizeof me->shown);
+    me->clean = 1;
+    me->at[0] = me->home[0] = 0;
+    /* the connection kept from the last page here, as this user: its note is home, a 0, and
+       where it is now */
+    n = sizeof kept;
+    if (H->TcpKept(me->r, user, &me->ctl, kept, &n) == noErr) {
+        long h = memchr(kept, 0, n) ? (long)strlen(kept) : -1, rest = n - h - 1;
+        if (h > 0 && h < (long)sizeof me->home && rest > 0 && rest < (long)sizeof me->at) {
+            strcpy(me->home, kept);
+            memcpy(me->at, kept + h + 1, rest);
+            me->at[rest] = 0;
+            memset(pass, 0, sizeof pass);
+            goto in;
+        }
+        H->TcpClose(me->ctl);       /* a note that wasn't ours */
+        me->ctl = 0;
+    }
     if ((err = H->TcpOpen(me->r, r->host, r->port ? r->port : 21, &me->ctl)) != noErr) return err;
-    H->Status(me->r, "Logging in...");
+    H->Status(me->r, "Logging in\311");
     code = reply(me);
     if (code == 220) {
         code = command(me, "USER %s", user);
@@ -473,17 +577,17 @@ OSErr ftp_request(MillPlugIn *self, MillRequest *r)
     }
     if (code / 100 != 2) { fail(me, "FTP: "); goto quit; }
     command(me, "TYPE I", "");
-    /* into each folder in turn (RFC 1738), leaving the last part if it's a file */
-    for (seg = me->path + 1; (p = strchr(seg, '/')); seg = p + 1) {
-        char part[NAME];
-        n = p - seg;
-        if (n >= NAME) n = NAME - 1;
-        memcpy(part, seg, n);
-        part[n] = 0;
-        H->UrlDecode(part, part, sizeof part);
-        if (!part[0]) continue;
-        if (command(me, "CWD %s", part) / 100 != 2) { fail(me, "FTP: "); goto quit; }
-    }
+    /* where logging in put it, to come back to (without it, nothing is kept) */
+    if (command(me, "PWD", "") == 257) read_home(me);
+    else me->home[0] = 0;
+    strcpy(me->at, "/");
+in:
+    /* into the address's folder, leaving the last part if it's a file */
+    seg = strrchr(me->path, '/') + 1;
+    n = seg - me->path;
+    memcpy(folder, me->path, n);
+    folder[n] = 0;
+    if (!go_to(me, folder)) goto quit;
     if (*seg) {
         char name[NAME];
         H->UrlDecode(seg, name, sizeof name);
@@ -497,6 +601,17 @@ OSErr ftp_request(MillPlugIn *self, MillRequest *r)
                       !(H->GetSetting("ftp", "messages", setting, sizeof setting) == 2 && !strcmp(setting, "no")));
     }
 quit:
+    if (me->clean && me->home[0] && me->at[0] && err == noErr) {
+        /* at rest: kept for the next page, with where it is (Mill says QUIT when it closes it) */
+        n = strlen(me->home) + 1;
+        memcpy(kept, me->home, n);
+        if (n + (long)strlen(me->at) <= (long)sizeof kept) {
+            memcpy(kept + n, me->at, strlen(me->at));
+            H->TcpKeep(me->r, me->ctl, user, kept, n + strlen(me->at), "QUIT" MILL_CRLF, 6);
+            me->ctl = 0;
+            return err;
+        }
+    }
     if (!me->stopped && err != userCanceledErr) command(me, "QUIT", "");
     H->TcpClose(me->ctl);
     me->ctl = 0;
@@ -509,10 +624,11 @@ static const MillSetting settings[] = {
     { "anon_auto", "Automatic anonymous", "Always attempt an anonymous login before asking for credentials.", millCheckbox, "yes", 0, 0, NULL },
     { "anon_password", "Anonymous login password", "Many servers request an email address as this value.",
       millText, "mill@", 0, 0, NULL },
-    { "eol", "Convert line endings on TEXT files", NULL, millChoice, "Unix [LF]", 0, 0, "Don't convert|Mac [CR]|Unix [LF]|DOS [CRLF]" },
+    { "eol", "Convert line endings on TEXT files", NULL, millChoice, "Unix [LF]", 0, 0, "Don\325t convert|Mac [CR]|Unix [LF]|DOS [CRLF]" },
+    kMillRandomAccessSetting("no"),
     kMillProxySetting
 };
-static const MillProtocol protocols[] = { { "ftp", "FTP", "File Transfer Protocol (RFC 959)", 6, settings } };
+static const MillProtocol protocols[] = { { "ftp", "FTP", "File Transfer Protocol (RFC 959)", 8192, 7, settings } };
 
 /* Internet.c's: the protocol's description and settings, and its state for a request (the caller
    sets base.host, and frees it with FreeMem) */

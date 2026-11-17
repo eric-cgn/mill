@@ -1,0 +1,8 @@
+Mill is under the MIT License, in LICENSE beside this file, except as noted here.
+
+tools/systemdisk/ is licensed separately, under the GNU Lesser General Public License,
+version 2.1 or (at your option) any later version. Its license is in tools/systemdisk/LICENSE.
+It is a standalone tool that builds the Mill System Disk on your own computer. It is not part
+of Mill: Mill doesn't use or include its code, and it isn't in any Mill binary or disk image.
+
+Third-party code built into Mill has its notices in src/license.html.

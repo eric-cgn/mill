@@ -1,9 +1,10 @@
 #include "Processes.r"
 
 /* Preferred 1200K: room for a page with many pictures (The Old Net's 77 run out in 700K).
-   Minimum 700K: what a 1 MB Mac Plus on System 6 has for an application (about 750K),
-   less a little. In the minimum, pages still load: a page's source is let go of once it's
-   read, and running out of memory stops loading and keeps what's there. */
+   Minimum 700K: what a 1 MB Mac Plus on System 6.0.3 gives an application from the Finder
+   (735K), less a little; under MultiFinder at 1 MB the largest block is too small. In the
+   minimum, pages still load: a page's source is let go of once it's read, and running out
+   of memory stops loading and keeps what's there. */
 resource 'SIZE' (-1) {
     reserved, acceptSuspendResumeEvents, reserved, canBackground, doesActivateOnFGSwitch,
     backgroundAndForeground, dontGetFrontClicks, ignoreChildDiedEvents, is32BitCompatible,
@@ -17,6 +18,7 @@ resource 'SIZE' (-1) {
 #include "icons.r"
 #include "listicons.r"
 #include "splash.r"
+#include "splash_text.r"
 #include "pages.r"
 #include "version.h"
 
@@ -77,6 +79,24 @@ resource 'DITL' (201) {
     }
 };
 
+/* An archive (a format with members): Cancel, Browse, or Save..., Save... the default.
+   ^0 its name, ^1 Mill's line ("This is a zip archive, 2,100K."), ^2 why Browse is dimmed */
+resource 'DLOG' (206, "Archive") {
+    {0, 0, 150, 340}, dBoxProc, invisible, noGoAway, 0, 206, "", noAutoCenter
+};
+resource 'DITL' (206) {
+    {
+        {116, 256, 136, 326}, Button { enabled, "Save\$C9" },
+        {116, 92, 136, 162}, Button { enabled, "Cancel" },
+        {116, 174, 136, 244}, Button { enabled, "Browse" },
+        {10, 14, 26, 326}, StaticText { disabled, "^0" },
+        {30, 14, 46, 326}, StaticText { disabled, "^1" },
+        {50, 14, 82, 326}, StaticText { disabled, "^2" },
+        {88, 12, 104, 326}, CheckBox { enabled, "Browse after saving" },
+        {112, 252, 140, 330}, UserItem { disabled }
+    }
+};
+
 /* When there isn't the memory for another window; placed for a 512x342 screen, as
    System 6 doesn't center alerts */
 resource 'ALRT' (202) {
@@ -87,7 +107,7 @@ resource 'ALRT' (202) {
 resource 'DITL' (202) {
     {
         {76, 236, 96, 306}, Button { enabled, "OK" },
-        {10, 70, 66, 306}, StaticText { disabled, "There isn't enough memory for another window. Close a window and try again." }
+        {10, 70, 66, 306}, StaticText { disabled, "There isn\$D5t enough memory for another window. Close a window and try again." }
     }
 };
 
@@ -101,7 +121,7 @@ resource 'DITL' (203) {
     {
         {82, 236, 102, 306}, Button { enabled, "Stay" },
         {82, 152, 102, 222}, Button { enabled, "Leave" },
-        {10, 70, 70, 306}, StaticText { disabled, "This page has a form you've changed and haven't sent. ^0" }
+        {10, 70, 70, 306}, StaticText { disabled, "This page has a form you\$D5ve changed and haven\$D5t sent. ^0" }
     }
 };
 
@@ -115,6 +135,22 @@ resource 'DITL' (204) {
     {
         {66, 236, 86, 306}, Button { enabled, "OK" },
         {10, 70, 56, 306}, StaticText { disabled, "Mill ran out of memory, so ^0" }
+    }
+};
+
+/* Save As of a name whose part file ("part." and the name) is there, where the protocol
+   can seek: Resume (the default), Replace, or Cancel */
+resource 'ALRT' (207) {
+    {80, 96, 166, 416}, 207, {
+        OK, visible, sound1, OK, visible, sound1, OK, visible, sound1, OK, visible, sound1
+    }, noAutoCenter
+};
+resource 'DITL' (207) {
+    {
+        {56, 236, 76, 306}, Button { enabled, "Resume" },
+        {56, 152, 76, 222}, Button { enabled, "Replace" },
+        {56, 68, 76, 138}, Button { enabled, "Cancel" },
+        {10, 70, 42, 306}, StaticText { disabled, "Attempt to resume, or replace this file?" }
     }
 };
 

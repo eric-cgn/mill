@@ -97,7 +97,7 @@ unsigned char unicode_to_mac(long u)
     return '?';
 }
 
-int utf8_char(const unsigned char *s, long n, long *u)
+__attribute__((optimize("O2"))) int utf8_char(const unsigned char *s, long n, long *u)
 {
     int len, i;
     long v;
@@ -138,6 +138,20 @@ int charset_named(const char *name, int len)
     return CHARSET_GUESS;
 }
 
+int charset_of_type(const char *type)
+{
+    const char *p = type ? strchr(type, ';') : NULL;
+    for (; p && *p; p++) {
+        int n;
+        if (!name_is(p, 8, "charset=")) continue;
+        p += 8;
+        if (*p == '"') p++;
+        for (n = 0; p[n] && p[n] != ';' && p[n] != ' ' && p[n] != '"'; n++) {}
+        return charset_named(p, n);
+    }
+    return CHARSET_GUESS;
+}
+
 /* "charset=" in a META tag near the top of the page */
 static int meta_charset(const char *src, long len)
 {
@@ -159,7 +173,7 @@ static int meta_charset(const char *src, long len)
     return CHARSET_GUESS;
 }
 
-int charset_sniff(const char *src, long len)
+__attribute__((optimize("O2"))) int charset_sniff(const char *src, long len)
 {
     const unsigned char *s = (const unsigned char *)src;
     long i = 0, u;
@@ -214,4 +228,71 @@ unsigned char entity_to_mac(const char *name, int len)
     for (i = 0; i < (int)(sizeof MORE / sizeof MORE[0]); i++)
         if ((int)strlen(MORE[i].name) == len && !memcmp(MORE[i].name, name, len)) return unicode_to_mac(MORE[i].u);
     return 0;
+}
+
+/* IBM PC code page 437's upper half as Unicode, for zip names: 0x80-0xAF, then 0xE0-0xFF
+   (0xB0-0xDF draw boxes, which the Mac has no characters for) */
+static const unsigned short CP437_80[48] = {
+    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7, 0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+    0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9, 0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192,
+    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA, 0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB };
+static const unsigned short CP437_E0[32] = {
+    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4, 0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229,
+    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248, 0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0 };
+
+unsigned char charset_byte_to_mac(unsigned char c, int cs)
+{
+    if (c < 128 || cs == CHARSET_MAC) return c;
+    if (cs == CHARSET_CP437) {
+        if (c < 0xB0) return unicode_to_mac(CP437_80[c - 0x80]);
+        if (c >= 0xE0) return unicode_to_mac(CP437_E0[c - 0xE0]);
+        return '?';
+    }
+    return latin1_to_mac(c);
+}
+
+long charset_name_to_mac(const char *in, int cs, char *out, long size)
+{
+    const unsigned char *s = (const unsigned char *)in;
+    long o = 0;
+    if (size < 1) return -1;
+    while (*s) {
+        unsigned char c;
+        long u;
+        int k;
+        if (cs == CHARSET_UTF8 && *s >= 0x80 && (k = utf8_char(s, (long)strlen((const char *)s), &u)) > 0) { c = unicode_to_mac(u); s += k; }
+        else c = charset_byte_to_mac(*s++, cs == CHARSET_UTF8 ? CHARSET_LATIN1 : cs);
+        if (!c) continue;
+        if (o + 1 >= size) break;
+        out[o++] = (char)c;
+    }
+    out[o] = 0;
+    return o;
+}
+
+void hfs_name(const char *mac, char out[32])
+{
+    const char *s = strrchr(mac, '/'), *dot;
+    long n, keep, ext = 0, i, o = 0;
+    s = s ? s + 1 : mac;
+    n = (long)strlen(s);
+    /* too long: cut the stem, keep a short extension (".txt", ".html") */
+    keep = n;
+    if (n > 31) {
+        dot = strrchr(s, '.');
+        if (dot && dot > s && s + n - dot <= 6) ext = s + n - dot;
+        keep = 31 - ext;
+    }
+    for (i = 0; i < n && o < 31; i++) {
+        unsigned char c;
+        if (i == keep) i = n - ext;
+        if (i >= n) break;
+        c = (unsigned char)s[i];
+        if (c == ':') c = '-';
+        if (c < 32 || c == 127) c = '-';
+        if (o == 0 && c == '.') c = '_';
+        out[o++] = (char)c;
+    }
+    out[o] = 0;
+    if (!o) strcpy(out, "Untitled");
 }

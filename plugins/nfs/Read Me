@@ -1,0 +1,18 @@
+NFS
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder.
+
+  nfs://host/                The server's exports
+  nfs://host/export/path     Network File System version 3, over TCP
+
+Folders are pages; files come as they are. Read-only. Each request carries
+the User ID and Group ID from Settings; the server must allow ports above
+1023 ("insecure"). Without a portmapper, NFS is on 2049 and MOUNT on the
+Mount port setting.
+
+plugin://nfs/about has a form, filled in from Settings.
+
+Written from the published specifications (RFC 1813, 1831, 1832, 1833,
+and 2224).
+
+Build: ./build.sh writes build/NFS.bin.

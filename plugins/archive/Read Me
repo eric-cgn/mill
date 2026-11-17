@@ -1,0 +1,25 @@
+Archives
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder.
+
+  zip         .zip, stored and deflated members
+  tar         .tar, ustar and V7
+  gzip        .gz and .tgz
+  MacBinary   .bin, I, II, and III
+  BinHex      .hqx, 4.0
+
+A link to an archive brings up Mill's dialog: Cancel, Browse, or Save...
+Browse lists the members, and a member opens like any page or file, at
+an address with "#/" and its name: kit.zip#/docs/readme.txt.
+
+zip and tar are read by parts, so they browse from this Mac's disks and
+from servers that can send parts; elsewhere they browse once saved.
+gzip, MacBinary, and BinHex browse from anywhere. Saving a member of a
+MacBinary or BinHex file makes the Mac file, both forks. A Mac text file
+shows in Mac Roman. zip and gzip use Mill's own decompression.
+
+Written from the published specifications (PKWARE's APPNOTE.TXT, POSIX
+1003.1-1990 for ustar, RFC 1951 and 1952, the MacBinary II and III
+standards, and BinHex 4.0's own notes).
+
+Build: ./build.sh writes build/Archives.bin.

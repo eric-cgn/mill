@@ -12,5 +12,5 @@ exec docker run --rm --platform linux/amd64 -v "$PWD/..":/sdk -w /sdk/Retro68 \
 	$CC -c /sdk/Examples/Finger/Finger.c -o build/finger.o
 	m68k-apple-macos-gcc -m68000 build/glue.o build/finger.o -o build/Finger.flt -Wl,--mac-flat -Wl,-eMILLMAIN -Wl,--gc-sections -nostartfiles
 	gzip -9nc /sdk/Examples/Finger/License > build/License.gz
-	cd build && Rez -I/Retro68-build/toolchain/m68k-apple-macos/RIncludes ../../Examples/Finger/Finger.r -o Finger.bin -t MPlg -c MiLL --cc Finger.bin
+	cd build && Rez -I/Retro68-build/toolchain/m68k-apple-macos/RIncludes -I/sdk/Interfaces ../../Examples/Finger/Finger.r -o Finger.bin -t MPlg -c MiLL --cc Finger.bin
 	ls -l Finger.flt Finger.bin'

@@ -100,7 +100,7 @@ long read_mac_file(const char *path, char **data, long max)
 
 /* ------------------------------------------------------------ settings */
 
-#define MAX_SETTINGS 64
+#define MAX_SETTINGS 160  /* Mill's own, ten bookmarks, and every Plug-In's (2.1 has about 90) */
 static char *names[MAX_SETTINGS], *values[MAX_SETTINGS];
 static int nsettings;
 
@@ -153,7 +153,7 @@ OSErr settings_write(void)
     long n;
     int i;
     OSErr err;
-    static const char header[] = "# Mill's settings: one name=value on each line. Saving in mill://config rewrites this file.\r";
+    static const char header[] = "# Mill\325s settings: one name=value per line. Saving from mill://config rewrites this file.\r";
     if ((err = settings_spec(&spec)) != noErr) return err;
     err = file_create(&spec, 'ttxt', 'TEXT');  /* SimpleText opens it */
     if (err != noErr && err != dupFNErr) return err;
@@ -183,6 +183,13 @@ int history_size(void)
     const char *v = setting("history", NULL);
     long n = v ? atol(v) : MILL_DEFAULT_HISTORY;
     return n < 1 ? 1 : n > MILL_HISTORY_MAX ? MILL_HISTORY_MAX : (int)n;
+}
+
+long keep_alive_secs(void)
+{
+    const char *v = setting("keep_alive", NULL);
+    long n = v ? atol(v) : MILL_DEFAULT_KEEP_ALIVE;
+    return n < 0 ? 0 : n > MILL_KEEP_ALIVE_MAX ? MILL_KEEP_ALIVE_MAX : n;
 }
 
 int auto_images(void)
@@ -227,13 +234,29 @@ static void bookmark_name(int n, char *name)
     sprintf(name, "bookmark%d", (n + 1) % 100);
 }
 
+/* The bookmarks a new Mill starts with, in slots 1 to 8, in the order the Welcome to the Internet
+   guide's Places page gives them; 9 and 10 are left for the user. A slot
+   the user empties is saved empty, so these never come back. Settings from before 2.1 get
+   them as core/migrate.h says. */
+const char *const first_bookmarks[] = {
+    "http://welcome.1in1e6.com/ Welcome to the Internet",
+    "http://frogfind.com/ FrogFind",
+    "http://info.cern.ch/ The First Web Site",
+    "gopher://gopher.floodgap.com/ Floodgap Gopher",
+    "ftp://ftp.funet.fi/pub/mac/info-mac/ Info-Mac Archive",
+    "finger://graph.no/oslo Weather by Finger",
+    "dict://dict.org/d:internet Dictionary",
+    "time://time.nist.gov/ Correct Time"
+};
+const int n_first_bookmarks = sizeof first_bookmarks / sizeof *first_bookmarks;
+
 int bookmark(int n, char *url, int url_size, char *title, int title_size)
 {
     char name[24];
     const char *v, *sp;
     long ul;
     bookmark_name(n, name);
-    v = setting(name, "");
+    v = setting(name, n >= 0 && n < n_first_bookmarks ? first_bookmarks[n] : "");
     if (!v[0]) return 0;
     sp = strchr(v, ' ');
     ul = sp ? sp - v : (long)strlen(v);
@@ -291,6 +314,16 @@ int local_image(const char *url, Bitmap1 *bm)
     Handle h;
     short *head_words;
     long size;
+    if (!strncmp(url, "mill://icon/", 12)) {
+        /* Mill's own listing icons ('ics#' 64 to 79), for the pages Mill makes */
+        long id = atol(url + 12);
+        int got;
+        if (id < 64 || id > 79 || !(h = GetResource('ics#', (short)id))) return -1;
+        HLock(h);
+        got = image_icon("ics#", (const unsigned char *)*h, GetHandleSize(h), bm);
+        HUnlock(h);
+        return got;
+    }
     if (strcmp(url, "mill://splash")) return -1;
     if (!(h = GetResource('SPLS', 128))) return IMAGE_NO_MEMORY;  /* it's always there */
     HLock(h);

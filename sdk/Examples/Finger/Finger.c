@@ -50,17 +50,20 @@ MillPlugIn *PlugInNew(const MillHost *host, short resFile, MillInfo *info)
     me->methods.request = finger_request;
     me->methods.purge = 0;
     me->methods.format = 0;
+    me->methods.font = 0;
+    me->methods.gzOut = 0;
     me->base.methods = &me->methods;
     me->protocol.scheme = "finger";
     me->protocol.heading = "Finger";
     me->protocol.description = "Finger User Information Protocol (RFC 1288)";
+    me->protocol.blockSize = 0;          /* it can't seek: no parts of files */
     me->protocol.settingCount = 0;
     me->protocol.settings = 0;
     info->name = "finger";
     info->version = "1.0";
     info->copyright = "Example";
     info->by = "OneInAMillion Software";
-    info->description = "Who's on a host, and about its users (RFC 1288).";
+    info->description = "Who\325s on a host, and about its users (RFC 1288).";
     info->protocolCount = 1;
     info->protocols = &me->protocol;
     return &me->base;

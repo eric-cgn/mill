@@ -22,6 +22,8 @@ enum { FACE_BOLD = 1, FACE_ITALIC = 2, FACE_UNDERLINE = 4 };
 typedef struct { short font, size; unsigned char face; } MStyle;
 
 typedef struct {
+    /* A width depends only on the text and the style, and not on the style's underline or
+       the bits above FACE_QD: layout measures a word once, and a table once, wherever it is */
     long (*text_width)(void *ctx, const MStyle *s, const char *text, long len);
     void (*font_metrics)(void *ctx, const MStyle *s, short *ascent, short *descent, short *leading);
     /* An image's size once it has loaded (returns 1), else 0; may be NULL */
@@ -40,6 +42,10 @@ typedef struct {
     short zoom;
     /* with zoom, scale only the text's sizes: distances and pictures stay at normal size */
     char text_only;
+    /* 1 if text in the style is always as wide as its pieces added up (each character a
+       whole number of pixels, as in a font at a size it has a strike of), so a run that grows
+       by a word needn't be measured again whole; 0 if not (a scaled font). May be NULL: never. */
+    int (*adds_up)(void *ctx, const MStyle *s);
 } Metrics;
 
 enum { RUN_TEXT, RUN_GEN, RUN_RULE, RUN_IMAGE, RUN_CONTROL, RUN_MARK };

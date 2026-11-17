@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
-"""Mill's distribution disk: dist/Mill-VERSION.image, a Disk Copy 4.2 image of an 800K HFS disk named "Mill" with Mill,
-its Plug-Ins folder (Web Fonts, Internet Services), and the Plug-In SDK folder (the
-kit's own disk contents, made by tools/kit.py's code), and the Desktop file System 6 needs on a
-locked disk (Mini vMac mounts the image locked). Nothing of Apple's. Needs what
-./build.sh makes first: build/Mill.bin, build/fonts/ (tools/extras/build.py --styles --out
-build/fonts), and plugins/internet/build/Internet Services.bin. ./build.sh disk does all of it."""
+"""Mill's release disk, "Mill Program Disk": dist/Mill-VERSION.image, a Disk Copy 4.2 image of an
+800K HFS disk with Mill ready to run, laid out as Easy Install puts it: Mill, and its Mill Plug-Ins
+folder with the Plug-Ins and Web Fonts that installer/mill.ini's Easy Install puts there
+(Internet Services, SMB, NFS, News, LDAP, IMAP, Image Formats, Archives, and Web Fonts). Also the
+invisible Icon file that gives the disk its windmill icon, and the Desktop file System 6 needs
+on a locked disk (Mini vMac mounts the image locked). Nothing of Apple's. The Plug-In SDK is not
+on it: it is on its own disk (./build.sh kit) and in Install Mill's Custom Install.
+Needs what ./build.sh makes first: build/Mill.bin, build/fonts/ (tools/extras/build.py --styles
+--out build/fonts), plugins/internet/build/Internet Services.bin, plugins/smb/build/SMB.bin,
+plugins/nfs/build/NFS.bin, plugins/news/build/News.bin, plugins/ldap/build/LDAP.bin,
+plugins/imap/build/IMAP.bin, plugins/images/build/Image Formats.bin, and
+plugins/archive/build/Archives.bin.
+./build.sh disk does all of it."""
 import os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kit
 import icons
 
 root = kit.root
-VOLUME = 'Mill'
+VOLUME = 'Mill Program Disk'
 CAPACITY = 800 * 1024
+
+
+def part_number(v, disk='DM02'):
+    """A Mill disk's part number, which follows Mill's version: #1E6-DM02-V21 for this disk with
+    2.1. disk: DM02, this one; DM03 the Mill Extras Disk; DM04 the Mill Distribution Disk"""
+    return '#1E6-%s-V%s' % (disk, re.match(r'\d+(\.\d+)*', v).group(0).replace('.', ''))
 
 
 def macbinary_fields(path):
@@ -164,40 +177,75 @@ def custom_icon_flag(image):
 
 
 # Where the Finder shows the disk's icons (top, left, in the window) and the window (global rect):
-# Mill in the top left, the folders one row down from the next column, as an application folder
-# usually is
-PLACES = {'Mill': (12, 24), 'Mill Plug-Ins': (78, 104), 'Mill Plug-In SDK': (78, 194)}
-WINDOW = (70, 40, 230, 340)
+# Mill on the left and its folder beside it
+PLACES = {'Mill': (12, 24), 'Mill Plug-Ins': (12, 124)}
+WINDOW = (70, 40, 250, 260)
+# Folders on the disk whose window and icons are set too: {name: (window, icons a row)}; the
+# icons go in name order, 80 apart, rows 64 apart
+FOLDERS = {'Mill Plug-Ins': ((100, 40, 300, 470), 5)}
 
 
-def place_icons(image):
-    """Give the root's items their places (and set "inited", so the Finder keeps them), and the
-    disk's window its size: hfsutils can't write these Finder fields"""
-    d = bytearray(open(image, 'rb').read())
-    blk, start = struct.unpack('>IH', d[1024 + 20:1024 + 24] + d[1024 + 28:1024 + 30])
+def catalog(d):
+    """(parent ID, name, offset of the record's body) of each leaf record of the disk's catalog"""
+    blk, start = struct.unpack('>IH', bytes(d[1024 + 20:1024 + 24] + d[1024 + 28:1024 + 30]))
     first, count = struct.unpack('>HH', d[1024 + 150:1024 + 154])
     cat = start * 512 + first * blk
-    placed = set()
     for node in range(count * blk // 512):
         n = cat + node * 512
-        if d[n + 8] != 0xFF:
+        if d[n + 8] != 0xFF:        # leaf nodes only
             continue
         for rec in range(struct.unpack('>H', d[n + 10:n + 12])[0]):
             off = struct.unpack('>H', d[n + 510 - 2 * rec:n + 512 - 2 * rec])[0]
             klen = d[n + off]
             parent = struct.unpack('>I', d[n + off + 2:n + off + 6])[0]
             name = bytes(d[n + off + 7:n + off + 7 + d[n + off + 6]]).decode('mac_roman')
-            body = n + off + 1 + klen + (1 + klen) % 2
-            if parent == 1 and d[body] == 1:                        # the root folder: its window
-                d[body + 22:body + 30] = struct.pack('>4h', *WINDOW)
-            elif parent == 2 and name in PLACES and d[body] in (1, 2):
-                at = body + 14 if d[body] == 2 else body + 32         # fdLocation, or a folder's frLocation
-                fl = body + 12 if d[body] == 2 else body + 30         # fdFlags, frFlags
-                d[at:at + 4] = struct.pack('>2h', *PLACES[name])
-                d[fl:fl + 2] = struct.pack('>H', struct.unpack('>H', d[fl:fl + 2])[0] | 0x0100)
-                placed.add(name)
-    if placed != set(PLACES):
-        sys.exit('the disk image has no %s' % ', '.join(sorted(set(PLACES) - placed)))
+            yield parent, name, n + off + 1 + klen + (1 + klen) % 2     # the record starts on an even byte
+
+
+def place(d, body, at):
+    """An item's place in its window, (top, left), and "inited", so the Finder keeps it"""
+    loc = body + 14 if d[body] == 2 else body + 32         # fdLocation, or a folder's frLocation
+    fl = body + 12 if d[body] == 2 else body + 30          # fdFlags, frFlags
+    d[loc:loc + 4] = struct.pack('>2h', *at)
+    d[fl:fl + 2] = struct.pack('>H', struct.unpack('>H', d[fl:fl + 2])[0] | 0x0100)
+
+
+def open_by_icon(d, body, window):
+    """A folder's window: its rect, and frView 0x0100, by Icon. The Finder ignores both unless
+    the folder is "inited"."""
+    d[body + 22:body + 30] = struct.pack('>4h', *window)
+    d[body + 30:body + 32] = struct.pack('>H', struct.unpack('>H', d[body + 30:body + 32])[0] | 0x0100)
+    d[body + 36:body + 38] = struct.pack('>H', 0x0100)
+
+
+def place_icons(image, places=None, window=None, folders=None):
+    """Give the root's items their places, and the disk's window its size, by Icon; and the same
+    for the folders in folders and their items: hfsutils can't write these Finder fields. places,
+    window, and folders default to this disk's (PLACES, WINDOW, FOLDERS)"""
+    places = PLACES if places is None else places
+    window = WINDOW if window is None else window
+    folders = FOLDERS if folders is None else folders
+    d = bytearray(open(image, 'rb').read())
+    placed, ids = set(), {}
+    for parent, name, body in catalog(d):
+        if parent == 1 and d[body] == 1:                    # the root folder: its window
+            open_by_icon(d, body, window)
+        elif parent == 2 and name in places and d[body] in (1, 2):
+            place(d, body, places[name])
+            placed.add(name)
+            if d[body] == 1 and name in folders:
+                open_by_icon(d, body, folders[name][0])
+                ids[struct.unpack('>I', d[body + 6:body + 10])[0]] = name
+    if placed != set(places):
+        sys.exit('the disk image has no %s' % ', '.join(sorted(set(places) - placed)))
+    inside = {}
+    for parent, name, body in catalog(d):
+        if parent in ids and d[body] in (1, 2):
+            inside.setdefault(parent, []).append((name.lower(), body))
+    for parent, items in inside.items():
+        a_row = folders[ids[parent]][1]
+        for i, (_, body) in enumerate(sorted(items)):
+            place(d, body, (12 + 64 * (i // a_row), 24 + 80 * (i % a_row)))
     open(image, 'wb').write(d)
 
 
@@ -222,6 +270,35 @@ def disk_copy(raw, name):
     return bytes(h) + raw
 
 
+def easy_install_check():
+    """Exit unless the disk's Mill Plug-Ins folder holds what installer/mill.ini's Easy Install
+    puts there, so the two can't drift apart"""
+    ini = open(os.path.join(root, 'installer', 'mill.ini'), encoding='utf-8').read()
+    easy = set()
+    for block in re.split(r'\n(?=\[)', ini):
+        k = dict(re.findall(r'^(\w+)\s*=\s*(.*?)\s*$', block, re.M))
+        if block.startswith('[component') and 'easy' in [t.strip() for t in k.get('types', '').split(',')] \
+                and k.get('destination') == '%chosen%:Mill Plug-Ins':
+            easy.add(k['source'][:-len('.bin')])
+    if easy != set(PLUGINS):
+        sys.exit('installer/mill.ini\'s Easy Install puts %s in Mill Plug-Ins; this disk has %s'
+                 % (', '.join(sorted(easy)), ', '.join(sorted(PLUGINS))))
+
+
+# The Mill Plug-Ins folder: (name, MacBinary path in the repository, type), Easy Install's
+PLUGINS = {
+    'Web Fonts': (('build', 'fonts', 'Web Fonts.bin'), b'FFIL'),
+    'Internet Services': (('plugins', 'internet', 'build', 'Internet Services.bin'), b'MPlg'),
+    'SMB': (('plugins', 'smb', 'build', 'SMB.bin'), b'MPlg'),
+    'NFS': (('plugins', 'nfs', 'build', 'NFS.bin'), b'MPlg'),
+    'News': (('plugins', 'news', 'build', 'News.bin'), b'MPlg'),
+    'LDAP': (('plugins', 'ldap', 'build', 'LDAP.bin'), b'MPlg'),
+    'IMAP': (('plugins', 'imap', 'build', 'IMAP.bin'), b'MPlg'),
+    'Image Formats': (('plugins', 'images', 'build', 'Image Formats.bin'), b'MPlg'),
+    'Archives': (('plugins', 'archive', 'build', 'Archives.bin'), b'MPlg'),
+}
+
+
 def need(path, how):
     if not os.path.exists(path):
         sys.exit('%s is missing: %s' % (os.path.relpath(path, root), how))
@@ -231,8 +308,7 @@ def need(path, how):
 def main():
     v = kit.version()
     mill = need(os.path.join(root, 'build', 'Mill.bin'), './build.sh')
-    fonts = need(os.path.join(root, 'build', 'fonts', 'Web Fonts.bin'), 'tools/extras/build.py --styles --out build/fonts')
-    inet = need(os.path.join(root, 'plugins', 'internet', 'build', 'Internet Services.bin'), 'plugins/internet/build.sh')
+    easy_install_check()
     out = os.path.join(root, 'build', 'Mill-disk.dsk')       # raw, for hfsutils; dist gets the Disk Copy image
     image = os.path.join(kit.dist, 'Mill-%s.image' % v)
     os.makedirs(kit.dist, exist_ok=True)
@@ -245,10 +321,11 @@ def main():
         kit.hfs('hmkdir', ':Mill Plug-Ins')
         bundled = os.path.join(tmp, 'Mill.bin')
         with_bundle_bit(mill, bundled)
-        for name, path, want, where in (
-                ('Mill', bundled, (b'APPL', b'MiLL'), ':'),
-                ('Mill Plug-Ins:Web Fonts', fonts, (b'FFIL', b'MiLL'), ':Mill Plug-Ins:'),
-                ('Mill Plug-Ins:Internet Services', inet, (b'MPlg', b'MiLL'), ':Mill Plug-Ins:')):
+        copies = [('Mill', bundled, (b'APPL', b'MiLL'), ':')]
+        for name, (parts, ftype) in PLUGINS.items():
+            how = 'tools/extras/build.py --styles --out build/fonts' if name == 'Web Fonts' else '%s/build.sh' % '/'.join(parts[:2])
+            copies.append(('Mill Plug-Ins:' + name, need(os.path.join(root, *parts), how), (ftype, b'MiLL'), ':Mill Plug-Ins:'))
+        for name, path, want, where in copies:
             t, c, dlen, rlen = macbinary_fields(path)
             if (t, c) != want:
                 sys.exit('%s is type %s, creator %s; expected %s' % (name, t, c, want))
@@ -260,15 +337,12 @@ def main():
         desktop = os.path.join(tmp, 'Desktop.bin')
         desktop_file(desktop, bundled)
         kit.hfs('hcopy', '-m', desktop, ':')
-        before = free_bytes()
-        kit.copy_kit(':Mill Plug-In SDK')
-        items.append(('Mill Plug-In SDK (the SDK disk\'s files)', before - free_bytes()))
         free = free_bytes()
     finally:
         kit.hfs('humount')
     custom_icon_flag(out)
     place_icons(out)
-    open(image, 'wb').write(disk_copy(open(out, 'rb').read(), 'Mill'))
+    open(image, 'wb').write(disk_copy(open(out, 'rb').read(), VOLUME))
     print('%s' % image)
     print('%-42s %9s' % ('item', 'bytes'))
     for n, b in items:

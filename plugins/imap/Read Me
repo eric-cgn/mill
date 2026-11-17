@@ -1,0 +1,21 @@
+IMAP
+
+A Plug-In for Mill. Put it in the "Mill Plug-Ins" folder.
+
+  imap://user@host/                    The mailboxes
+  imap://user@host/mailbox             Its messages, newest first
+  imap://user@host/mailbox?search      Those a search finds (FROM eric)
+  imap://user@host/mailbox/;UID=n      A message
+
+Internet Message Access Protocol (IMAP4 and IMAP4rev1), with a plain LOGIN.
+Read-only: mailboxes are opened with EXAMINE and messages read with
+BODY.PEEK, so reading one doesn't mark it read. Unread messages are in bold.
+The text part is shown (quoted-printable and base64 decoded); other parts
+are named, not shown. Mill asks for the password.
+
+plugin://imap/about has a form, filled in from Settings.
+
+Written from the published specifications (RFC 1730, 2060, 2192, 822,
+1522, 2045, and 2046).
+
+Build: ./build.sh writes build/IMAP.bin.
