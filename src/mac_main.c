@@ -32,7 +32,7 @@
 
 enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
 enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_PAGE_SETUP = 6, FILE_PRINT, FILE_QUIT = 9 };
-enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_PREFERENCES = 8, EDIT_CLEAR_LOGINS };
+enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_FIND, EDIT_FIND_AGAIN, EDIT_PREFERENCES = 10, EDIT_CLEAR_LOGINS };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME, GO_STOP = 6 };
 enum { VIEW_LARGER = 1, VIEW_SMALLER, VIEW_PAGE_SOURCE = 4, VIEW_FULL_SCREEN = 6 };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
@@ -2528,6 +2528,13 @@ enum { AD_SAVE = 1, AD_CANCEL, AD_BROWSE, AD_NAME, AD_LINE, AD_REASON, AD_AFTER,
 
 static pascal void draw_ring(DialogPtr d, short item);
 
+/* Centered a third of the way down, as alerts are */
+static void center_dialog(DialogPtr d)
+{
+    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
+               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+}
+
 /* Return and Enter are Save...; Escape and Command-period are Cancel */
 static pascal Boolean ad_filter(DialogPtr d, EventRecord *e, short *item)
 {
@@ -2570,8 +2577,7 @@ static short archive_dialog(const char *name, const PlugFormat *f, long size, co
     pstr_of(reason ? reason : "", p2);
     ParamText(p0, p1, p2, "\p");
     if (!(d = GetNewDialog(DIALOG_ARCHIVE, NULL, (WindowPtr)-1))) return AD_CANCEL;
-    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
-               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+    center_dialog(d);
     GetDialogItem(d, AD_RING, &type, &h, &r);
     SetDialogItem(d, AD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
     GetDialogItem(d, AD_BROWSE, &type, &h, &r);
@@ -5212,9 +5218,7 @@ static void bookmark_dialog(short slot)
     }
     bd_slot = slot;
     if (!(d = GetNewDialog(200, NULL, (WindowPtr)-1))) return;
-    /* centered a third of the way down, as alerts are */
-    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
-               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+    center_dialog(d);
     GetDialogItem(d, BD_SLOT, &type, &h, &r);
     SetDialogItem(d, BD_SLOT, type, (Handle)(UserItemUPP)draw_slot, &r);
     GetDialogItem(d, BD_RING, &type, &h, &r);
@@ -5280,6 +5284,81 @@ static void open_bookmark(short n)
     if (bookmark(n, url, sizeof url, title, sizeof title) && need()) go(url, true, NULL);
 }
 
+/* Find: what to look for, kept for Find Again */
+static Str255 find_what;
+enum { FD_FIND = 1, FD_CANCEL, FD_LABEL, FD_TEXT, FD_RING };
+
+/* Ask what to find; false for Cancel */
+static Boolean find_dialog(void)
+{
+    DialogPtr d;
+    short item, type;
+    Handle h;
+    Rect r;
+    HiliteMenu(0);
+    if (!(d = GetNewDialog(208, NULL, (WindowPtr)-1))) return false;
+    center_dialog(d);
+    GetDialogItem(d, FD_RING, &type, &h, &r);
+    SetDialogItem(d, FD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
+    GetDialogItem(d, FD_TEXT, &type, &h, &r);
+    SetDialogItemText(h, find_what);
+    SelectDialogItemText(d, FD_TEXT, 0, 32767);
+    ShowWindow(d);
+    InitCursor();
+    do ModalDialog((ModalFilterUPP)bd_filter, &item); while (item > FD_CANCEL);
+    if (item == FD_FIND) GetDialogItemText(h, find_what);
+    DisposeDialog(d);
+    SetPort(br->win);
+    return item == FD_FIND;
+}
+
+/* A character as Find compares it: letters in either case alike, and any white space a space */
+static unsigned char fold(unsigned char c)
+{
+    return c <= ' ' ? ' ' : c >= 'A' && c <= 'Z' ? c | 32 : c;
+}
+
+/* Select n characters at Doc.text offset at, in run r on line ln, and scroll to them:
+   across only if they don't show from the left, down to a third of the way if they're not in view */
+static void find_show(const MLine *ln, const Run *r, long at, long n)
+{
+    long y = br->scroll_y, x = br->scroll_x, h = br->view_r.bottom - br->view_r.top,
+         w = br->view_r.right - br->view_r.left, px = r->x + run_width(r, at - r->text);
+    RgnHandle save;
+    page_focus();
+    br->sel_a = at;
+    br->sel_b = at + n;
+    scroll_x_to(px < w - 32 ? 0 : px < x || px >= x + w - 16 ? px - 16 : x);
+    if (ln->y < y || ln->y + ln->height > y + h) scroll_to(ln->y - h / 3);
+    if (y == br->scroll_y && x == br->scroll_x) {   /* no redraw: just show the selection */
+        save = clip_to(&br->view_r);
+        sel_invert(at, at + n);
+        unclip(save);
+    }
+}
+
+/* Select the next place on the page that has find_what, after the selection (or from
+   the top), going round once. A beep if there's none. */
+static void find_next(void)
+{
+    long n = find_what[0], from = 0, at, i, k, end = br->doc.text_len - n;
+    short pass;
+    if (br->focus < -1) from = br->sel_a > br->sel_b ? br->sel_a : br->sel_b;
+    for (pass = 0; pass < 2 && n && br->have_page; pass++, from = 0)
+        for (at = from; at <= end; at++) {
+            for (i = 0; i < n && fold(br->doc.text[at + i]) == fold(find_what[i + 1]); i++) {}
+            if (i < n) continue;
+            for (i = 0; i < br->lay.nlines; i++) {   /* only text that shows */
+                const MLine *ln = &br->lay.lines[i];
+                for (k = ln->first; k < ln->first + ln->count; k++) {
+                    const Run *r = &br->lay.runs[k];
+                    if (r->kind == RUN_TEXT && at >= r->text && at < r->text + r->len) { find_show(ln, r, at, n); return; }
+                }
+            }
+        }
+    SysBeep(10);
+}
+
 /* The menus as they are now: the bookmark slots, and what needs a window */
 static void refresh_menus(void)
 {
@@ -5316,6 +5395,8 @@ static void refresh_menus(void)
         if (br && br->loading) EnableItem(nav, GO_STOP); else DisableItem(nav, GO_STOP);
         if (br && zoom_step < 6) EnableItem(view, VIEW_LARGER); else DisableItem(view, VIEW_LARGER);
         if (br && zoom_step > 0) EnableItem(view, VIEW_SMALLER); else DisableItem(view, VIEW_SMALLER);
+        if (br && !da && br->have_page) EnableItem(edit, EDIT_FIND); else DisableItem(edit, EDIT_FIND);
+        if (br && !da && br->have_page && find_what[0]) EnableItem(edit, EDIT_FIND_AGAIN); else DisableItem(edit, EDIT_FIND_AGAIN);
         if (br && br->have_page) EnableItem(view, VIEW_PAGE_SOURCE); else DisableItem(view, VIEW_PAGE_SOURCE);
         if (br) EnableItem(view, VIEW_FULL_SCREEN); else DisableItem(view, VIEW_FULL_SCREEN);
     }
@@ -5375,6 +5456,8 @@ static void do_menu(long choice)
         if (item == FILE_QUIT) quitting = may_quit();
     } else if (menu == MENU_EDIT) {
         if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true, NULL); }
+        if (item == EDIT_FIND && br && find_dialog()) find_next();
+        if (item == EDIT_FIND_AGAIN && br) find_next();
         if (item == EDIT_CLEAR_LOGINS) {
             /* every name and password typed, and every cookie: the next protected page asks again */
             auth_clear(&keyring);
@@ -5791,7 +5874,7 @@ static void setup_menus(void)
     AppendMenu(m, "\pNew Window/N;Open Location\311/L;Open File\311/O;Close/W;(-;Page Setup\311;Print\311/P;(-;Quit/Q");
     InsertMenu(m, 0);
     m = NewMenu(MENU_EDIT, "\pEdit");
-    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;(-;Preferences\311;Clear Logins and Cookies");
+    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;Find\311/F;Find Again/G;(-;Preferences\311;Clear Logins and Cookies");
     InsertMenu(m, 0);
     m = NewMenu(MENU_VIEW, "\pView");
     AppendMenu(m, "\pLarger Text/+;Smaller Text/-;(-;Page Source;(-;Full Screen/K");

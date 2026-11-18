@@ -79,6 +79,20 @@ resource 'DITL' (201) {
     }
 };
 
+/* Find: what to look for on the page */
+resource 'DLOG' (208, "Find") {
+    {0, 0, 84, 320}, dBoxProc, invisible, noGoAway, 0, 208, "", noAutoCenter
+};
+resource 'DITL' (208) {
+    {
+        {50, 236, 70, 306}, Button { enabled, "Find" },
+        {50, 152, 70, 222}, Button { enabled, "Cancel" },
+        {14, 12, 30, 52}, StaticText { disabled, "Find:" },
+        {14, 58, 30, 304}, EditText { enabled, "" },
+        {46, 232, 74, 310}, UserItem { disabled }
+    }
+};
+
 /* An archive (a format with members): Cancel, Browse, or Save..., Save... the default.
    ^0 its name, ^1 Mill's line ("This is a zip archive, 2,100K."), ^2 why Browse is dimmed */
 resource 'DLOG' (206, "Archive") {
