@@ -34,7 +34,7 @@ if [ "${1:-}" = disk ]; then
 fi
 if [ "${1:-}" = installer ]; then
 	# Install Mill (installer/mill.ini), made with EUP: its icon from installer/icons.r, then
-	# tools/installer.py, which fetches EUP 1.3 and builds the installer from the builds above
+	# tools/installer.py, which fetches EUP 1.4 and builds the installer from the builds above
 	rm -rf build/installer
 	exec docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src "$IMAGE" sh -c '
 		set -e

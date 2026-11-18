@@ -9,11 +9,10 @@ import hashlib, os, re, shutil, subprocess, sys, tarfile, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import disk, kit
 
-# EUP 1.3: git archive --prefix=eup-1.3/ of EUP's v1.1 branch at fa047be, as its release.sh makes it.
-# Until that release is on GitHub, put the archive in build/ (it is used from there, checked).
-EUP_VERSION = '1.3'
+# EUP 1.4's source release, eup-1.4.tar.gz from its GitHub release (kept in build/, checked).
+EUP_VERSION = '1.4'
 EUP_URL = 'https://github.com/eric-cgn/eup/releases/download/v%s/eup-%s.tar.gz' % (EUP_VERSION, EUP_VERSION)
-EUP_SHA256 = '43cc377bf82aa8af0e4dfd868c58244c6c24caadaecd659c5ced00a92a59cad9'
+EUP_SHA256 = '964b6b05ac0a9d2efbb085998a1ba3ce3aff9bcf89ba67836b877d67733e49bc'
 
 root = kit.root
 out = os.path.join(root, 'build', 'installer')
