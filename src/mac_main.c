@@ -32,7 +32,7 @@
 
 enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
 enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_PAGE_SETUP = 6, FILE_PRINT, FILE_QUIT = 9 };
-enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_PREFERENCES = 8, EDIT_CLEAR_LOGINS };
+enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_FIND, EDIT_FIND_AGAIN, EDIT_PREFERENCES = 10, EDIT_CLEAR_LOGINS };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME, GO_STOP = 6 };
 enum { VIEW_LARGER = 1, VIEW_SMALLER, VIEW_PAGE_SOURCE = 4, VIEW_FULL_SCREEN = 6 };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
@@ -93,7 +93,8 @@ typedef struct Browser {
     Pic *pics;
     short npics;
     short *pic_of;              /* IMG node -> index in pics + 1, or 0 */
-    long focus;                 /* the field being typed in, or -1 for the address */
+    long focus;                 /* the field being typed in, -1 for the address, or -2 for the page */
+    long sel_a, sel_b;          /* with -2, the page's text selected: Doc.text offsets, either order */
     Boolean focus_shown;        /* the focused field was on screen at the last draw */
     Rect focus_clip;            /* and where */
     unsigned long refresh_at;   /* client pull: the TickCount to load again at, 0 for none */
@@ -1473,6 +1474,36 @@ static Boolean pic_area(short which, Rect *area)
     return any;
 }
 
+/* How wide a text run's first n characters are */
+static short run_width(const Run *r, long n)
+{
+    MStyle s;
+    s.font = r->font; s.size = r->size; s.face = r->face;
+    return (short)qd_width(NULL, &s, br->doc.text + r->text, n);
+}
+
+/* Invert the page's text between Doc.text offsets a and b where it shows */
+static void sel_invert(long a, long b)
+{
+    long i, k, s, e;
+    if (a > b) { s = a; a = b; b = s; }
+    for (i = layout_line_at(&br->lay, br->scroll_y); i < br->lay.nlines && br->lay.lines[i].y < br->scroll_y + br->view_r.bottom; i++) {
+        const MLine *ln = &br->lay.lines[i];
+        Rect rc;
+        rc.top = br->view_r.top + (short)(ln->y - br->scroll_y);
+        rc.bottom = rc.top + ln->height;
+        for (k = ln->first; k < ln->first + ln->count; k++) {
+            const Run *r = &br->lay.runs[k];
+            s = a > r->text ? a : r->text;
+            e = b < r->text + r->len ? b : r->text + r->len;
+            if (r->kind != RUN_TEXT || s >= e) continue;
+            rc.left = PAGE_LEFT + r->x + run_width(r, s - r->text);
+            rc.right = PAGE_LEFT + r->x + run_width(r, e - r->text);
+            InvertRect(&rc);
+        }
+    }
+}
+
 /* Draw the page's visible part; with only >= 0, just the runs showing that picture */
 static void draw_page(short only)
 {
@@ -1573,6 +1604,7 @@ static void draw_page(short only)
                 TextMode(srcOr);
             }
         }
+        if (only < 0 && br->focus < -1) sel_invert(br->sel_a, br->sel_b);
     }
     unclip(save);
     draw_status();  /* the message stays over the page */
@@ -1788,7 +1820,7 @@ static void activate(WindowPtr w, Boolean on)
     if (!x) return;
     use(x);
     te = x->focus >= 0 && x->forms.fields[x->focus].type != FIELD_PASSWORD ? x->field_te : x->url_te;
-    if (on) TEActivate(te); else TEDeactivate(te);
+    if (x->focus > -2) { if (on) TEActivate(te); else TEDeactivate(te); }
     HiliteControl(x->vscroll, on ? 0 : 255);
     HiliteControl(x->hscroll, on ? 0 : 255);
     draw_grow();
@@ -1824,6 +1856,10 @@ static void blur(void)
         TEDeactivate(br->field_te);
         br->focus = -1;
         br->focus_shown = false;
+    }
+    if (br->focus < -1) {
+        br->focus = -1;
+        if (br->sel_a != br->sel_b) { br->sel_a = br->sel_b; draw_view(); }
     }
     TEActivate(br->url_te);
 }
@@ -2492,6 +2528,13 @@ enum { AD_SAVE = 1, AD_CANCEL, AD_BROWSE, AD_NAME, AD_LINE, AD_REASON, AD_AFTER,
 
 static pascal void draw_ring(DialogPtr d, short item);
 
+/* Centered a third of the way down, as alerts are */
+static void center_dialog(DialogPtr d)
+{
+    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
+               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+}
+
 /* Return and Enter are Save...; Escape and Command-period are Cancel */
 static pascal Boolean ad_filter(DialogPtr d, EventRecord *e, short *item)
 {
@@ -2534,8 +2577,7 @@ static short archive_dialog(const char *name, const PlugFormat *f, long size, co
     pstr_of(reason ? reason : "", p2);
     ParamText(p0, p1, p2, "\p");
     if (!(d = GetNewDialog(DIALOG_ARCHIVE, NULL, (WindowPtr)-1))) return AD_CANCEL;
-    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
-               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+    center_dialog(d);
     GetDialogItem(d, AD_RING, &type, &h, &r);
     SetDialogItem(d, AD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
     GetDialogItem(d, AD_BROWSE, &type, &h, &r);
@@ -4479,6 +4521,91 @@ static void context_menu(Point p, const Run *r)
     }
 }
 
+/* The page takes the keyboard from the address or a field, its selection cleared */
+static void page_focus(void)
+{
+    RgnHandle save;
+    hide_status();
+    if (br->focus > -2) { blur(); TEDeactivate(br->url_te); br->focus = -2; }
+    save = clip_to(&br->view_r);
+    sel_invert(br->sel_a, br->sel_b);
+    unclip(save);
+    br->sel_a = br->sel_b = 0;
+}
+
+/* The Doc.text offset in the page's text nearest p, or -1 if there's none on its line */
+static long sel_at(Point p)
+{
+    long y = br->scroll_y + (p.v - br->view_r.top), i, k;
+    short x = p.h - PAGE_LEFT, n, w0 = 0, w1;
+    const Run *best = NULL;
+    for (i = layout_line_at(&br->lay, y); i < br->lay.nlines && br->lay.lines[i].y <= y; i++) {
+        const MLine *ln = &br->lay.lines[i];
+        if (y >= ln->y + ln->height) continue;
+        for (k = ln->first; k < ln->first + ln->count; k++) {
+            const Run *r = &br->lay.runs[k];
+            if (r->kind == RUN_TEXT && r->x <= x && (!best || r->x > best->x)) best = r;
+        }
+    }
+    if (!best) return -1;
+    for (n = 0; n < best->len; n++, w0 = w1)
+        if ((w1 = run_width(best, n + 1)) + w0 > 2 * (x - best->x)) break;
+    return best->text + n;
+}
+
+/* Select text from p while the button is down; the page scrolls at the view's edges */
+static void drag_select(Point p)
+{
+    Rect v = br->view_r;
+    unsigned long t = 0;
+    long at;
+    RgnHandle save;
+    page_focus();
+    br->sel_a = br->sel_b = sel_at(p);
+    while (StillDown()) {
+        GetMouse(&p);
+        if (TickCount() - t > 2) {
+            t = TickCount();
+            scroll_to(br->scroll_y + (p.v <= v.top ? -16 : p.v >= v.bottom - 1 ? 16 : 0));
+            scroll_x_to(br->scroll_x + (p.h <= v.left ? -16 : p.h >= v.right - 1 ? 16 : 0));
+        }
+        if (p.v < v.top) p.v = v.top;
+        if (p.v >= v.bottom) p.v = v.bottom - 1;
+        if ((at = sel_at(p)) < 0) continue;
+        if (br->sel_a < 0) br->sel_a = br->sel_b = at;
+        save = clip_to(&v);
+        sel_invert(br->sel_b, at);
+        unclip(save);
+        br->sel_b = at;
+    }
+    if (br->sel_a < 0) br->sel_a = br->sel_b = 0;
+}
+
+/* Copy the page's selected text: a return where a line starts again at the left, a space for a gap */
+static void copy_sel(void)
+{
+    long a = br->sel_a < br->sel_b ? br->sel_a : br->sel_b, b = br->sel_a + br->sel_b - a, k, n = 0, s, e;
+    short px = 0;
+    char *buf = malloc(b - a + br->lay.nruns), *lm = (char *)0xAB0;
+    if (!buf) return;
+    for (k = 0; k < br->lay.nruns; k++) {
+        const Run *r = &br->lay.runs[k];
+        s = a > r->text ? a : r->text;
+        e = b < r->text + r->len ? b : r->text + r->len;
+        if (r->kind != RUN_TEXT || s >= e) continue;
+        if (n && r->x != px) buf[n++] = r->x < px ? '\r' : ' ';
+        memcpy(buf + n, br->doc.text + s, e - s);
+        n += e - s;
+        px = r->x + r->width;
+    }
+    ZeroScrap();
+    PutScrap(n, 'TEXT', buf);
+    __asm__("" : "+a"(lm));         /* TEScrpLength and TEScrpHandle, hidden from GCC */
+    PtrToXHand(buf, *(Handle *)(lm + 4), n);     /* TextEdit's scrap too, for pasting here */
+    *(short *)lm = n;
+    free(buf);
+}
+
 /* A click on the page: a link opens and an image waiting to load loads, when the button
    comes up over it; held down, or with Control, it's the menu */
 static void page_click(Point p, EventRecord *ev)
@@ -4497,8 +4624,9 @@ static void page_click(Point p, EventRecord *ev)
             if (now.h - p.h >= HYSTERESIS || p.h - now.h >= HYSTERESIS ||
                 now.v - p.v >= HYSTERESIS || p.v - now.v >= HYSTERESIS) { moved = true; break; }
         }
-        if (moved) while (StillDown()) {}
+        if (moved) { drag_select(p); return; }
         if (!StillDown()) {
+            page_focus();
             GetMouse(&now);
             if (r && run_at(now) == r) {
                 char target[300];
@@ -5090,9 +5218,7 @@ static void bookmark_dialog(short slot)
     }
     bd_slot = slot;
     if (!(d = GetNewDialog(200, NULL, (WindowPtr)-1))) return;
-    /* centered a third of the way down, as alerts are */
-    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
-               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+    center_dialog(d);
     GetDialogItem(d, BD_SLOT, &type, &h, &r);
     SetDialogItem(d, BD_SLOT, type, (Handle)(UserItemUPP)draw_slot, &r);
     GetDialogItem(d, BD_RING, &type, &h, &r);
@@ -5158,6 +5284,81 @@ static void open_bookmark(short n)
     if (bookmark(n, url, sizeof url, title, sizeof title) && need()) go(url, true, NULL);
 }
 
+/* Find: what to look for, kept for Find Again */
+static Str255 find_what;
+enum { FD_FIND = 1, FD_CANCEL, FD_LABEL, FD_TEXT, FD_RING };
+
+/* Ask what to find; false for Cancel */
+static Boolean find_dialog(void)
+{
+    DialogPtr d;
+    short item, type;
+    Handle h;
+    Rect r;
+    HiliteMenu(0);
+    if (!(d = GetNewDialog(208, NULL, (WindowPtr)-1))) return false;
+    center_dialog(d);
+    GetDialogItem(d, FD_RING, &type, &h, &r);
+    SetDialogItem(d, FD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
+    GetDialogItem(d, FD_TEXT, &type, &h, &r);
+    SetDialogItemText(h, find_what);
+    SelectDialogItemText(d, FD_TEXT, 0, 32767);
+    ShowWindow(d);
+    InitCursor();
+    do ModalDialog((ModalFilterUPP)bd_filter, &item); while (item > FD_CANCEL);
+    if (item == FD_FIND) GetDialogItemText(h, find_what);
+    DisposeDialog(d);
+    SetPort(br->win);
+    return item == FD_FIND;
+}
+
+/* A character as Find compares it: letters in either case alike, and any white space a space */
+static unsigned char fold(unsigned char c)
+{
+    return c <= ' ' ? ' ' : c >= 'A' && c <= 'Z' ? c | 32 : c;
+}
+
+/* Select n characters at Doc.text offset at, in run r on line ln, and scroll to them:
+   across only if they don't show from the left, down to a third of the way if they're not in view */
+static void find_show(const MLine *ln, const Run *r, long at, long n)
+{
+    long y = br->scroll_y, x = br->scroll_x, h = br->view_r.bottom - br->view_r.top,
+         w = br->view_r.right - br->view_r.left, px = r->x + run_width(r, at - r->text);
+    RgnHandle save;
+    page_focus();
+    br->sel_a = at;
+    br->sel_b = at + n;
+    scroll_x_to(px < w - 32 ? 0 : px < x || px >= x + w - 16 ? px - 16 : x);
+    if (ln->y < y || ln->y + ln->height > y + h) scroll_to(ln->y - h / 3);
+    if (y == br->scroll_y && x == br->scroll_x) {   /* no redraw: just show the selection */
+        save = clip_to(&br->view_r);
+        sel_invert(at, at + n);
+        unclip(save);
+    }
+}
+
+/* Select the next place on the page that has find_what, after the selection (or from
+   the top), going round once. A beep if there's none. */
+static void find_next(void)
+{
+    long n = find_what[0], from = 0, at, i, k, end = br->doc.text_len - n;
+    short pass;
+    if (br->focus < -1) from = br->sel_a > br->sel_b ? br->sel_a : br->sel_b;
+    for (pass = 0; pass < 2 && n && br->have_page; pass++, from = 0)
+        for (at = from; at <= end; at++) {
+            for (i = 0; i < n && fold(br->doc.text[at + i]) == fold(find_what[i + 1]); i++) {}
+            if (i < n) continue;
+            for (i = 0; i < br->lay.nlines; i++) {   /* only text that shows */
+                const MLine *ln = &br->lay.lines[i];
+                for (k = ln->first; k < ln->first + ln->count; k++) {
+                    const Run *r = &br->lay.runs[k];
+                    if (r->kind == RUN_TEXT && at >= r->text && at < r->text + r->len) { find_show(ln, r, at, n); return; }
+                }
+            }
+        }
+    SysBeep(10);
+}
+
 /* The menus as they are now: the bookmark slots, and what needs a window */
 static void refresh_menus(void)
 {
@@ -5194,6 +5395,8 @@ static void refresh_menus(void)
         if (br && br->loading) EnableItem(nav, GO_STOP); else DisableItem(nav, GO_STOP);
         if (br && zoom_step < 6) EnableItem(view, VIEW_LARGER); else DisableItem(view, VIEW_LARGER);
         if (br && zoom_step > 0) EnableItem(view, VIEW_SMALLER); else DisableItem(view, VIEW_SMALLER);
+        if (br && !da && br->have_page) EnableItem(edit, EDIT_FIND); else DisableItem(edit, EDIT_FIND);
+        if (br && !da && br->have_page && find_what[0]) EnableItem(edit, EDIT_FIND_AGAIN); else DisableItem(edit, EDIT_FIND_AGAIN);
         if (br && br->have_page) EnableItem(view, VIEW_PAGE_SOURCE); else DisableItem(view, VIEW_PAGE_SOURCE);
         if (br) EnableItem(view, VIEW_FULL_SCREEN); else DisableItem(view, VIEW_FULL_SCREEN);
     }
@@ -5253,12 +5456,18 @@ static void do_menu(long choice)
         if (item == FILE_QUIT) quitting = may_quit();
     } else if (menu == MENU_EDIT) {
         if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true, NULL); }
+        if (item == EDIT_FIND && br && find_dialog()) find_next();
+        if (item == EDIT_FIND_AGAIN && br) find_next();
         if (item == EDIT_CLEAR_LOGINS) {
             /* every name and password typed, and every cookie: the next protected page asks again */
             auth_clear(&keyring);
             jar_free(&jar);
             net_keep_close(NULL, NULL);     /* logged in as someone: they go too */
             if (br) set_status("Logins and cookies cleared.");
+        }
+        else if (br && (br->focus < -1 || (br == full && br->focus < 0))) {   /* the page */
+            if (item == EDIT_COPY && br->sel_a != br->sel_b) copy_sel();
+            if (item == EDIT_SELECT_ALL && br->have_page) { page_focus(); br->sel_b = br->doc.text_len; draw_view(); }
         }
         else if (br && !(br == full && typing_te() == br->url_te)) {   /* not the hidden address */
             if (item == EDIT_CUT) TECut(typing_te());
@@ -5394,7 +5603,7 @@ static void full_screen(Boolean on)
     Rect r;
     if (on == (br == full) || (on && full)) return;
     SetPort(w);
-    blur();
+    if (br->focus >= 0) blur();
     if (on) {
         r = w->portRect;
         LocalToGlobal((Point *)&r.top);
@@ -5601,6 +5810,7 @@ static void do_key(EventRecord *ev)
         type_in_field(c, ev);
         return;
     }
+    if (br->focus < -1) blur();
     if (c == '\r' || c == 3) { go_typed(); return; }
     TEKey(c, br->url_te);
     te_show_caret(br->url_te);
@@ -5664,7 +5874,7 @@ static void setup_menus(void)
     AppendMenu(m, "\pNew Window/N;Open Location\311/L;Open File\311/O;Close/W;(-;Page Setup\311;Print\311/P;(-;Quit/Q");
     InsertMenu(m, 0);
     m = NewMenu(MENU_EDIT, "\pEdit");
-    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;(-;Preferences\311;Clear Logins and Cookies");
+    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;Find\311/F;Find Again/G;(-;Preferences\311;Clear Logins and Cookies");
     InsertMenu(m, 0);
     m = NewMenu(MENU_VIEW, "\pView");
     AppendMenu(m, "\pLarger Text/+;Smaller Text/-;(-;Page Source;(-;Full Screen/K");
