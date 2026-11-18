@@ -4645,9 +4645,10 @@ static void page_click(Point p, EventRecord *ev)
 
 static pascal void scroll_action(ControlHandle c, short part)
 {
-    long page = br->view_r.bottom - br->view_r.top - 16, line = 16;
+    /* a click in the gray: 2/3 of the view, so some of what was seen stays in sight */
+    long page = (br->view_r.bottom - br->view_r.top) * 2 / 3, line = 16;
     if (c == br->hscroll) {
-        page = br->view_r.right - br->view_r.left - 16;
+        page = (br->view_r.right - br->view_r.left) * 2 / 3;
         switch (part) {
         case inUpButton: scroll_x_to(br->scroll_x - line); break;
         case inDownButton: scroll_x_to(br->scroll_x + line); break;
@@ -5664,10 +5665,12 @@ static Browser *new_browser(WindowPtr behind)
         return NULL;
     }
     for (y = browsers; y; y = y->next) n++;
-    /* Fits a 512x342 screen, the smallest a Mill Mac has, each a little below and right
-       of the last, four deep */
+    /* The screen, from a 512x342 one, the smallest a Mill Mac has, to 640x480; on a larger
+       screen, 640x480. Each a little below and right of the last, four deep. */
     r = qd.screenBits.bounds;
     SetRect(&r, r.left + 2 + n % 4 * 8, r.top + 40 + n % 4 * 8, r.right - 2, r.bottom - 2);
+    if (r.right - r.left > 640) r.right = r.left + 640;
+    if (r.bottom - r.top > 480) r.bottom = r.top + 480;
     x->win = NewWindow(NULL, &r, "\pMill", true, documentProc + 8 /* with a zoom box */, behind, true, 0);
     x->hist_pos = -1;
     x->focus = -1;
@@ -5785,7 +5788,7 @@ static void do_key(EventRecord *ev)
     if (!br) return;
     /* Escape leaves full screen; one pressed while loading stopped it (stop_asked) */
     if (c == 0x1B && br == full) { if (ev->when > loaded_tick) full_screen(false); return; }
-    page = br->view_r.bottom - br->view_r.top - 16;
+    page = (br->view_r.bottom - br->view_r.top) * 2 / 3;    /* as a click in the scroll bar's gray */
     in_area = br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_TEXTAREA;
     /* control characters TextEdit would draw as boxes: Escape, Clear, forward delete... */
     if (((unsigned char)c < ' ' && !strchr("\b\t\r\003\001\004\013\014\034\035\036\037", c)) || c == 0x7F) return;
