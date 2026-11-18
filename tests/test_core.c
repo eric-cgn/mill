@@ -18,6 +18,7 @@
 #include "../src/core/macenc.h"
 #include "../src/core/picture.h"
 #include "../src/core/resume.h"
+#include "../src/core/refresh.h"
 #include "../src/core/layout.h"
 #include "../src/core/update.h"
 #include "../src/core/url.h"
@@ -2141,6 +2142,36 @@ static void test_mill_sizes(void)
 }
 
 /* Download resume: the part file's name, where the stream goes on, and what Save As does */
+/* Client pull: Refresh's value, as Netscape took it, and the page's META tag */
+static void test_refresh(void)
+{
+    char u[16];
+    long s = -2;
+    Doc d;
+    const char *m;
+#define RP(str) refresh_parse(str, strlen(str), &s, u, sizeof u)
+    CHECK(RP("30") && s == 30 && !u[0]);
+    CHECK(RP(" 5 ;URL=next.html") && s == 5 && !strcmp(u, "next.html"));
+    CHECK(RP("0; url = \"/a b\" ") && s == 0 && !strcmp(u, "/a b"));
+    CHECK(RP("10, URL='x'") && s == 10 && !strcmp(u, "x"));
+    CHECK(RP("2.5; other.html") && s == 2 && !strcmp(u, "other.html"));
+    CHECK(RP("1; URL=a-long-address-cut-short") && !strcmp(u, "a-long-address-"));
+    CHECK(RP("7;") && s == 7 && !u[0]);
+    CHECK(!RP("") && !RP("soon") && !RP("5 minutes") && !RP("; URL=x"));
+    CHECK(RP("99999999999") && s >= 100000L && s < 1000000L);
+#undef RP
+    memset(&d, 0, sizeof d);
+    CHECK(!html_parse(&d, "<HTML><HEAD><META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html\">"
+                          "<meta http-equiv=REFRESH content=\"15; URL=later.html\"></HEAD><BODY>Hi</BODY></HTML>", 147));
+    m = refresh_meta(&d);
+    CHECK(m && !strcmp(m, "15; URL=later.html"));
+    html_free(&d);
+    memset(&d, 0, sizeof d);
+    CHECK(!html_parse(&d, "<META HTTP-EQUIV=Refreshing CONTENT=1><P>No", 43));
+    CHECK(!refresh_meta(&d));
+    html_free(&d);
+}
+
 static void test_resume(void)
 {
     char out[32];
@@ -2214,6 +2245,7 @@ int main(void)
     test_referer();
     test_transparent();
     test_resume();
+    test_refresh();
     test_out_of_memory();
     test_form_state();
     test_update();

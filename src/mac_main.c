@@ -15,6 +15,7 @@
 #include "core/imagemap.h"
 #include "core/image.h"
 #include "core/layout.h"
+#include "core/refresh.h"
 #include "core/resume.h"
 #include "core/url.h"
 #include "mac_icons.h"
@@ -31,9 +32,9 @@
 
 enum { MENU_APPLE = 128, MENU_FILE, MENU_EDIT, MENU_VIEW, MENU_GO, MENU_BOOKMARKS, MENU_POPUP = 250, MENU_CONTEXT };
 enum { FILE_NEW = 1, FILE_LOCATION, FILE_OPEN, FILE_CLOSE, FILE_PAGE_SETUP = 6, FILE_PRINT, FILE_QUIT = 9 };
-enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_PREFERENCES = 8, EDIT_CLEAR_LOGINS };
+enum { EDIT_CUT = 3, EDIT_COPY, EDIT_PASTE, EDIT_SELECT_ALL, EDIT_FIND, EDIT_FIND_AGAIN, EDIT_PREFERENCES = 10, EDIT_CLEAR_LOGINS };
 enum { GO_BACK = 1, GO_FORWARD, GO_RELOAD, GO_HOME, GO_STOP = 6 };
-enum { VIEW_LARGER = 1, VIEW_SMALLER, VIEW_PAGE_SOURCE = 4 };
+enum { VIEW_LARGER = 1, VIEW_SMALLER, VIEW_PAGE_SOURCE = 4, VIEW_FULL_SCREEN = 6 };
 enum { BM_ADD = 1, BM_FIRST = 3, BM_EDIT = BM_FIRST + BOOKMARKS + 1 };  /* the slots follow a line */
 #define BAR 14          /* toolbar height: the address's highlight, and a pixel each side */
 #define STATUS_SECS 5   /* a message shows this long once Mill is idle */
@@ -92,9 +93,12 @@ typedef struct Browser {
     Pic *pics;
     short npics;
     short *pic_of;              /* IMG node -> index in pics + 1, or 0 */
-    long focus;                 /* the field being typed in, or -1 for the address */
+    long focus;                 /* the field being typed in, -1 for the address, or -2 for the page */
+    long sel_a, sel_b;          /* with -2, the page's text selected: Doc.text offsets, either order */
     Boolean focus_shown;        /* the focused field was on screen at the last draw */
     Rect focus_clip;            /* and where */
+    unsigned long refresh_at;   /* client pull: the TickCount to load again at, 0 for none */
+    char refresh_url[300];      /* ...the address to load, "" for this page */
 } Browser;
 
 static Browser *browsers;       /* every window, front or not */
@@ -103,11 +107,27 @@ static Boolean quitting = false;
 static Jar jar;         /* cookies, while Mill runs */
 #define PAGE_LEFT (br->view_r.left - (short)br->scroll_x)  /* where page x 0 is in the window */
 
+/* Full screen (see full_screen): the front window covers the whole screen, the menu bar
+   hidden; just the page, and its scroll bars if the setting says so */
+static Browser *full;           /* that window, or NULL */
+static Rect full_was;           /* its content before, in global coordinates */
+static Boolean full_bars;       /* the setting, as it was when full screen began */
+static short bar_height;        /* the menu bar's height while it's hidden, else 0 */
+static RgnHandle bar_rgn;       /* the menu bar's rectangle, added to the desktop while it's hidden */
+static long loaded_tick;        /* when loading last ended: an Escape from before then was a Stop */
+#define NO_BARS (br == full && !full_bars)
+
 /* ------------------------------------------------------------ geometry */
 
 static void geometry(void)
 {
     Rect r = br->win->portRect;
+    if (br == full) {   /* no toolbar: its buttons are nowhere */
+        SetRect(&br->back_r, 0, 0, 0, 0);
+        br->fwd_r = br->reload_r = br->mill_r = br->back_r;
+        SetRect(&br->view_r, 0, 0, r.right - (full_bars ? SCROLL - 1 : 0), r.bottom - (br->hbar ? SCROLL - 1 : 0));
+        return;
+    }
     SetRect(&br->back_r, 3, 3, 3 + TOOL_ICON, 3 + TOOL_ICON);  /* level with the address's text */
     br->fwd_r = br->back_r;
     OffsetRect(&br->fwd_r, 13, 0);
@@ -174,6 +194,7 @@ static void draw_bits(const unsigned short *rows, short n, short width, const Re
 
 static void draw_mill(void)
 {
+    if (br == full) return;
     draw_bits(ICON_MILL[br->mill_frame], MILL_H, 16, &br->mill_r, false);
 }
 
@@ -193,6 +214,7 @@ static void spin(void)
 static void draw_toolbar(void)
 {
     Rect r = br->win->portRect;
+    if (br == full) return;
     draw_bits(ICON_BACK, TOOL_ICON, TOOL_ICON, &br->back_r, br->hist_pos <= 0);
     draw_bits(ICON_FORWARD, TOOL_ICON, TOOL_ICON, &br->fwd_r, br->hist_pos >= br->hist_len - 1);
     /* reload, or a stop sign while something loads */
@@ -208,6 +230,8 @@ static void set_loading(Boolean on)
 {
     GrafPtr old;
     br->loading = on;
+    if (!on) loaded_tick = TickCount();
+    if (br == full) return;
     GetPort(&old);
     SetPort(br->win);
     draw_bits(br->loading ? ICON_STOP : ICON_RELOAD, TOOL_ICON, TOOL_ICON, &br->reload_r, !br->loading && br->hist_pos < 0);
@@ -239,7 +263,7 @@ static void status_box(Rect *r)
 static void draw_status(void)
 {
     RgnHandle save;
-    if (!br->status_up) return;
+    if (!br->status_up || br == full) return;
     status_box(&br->status_r);
     save = clip_to(&br->status_r);
     EraseRect(&br->status_r);
@@ -1450,6 +1474,36 @@ static Boolean pic_area(short which, Rect *area)
     return any;
 }
 
+/* How wide a text run's first n characters are */
+static short run_width(const Run *r, long n)
+{
+    MStyle s;
+    s.font = r->font; s.size = r->size; s.face = r->face;
+    return (short)qd_width(NULL, &s, br->doc.text + r->text, n);
+}
+
+/* Invert the page's text between Doc.text offsets a and b where it shows */
+static void sel_invert(long a, long b)
+{
+    long i, k, s, e;
+    if (a > b) { s = a; a = b; b = s; }
+    for (i = layout_line_at(&br->lay, br->scroll_y); i < br->lay.nlines && br->lay.lines[i].y < br->scroll_y + br->view_r.bottom; i++) {
+        const MLine *ln = &br->lay.lines[i];
+        Rect rc;
+        rc.top = br->view_r.top + (short)(ln->y - br->scroll_y);
+        rc.bottom = rc.top + ln->height;
+        for (k = ln->first; k < ln->first + ln->count; k++) {
+            const Run *r = &br->lay.runs[k];
+            s = a > r->text ? a : r->text;
+            e = b < r->text + r->len ? b : r->text + r->len;
+            if (r->kind != RUN_TEXT || s >= e) continue;
+            rc.left = PAGE_LEFT + r->x + run_width(r, s - r->text);
+            rc.right = PAGE_LEFT + r->x + run_width(r, e - r->text);
+            InvertRect(&rc);
+        }
+    }
+}
+
 /* Draw the page's visible part; with only >= 0, just the runs showing that picture */
 static void draw_page(short only)
 {
@@ -1550,6 +1604,7 @@ static void draw_page(short only)
                 TextMode(srcOr);
             }
         }
+        if (only < 0 && br->focus < -1) sel_invert(br->sel_a, br->sel_b);
     }
     unclip(save);
     draw_status();  /* the message stays over the page */
@@ -1585,7 +1640,7 @@ static void scroll_to(long y)
 
 static long max_scroll_x(void)
 {
-    long m = br->hbar ? br->page_w - (br->view_r.right - br->view_r.left) : 0;
+    long m = br->hbar || NO_BARS ? br->page_w - (br->view_r.right - br->view_r.left) : 0;
     return m > 0 ? m : 0;
 }
 
@@ -1597,15 +1652,26 @@ static void place_hbar(void)
     SizeControl(br->hscroll, r.right - SCROLL + 3, SCROLL);
 }
 
+/* The vertical one down the right, below the toolbar and above the grow box; in full
+   screen from the top, and to the bottom when there's no horizontal one */
+static void place_vbar(void)
+{
+    Rect r = br->win->portRect;
+    short top = br == full ? -1 : BAR, bottom = br == full && !br->hbar ? r.bottom + 1 : r.bottom - SCROLL + 2;
+    MoveControl(br->vscroll, r.right - SCROLL + 1, top);
+    SizeControl(br->vscroll, SCROLL, bottom - top);
+}
+
 /* Show the horizontal scroll bar when the page is wider than the view, else give its
    room to the page */
 static void fit_hbar(void)
 {
-    Boolean need = br->have_page && br->page_w > br->view_r.right - br->view_r.left;
+    Boolean need = br->have_page && !NO_BARS && br->page_w > br->view_r.right - br->view_r.left;
     if (need != br->hbar) {
         br->hbar = need;
         geometry();
         place_hbar();
+        if (br == full) place_vbar();
         if (br->hbar) ShowControl(br->hscroll);
         else HideControl(br->hscroll);
         if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
@@ -1679,7 +1745,9 @@ static int relayout(void)
 static void draw_grow(void)
 {
     Rect g = br->win->portRect;
-    RgnHandle save = keep_clip();
+    RgnHandle save;
+    if (br == full) return;
+    save = keep_clip();
     g.left = g.right - SCROLL + 1;
     g.top = g.bottom - SCROLL + 1;
     ClipRect(&g);
@@ -1752,7 +1820,7 @@ static void activate(WindowPtr w, Boolean on)
     if (!x) return;
     use(x);
     te = x->focus >= 0 && x->forms.fields[x->focus].type != FIELD_PASSWORD ? x->field_te : x->url_te;
-    if (on) TEActivate(te); else TEDeactivate(te);
+    if (x->focus > -2) { if (on) TEActivate(te); else TEDeactivate(te); }
     HiliteControl(x->vscroll, on ? 0 : 255);
     HiliteControl(x->hscroll, on ? 0 : 255);
     draw_grow();
@@ -1788,6 +1856,10 @@ static void blur(void)
         TEDeactivate(br->field_te);
         br->focus = -1;
         br->focus_shown = false;
+    }
+    if (br->focus < -1) {
+        br->focus = -1;
+        if (br->sel_a != br->sel_b) { br->sel_a = br->sel_b; draw_view(); }
     }
     TEActivate(br->url_te);
 }
@@ -2456,6 +2528,13 @@ enum { AD_SAVE = 1, AD_CANCEL, AD_BROWSE, AD_NAME, AD_LINE, AD_REASON, AD_AFTER,
 
 static pascal void draw_ring(DialogPtr d, short item);
 
+/* Centered a third of the way down, as alerts are */
+static void center_dialog(DialogPtr d)
+{
+    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
+               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+}
+
 /* Return and Enter are Save...; Escape and Command-period are Cancel */
 static pascal Boolean ad_filter(DialogPtr d, EventRecord *e, short *item)
 {
@@ -2498,8 +2577,7 @@ static short archive_dialog(const char *name, const PlugFormat *f, long size, co
     pstr_of(reason ? reason : "", p2);
     ParamText(p0, p1, p2, "\p");
     if (!(d = GetNewDialog(DIALOG_ARCHIVE, NULL, (WindowPtr)-1))) return AD_CANCEL;
-    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
-               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+    center_dialog(d);
     GetDialogItem(d, AD_RING, &type, &h, &r);
     SetDialogItem(d, AD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
     GetDialogItem(d, AD_BROWSE, &type, &h, &r);
@@ -3164,6 +3242,7 @@ typedef struct {
     int kind;           /* BODY_TEXT, BODY_HTML or BODY_PICTURE */
     int charset;        /* from the header's charset=, else CHARSET_GUESS */
     char location[300];
+    long refresh, refresh_len;  /* the Refresh header's value, where it is in the reply (len 0: none) */
 } Head;
 
 /* Headers end at a blank line */
@@ -3183,6 +3262,10 @@ static void split_response(const char *b, long len, Head *h)
                 long s = l + 9;
                 while (s < e && b[s] == ' ') s++;
                 snprintf(h->location, sizeof h->location, "%.*s", (int)(e - s), b + s);
+            }
+            if (e - l > 8 && prefix_ci(b + l, "Refresh:", 8)) {
+                h->refresh = l + 8;
+                h->refresh_len = e - l - 8;
             }
             if (e - l > 13 && prefix_ci(b + l, "Content-Type:", 13)) {
                 long s = l + 13, k;
@@ -3652,6 +3735,7 @@ static Boolean coming_back;     /* load: Back or Forward, so the page's forms co
 static Boolean forms_kept;      /* load: the page being left has had its forms kept already */
 
 static Boolean reloading;       /* load: Reload, so the page is asked for again */
+static long refresh_y = -1;     /* load: a refresh of this page, which stays scrolled here */
 
 /* The length of an address without its #fragment (a member's "#/" path is the document's) */
 static size_t doc_part(const char *url) { return url_doc_len(url); }
@@ -3730,6 +3814,7 @@ static void no_reply(OSErr err, Boolean nothing, char *title, char *msg, int siz
 }
 
 static Boolean save_url(const char *url, const char *from, Boolean browse);
+static void arm_refresh(long secs, Boolean back);
 static Boolean save_to(const char *url, const char *from, const FSSpec *spec, Boolean resume, Boolean browse);
 
 /* Whether the last load showed a page without an error: all of a 2xx reply */
@@ -3753,6 +3838,8 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     Boolean back = coming_back;
     Plug *making;   /* the Plug-In for the address, kept loaded from asking to showing */
     Boolean again = reloading;
+    long keep_y = refresh_y;
+    long refresh_secs = -1;
     char then[320]; /* what's next: the saved copy to browse, or (save_after) the archive to save */
     short save_after = 0;
     Boolean resume_later = false, resume_browse = false;
@@ -3760,8 +3847,10 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
     then[0] = 0;
 
     reloading = false;
+    refresh_y = -1;
     page_whole = false;
     if (!body && same_page(url, again ? URL_OPEN_RELOAD : record ? URL_OPEN_LINK : URL_OPEN_HISTORY, record, from)) return true;
+    br->refresh_at = 0;     /* leaving, or stopped: a refresh asked for is off */
     coming_back = false;
     blur();
     snprintf(referrer, sizeof referrer, "%s", from ? from : "");  /* from may be this window's page_url */
@@ -3844,6 +3933,9 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
         error_page(&resp, &h, title, why);
         failed = true;
     }
+    if (!failed && !source && h.refresh_len > 0 &&
+        !refresh_parse(resp.buf + h.refresh, h.refresh_len, &refresh_secs, br->refresh_url, sizeof br->refresh_url))
+        refresh_secs = -1;
 
     set_status("Formatting\311");
     {
@@ -3919,6 +4011,7 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
             if (!strcmp(br->lay.anchors[i].name, anchor)) { br->scroll_y = br->lay.anchors[i].y; break; }
         if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
     }
+    if (keep_y >= 0) br->scroll_y = keep_y > max_scroll() ? max_scroll() : keep_y;
     update_scroll();
     redraw();
     cut = resp.cut;
@@ -3932,6 +4025,13 @@ static Boolean load(const char *url, Boolean record, const char *from, const cha
                    closed ? "The connection closed early." : "Done.");
     }
     page_whole = !failed && !stopped && h.code >= 200 && h.code < 300 && !closed;
+    if (!failed && !source && !stopped) {
+        const char *m;
+        if (refresh_secs < 0 && (m = refresh_meta(&br->doc)) &&
+            !refresh_parse(m, strlen(m), &refresh_secs, br->refresh_url, sizeof br->refresh_url))
+            refresh_secs = -1;
+        arm_refresh(refresh_secs, back);
+    }
     shown = true;
 done:
     loading = NULL;
@@ -3954,19 +4054,25 @@ done:
 
 /* A page with a form that's been changed and not sent: ask before what (such as "Leave
    this page?") happens. True to go ahead. */
-static Boolean may_leave(const char *what)
+static Boolean forms_unsent(void)
 {
-    Str255 p;
-    if (!br || !br->have_page || !br->forms.n) return true;
+    if (!br || !br->have_page || !br->forms.n) return false;
     keep_typing();
-    if (!forms_changed(&br->forms, &br->doc)) return true;
+    if (!forms_changed(&br->forms, &br->doc)) return false;
     if (br->form_base) {
         /* brought back by Back as it was sent, and not changed since */
         char *now = forms_save(&br->forms, &br->doc);
         Boolean same = now && !strcmp(now, br->form_base);
         free(now);
-        if (same) return true;
+        if (same) return false;
     }
+    return true;
+}
+
+static Boolean may_leave(const char *what)
+{
+    Str255 p;
+    if (!forms_unsent()) return true;
     p[0] = (unsigned char)strlen(what);
     memcpy(p + 1, what, p[0]);
     ParamText(p, "\p", "\p", "\p");
@@ -4036,6 +4142,46 @@ static void reload(void)
 static void go_home(void)
 {
     go(setting("homepage", MILL_DEFAULT_HOME), true, NULL);
+}
+
+/* Client pull (Refresh, from the header or a META tag): the page just shown asks to be
+   loaded again in secs (-1: it doesn't), or to load br->refresh_url. Back and Forward
+   don't go on to another address, so they can't be trapped; this page is refreshed at
+   most every REFRESH_MIN seconds. */
+#define REFRESH_MIN 5
+static void arm_refresh(long secs, Boolean back)
+{
+    char to[300];
+    br->refresh_at = 0;
+    if (secs < 0) return;
+    if (br->refresh_url[0]) {
+        size_t n;
+        if (url_resolve(br->page_url, br->refresh_url, to, sizeof to) || !may_follow(to)) return;
+        n = doc_part(to);
+        if (n == doc_part(br->page_url) && !strncmp(to, br->page_url, n)) br->refresh_url[0] = 0;
+        else if (back) return;
+        else strcpy(br->refresh_url, to);
+    }
+    if (!br->refresh_url[0] && secs < REFRESH_MIN) secs = REFRESH_MIN;
+    br->refresh_at = TickCount() + secs * 60 + 1;
+}
+
+/* Idle, in the front window: a refresh that's due, unless a field is being typed in or a
+   form has unsent changes (then it waits until neither is so) */
+static void refresh_due(void)
+{
+    char to[300];
+    if (!br->refresh_at || (long)(TickCount() - br->refresh_at) < 0 || br->loading) return;
+    if (br->focus >= 0 || forms_unsent()) return;
+    br->refresh_at = 0;
+    if (br->refresh_url[0]) {
+        strcpy(to, br->refresh_url);
+        load(to, true, br->page_url, NULL, NULL);
+    } else {
+        refresh_y = br->scroll_y;
+        reload();
+        refresh_y = -1;
+    }
 }
 
 /* Fetch one image a page opened without */
@@ -4375,6 +4521,91 @@ static void context_menu(Point p, const Run *r)
     }
 }
 
+/* The page takes the keyboard from the address or a field, its selection cleared */
+static void page_focus(void)
+{
+    RgnHandle save;
+    hide_status();
+    if (br->focus > -2) { blur(); TEDeactivate(br->url_te); br->focus = -2; }
+    save = clip_to(&br->view_r);
+    sel_invert(br->sel_a, br->sel_b);
+    unclip(save);
+    br->sel_a = br->sel_b = 0;
+}
+
+/* The Doc.text offset in the page's text nearest p, or -1 if there's none on its line */
+static long sel_at(Point p)
+{
+    long y = br->scroll_y + (p.v - br->view_r.top), i, k;
+    short x = p.h - PAGE_LEFT, n, w0 = 0, w1;
+    const Run *best = NULL;
+    for (i = layout_line_at(&br->lay, y); i < br->lay.nlines && br->lay.lines[i].y <= y; i++) {
+        const MLine *ln = &br->lay.lines[i];
+        if (y >= ln->y + ln->height) continue;
+        for (k = ln->first; k < ln->first + ln->count; k++) {
+            const Run *r = &br->lay.runs[k];
+            if (r->kind == RUN_TEXT && r->x <= x && (!best || r->x > best->x)) best = r;
+        }
+    }
+    if (!best) return -1;
+    for (n = 0; n < best->len; n++, w0 = w1)
+        if ((w1 = run_width(best, n + 1)) + w0 > 2 * (x - best->x)) break;
+    return best->text + n;
+}
+
+/* Select text from p while the button is down; the page scrolls at the view's edges */
+static void drag_select(Point p)
+{
+    Rect v = br->view_r;
+    unsigned long t = 0;
+    long at;
+    RgnHandle save;
+    page_focus();
+    br->sel_a = br->sel_b = sel_at(p);
+    while (StillDown()) {
+        GetMouse(&p);
+        if (TickCount() - t > 2) {
+            t = TickCount();
+            scroll_to(br->scroll_y + (p.v <= v.top ? -16 : p.v >= v.bottom - 1 ? 16 : 0));
+            scroll_x_to(br->scroll_x + (p.h <= v.left ? -16 : p.h >= v.right - 1 ? 16 : 0));
+        }
+        if (p.v < v.top) p.v = v.top;
+        if (p.v >= v.bottom) p.v = v.bottom - 1;
+        if ((at = sel_at(p)) < 0) continue;
+        if (br->sel_a < 0) br->sel_a = br->sel_b = at;
+        save = clip_to(&v);
+        sel_invert(br->sel_b, at);
+        unclip(save);
+        br->sel_b = at;
+    }
+    if (br->sel_a < 0) br->sel_a = br->sel_b = 0;
+}
+
+/* Copy the page's selected text: a return where a line starts again at the left, a space for a gap */
+static void copy_sel(void)
+{
+    long a = br->sel_a < br->sel_b ? br->sel_a : br->sel_b, b = br->sel_a + br->sel_b - a, k, n = 0, s, e;
+    short px = 0;
+    char *buf = malloc(b - a + br->lay.nruns), *lm = (char *)0xAB0;
+    if (!buf) return;
+    for (k = 0; k < br->lay.nruns; k++) {
+        const Run *r = &br->lay.runs[k];
+        s = a > r->text ? a : r->text;
+        e = b < r->text + r->len ? b : r->text + r->len;
+        if (r->kind != RUN_TEXT || s >= e) continue;
+        if (n && r->x != px) buf[n++] = r->x < px ? '\r' : ' ';
+        memcpy(buf + n, br->doc.text + s, e - s);
+        n += e - s;
+        px = r->x + r->width;
+    }
+    ZeroScrap();
+    PutScrap(n, 'TEXT', buf);
+    __asm__("" : "+a"(lm));         /* TEScrpLength and TEScrpHandle, hidden from GCC */
+    PtrToXHand(buf, *(Handle *)(lm + 4), n);     /* TextEdit's scrap too, for pasting here */
+    *(short *)lm = n;
+    free(buf);
+}
+
 /* A click on the page: a link opens and an image waiting to load loads, when the button
    comes up over it; held down, or with Control, it's the menu */
 static void page_click(Point p, EventRecord *ev)
@@ -4393,8 +4624,9 @@ static void page_click(Point p, EventRecord *ev)
             if (now.h - p.h >= HYSTERESIS || p.h - now.h >= HYSTERESIS ||
                 now.v - p.v >= HYSTERESIS || p.v - now.v >= HYSTERESIS) { moved = true; break; }
         }
-        if (moved) while (StillDown()) {}
+        if (moved) { drag_select(p); return; }
         if (!StillDown()) {
+            page_focus();
             GetMouse(&now);
             if (r && run_at(now) == r) {
                 char target[300];
@@ -4413,9 +4645,10 @@ static void page_click(Point p, EventRecord *ev)
 
 static pascal void scroll_action(ControlHandle c, short part)
 {
-    long page = br->view_r.bottom - br->view_r.top - 16, line = 16;
+    /* a click in the gray: 2/3 of the view, so some of what was seen stays in sight */
+    long page = (br->view_r.bottom - br->view_r.top) * 2 / 3, line = 16;
     if (c == br->hscroll) {
-        page = br->view_r.right - br->view_r.left - 16;
+        page = (br->view_r.right - br->view_r.left) * 2 / 3;
         switch (part) {
         case inUpButton: scroll_x_to(br->scroll_x - line); break;
         case inDownButton: scroll_x_to(br->scroll_x + line); break;
@@ -4834,6 +5067,8 @@ static void print_page(void)
     else print_trouble(err);
 }
 
+static void leave_full(void);
+
 /* Before quitting: each window with a changed form asks, in front */
 static Boolean may_quit(void)
 {
@@ -4842,6 +5077,7 @@ static Boolean may_quit(void)
         use(x);
         keep_typing();
         if (x->have_page && x->forms.n && forms_changed(&x->forms, &x->doc)) {
+            if (x != full) leave_full();    /* another window comes in front to ask */
             SelectWindow(x->win);
             redraw();
             if (!may_leave("Quit Mill?")) { use(front()); return false; }
@@ -4983,9 +5219,7 @@ static void bookmark_dialog(short slot)
     }
     bd_slot = slot;
     if (!(d = GetNewDialog(200, NULL, (WindowPtr)-1))) return;
-    /* centered a third of the way down, as alerts are */
-    MoveWindow(d, (qd.screenBits.bounds.right - (d->portRect.right - d->portRect.left)) / 2,
-               20 + (qd.screenBits.bounds.bottom - 20 - (d->portRect.bottom - d->portRect.top)) / 3, false);
+    center_dialog(d);
     GetDialogItem(d, BD_SLOT, &type, &h, &r);
     SetDialogItem(d, BD_SLOT, type, (Handle)(UserItemUPP)draw_slot, &r);
     GetDialogItem(d, BD_RING, &type, &h, &r);
@@ -5051,6 +5285,81 @@ static void open_bookmark(short n)
     if (bookmark(n, url, sizeof url, title, sizeof title) && need()) go(url, true, NULL);
 }
 
+/* Find: what to look for, kept for Find Again */
+static Str255 find_what;
+enum { FD_FIND = 1, FD_CANCEL, FD_LABEL, FD_TEXT, FD_RING };
+
+/* Ask what to find; false for Cancel */
+static Boolean find_dialog(void)
+{
+    DialogPtr d;
+    short item, type;
+    Handle h;
+    Rect r;
+    HiliteMenu(0);
+    if (!(d = GetNewDialog(208, NULL, (WindowPtr)-1))) return false;
+    center_dialog(d);
+    GetDialogItem(d, FD_RING, &type, &h, &r);
+    SetDialogItem(d, FD_RING, type, (Handle)(UserItemUPP)draw_ring, &r);
+    GetDialogItem(d, FD_TEXT, &type, &h, &r);
+    SetDialogItemText(h, find_what);
+    SelectDialogItemText(d, FD_TEXT, 0, 32767);
+    ShowWindow(d);
+    InitCursor();
+    do ModalDialog((ModalFilterUPP)bd_filter, &item); while (item > FD_CANCEL);
+    if (item == FD_FIND) GetDialogItemText(h, find_what);
+    DisposeDialog(d);
+    SetPort(br->win);
+    return item == FD_FIND;
+}
+
+/* A character as Find compares it: letters in either case alike, and any white space a space */
+static unsigned char fold(unsigned char c)
+{
+    return c <= ' ' ? ' ' : c >= 'A' && c <= 'Z' ? c | 32 : c;
+}
+
+/* Select n characters at Doc.text offset at, in run r on line ln, and scroll to them:
+   across only if they don't show from the left, down to a third of the way if they're not in view */
+static void find_show(const MLine *ln, const Run *r, long at, long n)
+{
+    long y = br->scroll_y, x = br->scroll_x, h = br->view_r.bottom - br->view_r.top,
+         w = br->view_r.right - br->view_r.left, px = r->x + run_width(r, at - r->text);
+    RgnHandle save;
+    page_focus();
+    br->sel_a = at;
+    br->sel_b = at + n;
+    scroll_x_to(px < w - 32 ? 0 : px < x || px >= x + w - 16 ? px - 16 : x);
+    if (ln->y < y || ln->y + ln->height > y + h) scroll_to(ln->y - h / 3);
+    if (y == br->scroll_y && x == br->scroll_x) {   /* no redraw: just show the selection */
+        save = clip_to(&br->view_r);
+        sel_invert(at, at + n);
+        unclip(save);
+    }
+}
+
+/* Select the next place on the page that has find_what, after the selection (or from
+   the top), going round once. A beep if there's none. */
+static void find_next(void)
+{
+    long n = find_what[0], from = 0, at, i, k, end = br->doc.text_len - n;
+    short pass;
+    if (br->focus < -1) from = br->sel_a > br->sel_b ? br->sel_a : br->sel_b;
+    for (pass = 0; pass < 2 && n && br->have_page; pass++, from = 0)
+        for (at = from; at <= end; at++) {
+            for (i = 0; i < n && fold(br->doc.text[at + i]) == fold(find_what[i + 1]); i++) {}
+            if (i < n) continue;
+            for (i = 0; i < br->lay.nlines; i++) {   /* only text that shows */
+                const MLine *ln = &br->lay.lines[i];
+                for (k = ln->first; k < ln->first + ln->count; k++) {
+                    const Run *r = &br->lay.runs[k];
+                    if (r->kind == RUN_TEXT && at >= r->text && at < r->text + r->len) { find_show(ln, r, at, n); return; }
+                }
+            }
+        }
+    SysBeep(10);
+}
+
 /* The menus as they are now: the bookmark slots, and what needs a window */
 static void refresh_menus(void)
 {
@@ -5087,7 +5396,10 @@ static void refresh_menus(void)
         if (br && br->loading) EnableItem(nav, GO_STOP); else DisableItem(nav, GO_STOP);
         if (br && zoom_step < 6) EnableItem(view, VIEW_LARGER); else DisableItem(view, VIEW_LARGER);
         if (br && zoom_step > 0) EnableItem(view, VIEW_SMALLER); else DisableItem(view, VIEW_SMALLER);
+        if (br && !da && br->have_page) EnableItem(edit, EDIT_FIND); else DisableItem(edit, EDIT_FIND);
+        if (br && !da && br->have_page && find_what[0]) EnableItem(edit, EDIT_FIND_AGAIN); else DisableItem(edit, EDIT_FIND_AGAIN);
         if (br && br->have_page) EnableItem(view, VIEW_PAGE_SOURCE); else DisableItem(view, VIEW_PAGE_SOURCE);
+        if (br) EnableItem(view, VIEW_FULL_SCREEN); else DisableItem(view, VIEW_FULL_SCREEN);
     }
 }
 
@@ -5116,6 +5428,7 @@ static TEHandle typing_te(void)
 }
 
 static void zoom_by(int dir);
+static void full_screen(Boolean on);
 
 static void do_menu(long choice)
 {
@@ -5131,6 +5444,7 @@ static void do_menu(long choice)
             OpenDeskAcc(name);
         }
     } else if (menu == MENU_FILE) {
+        if (item == FILE_NEW || item == FILE_LOCATION) leave_full();   /* the window, or the address, shows */
         if (item == FILE_NEW) { Browser *x = new_browser((WindowPtr)-1); if (x) { use(x); go_home(); } }
         if (item == FILE_LOCATION && need()) { blur(); TESetSelect(0, 32767, br->url_te); }
         if (item == FILE_OPEN) open_file();
@@ -5143,6 +5457,8 @@ static void do_menu(long choice)
         if (item == FILE_QUIT) quitting = may_quit();
     } else if (menu == MENU_EDIT) {
         if (item == EDIT_PREFERENCES) { if (need()) go("mill://config", true, NULL); }
+        if (item == EDIT_FIND && br && find_dialog()) find_next();
+        if (item == EDIT_FIND_AGAIN && br) find_next();
         if (item == EDIT_CLEAR_LOGINS) {
             /* every name and password typed, and every cookie: the next protected page asks again */
             auth_clear(&keyring);
@@ -5150,7 +5466,11 @@ static void do_menu(long choice)
             net_keep_close(NULL, NULL);     /* logged in as someone: they go too */
             if (br) set_status("Logins and cookies cleared.");
         }
-        else if (br) {
+        else if (br && (br->focus < -1 || (br == full && br->focus < 0))) {   /* the page */
+            if (item == EDIT_COPY && br->sel_a != br->sel_b) copy_sel();
+            if (item == EDIT_SELECT_ALL && br->have_page) { page_focus(); br->sel_b = br->doc.text_len; draw_view(); }
+        }
+        else if (br && !(br == full && typing_te() == br->url_te)) {   /* not the hidden address */
             if (item == EDIT_CUT) TECut(typing_te());
             if (item == EDIT_COPY) TECopy(typing_te());
             if (item == EDIT_PASTE) TEPaste(typing_te());
@@ -5174,6 +5494,9 @@ static void do_menu(long choice)
             const char *page = !strncmp(br->page_url, VIEW_SOURCE, strlen(VIEW_SOURCE)) ? br->page_url + strlen(VIEW_SOURCE) : br->page_url;
             snprintf(target, sizeof target, "%s%s", VIEW_SOURCE, page);
             go(target, true, NULL);
+        } else if (item == VIEW_FULL_SCREEN && br) {
+            HiliteMenu(0);
+            full_screen(br != full);
         }
     } else if (menu == MENU_GO) {
         if (item == GO_STOP) { if (br && br->loading) stopped = true; }
@@ -5226,8 +5549,7 @@ static void resized(void)
     t = (*br->url_te)->viewRect;
     t.right = br->mill_r.left - 4;
     (*br->url_te)->viewRect = t;
-    MoveControl(br->vscroll, br->win->portRect.right - SCROLL + 1, BAR);
-    SizeControl(br->vscroll, SCROLL, br->win->portRect.bottom - BAR - SCROLL + 2);
+    place_vbar();
     place_hbar();
     if (relayout() == -1) {
         InvalRect(&br->win->portRect);
@@ -5236,6 +5558,94 @@ static void resized(void)
     if (br->scroll_y > max_scroll()) br->scroll_y = max_scroll();
     update_scroll();
     InvalRect(&br->win->portRect);
+}
+
+/* The menu bar hidden, the period's way: its height 0, and its rectangle added to the
+   desktop so a window may draw there. Put back with show_bar, before Mill quits and while
+   another application is in front. */
+static void hide_bar(void)
+{
+    Rect r = qd.screenBits.bounds;
+    if (bar_height || !LMGetMBarHeight() || (!bar_rgn && !(bar_rgn = NewRgn()))) return;
+    bar_height = LMGetMBarHeight();
+    r.bottom = r.top + bar_height;
+    RectRgn(bar_rgn, &r);
+    LMSetMBarHeight(0);
+    UnionRgn(GetGrayRgn(), bar_rgn, GetGrayRgn());
+    if (FrontWindow()) CalcVisBehind((WindowPeek)FrontWindow(), bar_rgn);
+    if (full) {     /* the full screen window draws there now */
+        GrafPtr old;
+        GetPort(&old);
+        SetPort(full->win);
+        InvalRect(&r);  /* it's at the screen's top left: its coordinates are the screen's */
+        SetPort(old);
+    }
+}
+
+static void show_bar(void)
+{
+    if (!bar_height) return;
+    LMSetMBarHeight(bar_height);
+    bar_height = 0;
+    DiffRgn(GetGrayRgn(), bar_rgn, GetGrayRgn());
+    if (FrontWindow()) CalcVisBehind((WindowPeek)FrontWindow(), bar_rgn);
+    HiliteMenu(0);
+    DrawMenuBar();
+}
+
+/* Full screen on or off for the front window (br): Command-K, and Escape to leave. The
+   window moves so its title bar is above the screen and its content covers all of it; the
+   toolbar and status line go, and the page is laid out for the new width. Leaving puts
+   the window back where and as large as it was. */
+static void full_screen(Boolean on)
+{
+    WindowPtr w = br->win;
+    TEHandle te = br->url_te;
+    Rect r;
+    if (on == (br == full) || (on && full)) return;
+    SetPort(w);
+    if (br->focus >= 0) blur();
+    if (on) {
+        r = w->portRect;
+        LocalToGlobal((Point *)&r.top);
+        LocalToGlobal((Point *)&r.bottom);
+        full_was = r;
+        full = br;
+        full_bars = !strcmp(setting("full_screen_bars", "no"), "yes");
+        /* the address, out of sight: its caret and anything typed draw off the screen */
+        OffsetRect(&(*te)->viewRect, 0, -1000);
+        OffsetRect(&(*te)->destRect, 0, -1000);
+        HideControl(br->hscroll);
+        br->hbar = false;
+        if (!full_bars) HideControl(br->vscroll);
+        hide_bar();
+        r = qd.screenBits.bounds;
+        MoveWindow(w, r.left, r.top, false);
+        SizeWindow(w, r.right - r.left, r.bottom - r.top, true);
+        resized();
+    } else {
+        full = NULL;
+        OffsetRect(&(*te)->viewRect, 0, 1000);
+        OffsetRect(&(*te)->destRect, 0, 1000);
+        HideControl(br->hscroll);
+        br->hbar = false;
+        show_bar();
+        MoveWindow(w, full_was.left, full_was.top, false);
+        SizeWindow(w, full_was.right - full_was.left, full_was.bottom - full_was.top, true);
+        resized();
+        ShowControl(br->vscroll);
+    }
+}
+
+/* Out of full screen, whichever window is (New Window, Open Location, and quitting with
+   another window to ask about) */
+static void leave_full(void)
+{
+    Browser *was = br;
+    if (!full) return;
+    use(full);
+    full_screen(false);
+    use(was);
 }
 
 /* Room for a window and a page being read into it, and some to spare, so a window can
@@ -5255,10 +5665,12 @@ static Browser *new_browser(WindowPtr behind)
         return NULL;
     }
     for (y = browsers; y; y = y->next) n++;
-    /* Fits a 512x342 screen, the smallest a Mill Mac has, each a little below and right
-       of the last, four deep */
+    /* The screen, from a 512x342 one, the smallest a Mill Mac has, to 640x480; on a larger
+       screen, 640x480. Each a little below and right of the last, four deep. */
     r = qd.screenBits.bounds;
     SetRect(&r, r.left + 2 + n % 4 * 8, r.top + 40 + n % 4 * 8, r.right - 2, r.bottom - 2);
+    if (r.right - r.left > 640) r.right = r.left + 640;
+    if (r.bottom - r.top > 480) r.bottom = r.top + 480;
     x->win = NewWindow(NULL, &r, "\pMill", true, documentProc + 8 /* with a zoom box */, behind, true, 0);
     x->hist_pos = -1;
     x->focus = -1;
@@ -5289,6 +5701,7 @@ static void close_browser(Browser *x)
     Browser **p;
     short i;
     use(x);
+    if (x == full) { full = NULL; show_bar(); }    /* the window goes: just the menu bar back */
     net_keep_close(x, NULL);
     if (x->have_page) { layout_free(&x->lay); pics_free(); forms_free(&x->forms); html_free(&x->doc); }
     free(x->form_base);
@@ -5313,6 +5726,7 @@ static void do_mouse(EventRecord *ev)
     if (!browser_of(w)) return;
     if (w != FrontWindow()) { SelectWindow(w); return; }  /* a click in a window behind brings it forward */
     use(browser_of(w));
+    if (br == full && part == inGrow) part = inContent;    /* no grow box: that corner is page */
     switch (part) {
     case inGoAway: if (TrackGoAway(w, ev->where) && may_leave("Close this window?")) close_browser(br); break;
     case inGrow: {
@@ -5354,6 +5768,12 @@ static void do_key(EventRecord *ev)
     char c = ev->message & charCodeMask;
     long page;
     Boolean in_area;
+    if (br && br->refresh_at && (c == 27 || (c == '.' && (ev->modifiers & cmdKey)))) {
+        /* Stop, with nothing loading: a refresh asked for is off */
+        br->refresh_at = 0;
+        set_status("Stopped.");
+        return;
+    }
     if (ev->modifiers & cmdKey) {
         if (br && c == '[') { go_history(-1); return; }
         if (br && c == ']') { go_history(1); return; }
@@ -5366,7 +5786,9 @@ static void do_key(EventRecord *ev)
         return;
     }
     if (!br) return;
-    page = br->view_r.bottom - br->view_r.top - 16;
+    /* Escape leaves full screen; one pressed while loading stopped it (stop_asked) */
+    if (c == 0x1B && br == full) { if (ev->when > loaded_tick) full_screen(false); return; }
+    page = (br->view_r.bottom - br->view_r.top) * 2 / 3;    /* as a click in the scroll bar's gray */
     in_area = br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_TEXTAREA;
     /* control characters TextEdit would draw as boxes: Escape, Clear, forward delete... */
     if (((unsigned char)c < ' ' && !strchr("\b\t\r\003\001\004\013\014\034\035\036\037", c)) || c == 0x7F) return;
@@ -5379,11 +5801,19 @@ static void do_key(EventRecord *ev)
     case 0x1E: if (!in_area) { scroll_to(br->scroll_y - 16); return; } break;  /* up arrow */
     case 0x1F: if (!in_area) { scroll_to(br->scroll_y + 16); return; } break;  /* down arrow */
     }
+    if (br == full && br->focus < 0) {
+        /* the address isn't there to type in: keys move the page */
+        if (c == 0x1C) scroll_x_to(br->scroll_x - 16);      /* left arrow */
+        if (c == 0x1D) scroll_x_to(br->scroll_x + 16);      /* right arrow */
+        if (c == ' ') scroll_to(br->scroll_y + ((ev->modifiers & shiftKey) ? -page : page));
+        return;
+    }
     if (br->focus >= 0) {
         if ((c == '\r' && !in_area) || c == 3) { submit(br->forms.fields[br->focus].form, -1, 0, 0); return; }
         type_in_field(c, ev);
         return;
     }
+    if (br->focus < -1) blur();
     if (c == '\r' || c == 3) { go_typed(); return; }
     TEKey(c, br->url_te);
     te_show_caret(br->url_te);
@@ -5447,10 +5877,10 @@ static void setup_menus(void)
     AppendMenu(m, "\pNew Window/N;Open Location\311/L;Open File\311/O;Close/W;(-;Page Setup\311;Print\311/P;(-;Quit/Q");
     InsertMenu(m, 0);
     m = NewMenu(MENU_EDIT, "\pEdit");
-    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;(-;Preferences\311;Clear Logins and Cookies");
+    AppendMenu(m, "\p(Undo/Z;(-;Cut/X;Copy/C;Paste/V;Select All/A;Find\311/F;Find Again/G;(-;Preferences\311;Clear Logins and Cookies");
     InsertMenu(m, 0);
     m = NewMenu(MENU_VIEW, "\pView");
-    AppendMenu(m, "\pLarger Text/+;Smaller Text/-;(-;Page Source");
+    AppendMenu(m, "\pLarger Text/+;Smaller Text/-;(-;Page Source;(-;Full Screen/K");
     InsertMenu(m, 0);
     m = NewMenu(MENU_GO, "\pGo");
     AppendMenu(m, "\pBack/[;Forward/];Reload/R;Home/H;(-;Stop/.");
@@ -5560,14 +5990,19 @@ int mill_run(WindowPtr splash)
         } else if (br && br->focus < 0) {
             TEIdle(br->url_te);
         }
-        if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); } mem_short(); net_keep_idle(); continue; }
+        if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); refresh_due(); } mem_short(); net_keep_idle(); continue; }
         switch (ev.what) {
         case mouseDown: do_mouse(&ev); break;
         case keyDown: case autoKey: do_key(&ev); break;
         case updateEvt: update_window((WindowPtr)ev.message); break;
         case activateEvt: activate((WindowPtr)ev.message, (ev.modifiers & activeFlag) != 0); break;
+        case osEvt:
+            /* switching applications in full screen: the others get the menu bar back */
+            if ((ev.message >> 24 & 0xFF) == 1 && full) { if (ev.message & 1) hide_bar(); else show_bar(); }
+            break;
         }
     }
+    show_bar();     /* the Finder's menu bar */
     net_keep_close(NULL, NULL);
     plugins_quit();
     net_shutdown();

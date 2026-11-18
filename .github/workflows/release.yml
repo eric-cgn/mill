@@ -60,7 +60,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 tools/site.py notes "$VERSION" > notes.txt
-          gh release create "v$VERSION" dist/Install-Mill-*.bin dist/Install-Mill-*.hqx dist/Mill-*.image --target "$GITHUB_SHA" --title "Mill $VERSION" --notes-file notes.txt
+          gh release create "v$VERSION" dist/Install-Mill-*.bin dist/Install-Mill-*.hqx dist/Mill-*.image dist/Mill-*.image.bin --target "$GITHUB_SHA" --title "Mill $VERSION" --notes-file notes.txt
 
   site:
     needs: release

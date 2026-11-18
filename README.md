@@ -71,13 +71,12 @@ Requirements:
   - `./build.sh disk`: Web Fonts' Python packages, pinned, from PyPI (freetype-py 2.5.1,
     macresources 1.2, and fontTools 4.68.0). The font files themselves are in
     `tools/extras/fonts/`.
-  - `./build.sh installer`: [EUP](https://github.com/eric-cgn/eup) 1.3's source release, fetched
-    once into `build/eup-1.3.tar.gz` and checked by SHA-256. Until that release is on GitHub,
-    put the archive there yourself.
+  - `./build.sh installer`: [EUP](https://github.com/eric-cgn/eup) 1.4's source release, fetched
+    once into `build/eup-1.4.tar.gz` and checked by SHA-256.
   - The System Disk tool: Apple's System 6.0.5 disks and one disk of System 7.5 Update 2.0,
     from the Internet Archive's copies of Apple's download site, and machfs and macresources
     from PyPI, all pinned by SHA-256, into `tools/systemdisk/cache`.
-  - `extras/build.sh` needs no network, so `build/eup-1.3.tar.gz` must already be there
+  - `extras/build.sh` needs no network, so `build/eup-1.4.tar.gz` must already be there
     (`./build.sh installer` fetches it).
 
 The System Disk may be created from the included LGPL'd script. The Network Edition is for LocalTalk or Ethernet,
@@ -143,7 +142,7 @@ Where each step's inputs come from:
 | `tools/release.py` | `dist/Install-Mill-VERSION.bin`, `.hqx` | `build/installer/` |
 | `./build.sh kit` | `dist/PlugInSDK-VERSION.dsk`, `.zip` | `sdk/`; the Retro68 image |
 | `tools/systemdisk/make_system_disk.py` | `OUTDIR/Mill-System-Disk-Network.image`, `.dsk` (`-Personal` with `--personal`) | Apple's System 6.0.5 disks and System 7.5 Update 2.0 disk 3 (Internet Archive), machfs and macresources (PyPI); all pinned by SHA-256 |
-| `extras/build.sh` (`extras` branch) | `extras/build/installer/Install-Millennium-Pack-VERSION.bin`, `.hqx`; `extras/dist/MillExtras-VERSION.image`, `MillDistribution-MILLVERSION.image` | `extras/`, `build/Mill.bin`, `build/installer/`, `build/eup-1.3.tar.gz`; the Retro68 image, with no network |
+| `extras/build.sh` (`extras` branch) | `extras/build/installer/Install-Millennium-Pack-VERSION.bin`, `.hqx`; `extras/dist/MillExtras-VERSION.image`, `MillDistribution-MILLVERSION.image` | `extras/`, `build/Mill.bin`, `build/installer/`, `build/eup-1.4.tar.gz`; the Retro68 image, with no network |
 | `tools/splash.py` (by hand) | `src/splash.r` | `art/quixote.jpg` (Wikimedia Commons, see `art/README`); macOS `sips` |
 | `tools/splash.py text` (by hand) | `src/splash_text.r` | `build/fonts/Web Fonts.bin`, `plugins/fonts/` (built with the Mac's `cc`), `src/version.h` |
 
