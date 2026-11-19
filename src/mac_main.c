@@ -4448,6 +4448,26 @@ static void put_scrap(const char *buf, long n)
     *(short *)lm = n;
 }
 
+/* TextEdit's scrap to and from the Clipboard: TEToScrap and TEFromScrap, which were glue,
+   not traps. Only the Clipboard's text: no text, nothing to paste. */
+static void te_scrap(Boolean to)
+{
+    char *lm = (char *)0xAB0;       /* TEScrpLength, then TEScrpHandle */
+    Handle h;
+    long off, n;
+    __asm__("" : "+a"(lm));
+    h = *(Handle *)(lm + 4);
+    if (to) {
+        ZeroScrap();
+        HLock(h);
+        PutScrap(*(short *)lm, 'TEXT', *h);
+        HUnlock(h);
+    } else {
+        n = GetScrap(h, 'TEXT', &off);
+        *(short *)lm = n < 0 ? 0 : n > 32767 ? 32767 : n;
+    }
+}
+
 /* The menu for what's under the mouse: an image, a link, or the page itself */
 static void context_menu(Point p, const Run *r)
 {
@@ -5491,9 +5511,12 @@ static void do_menu(long choice)
             if (item == EDIT_SELECT_ALL && br->have_page) { page_focus(); br->sel_b = br->doc.text_len; draw_view(); }
         }
         else if (br && !(br == full && typing_te() == br->url_te)) {   /* not the hidden address */
+            /* through the Clipboard, so text goes to and comes from other applications
+               (TextEdit's own scrap holds only what was copied here) */
             if (item == EDIT_CUT) TECut(typing_te());
             if (item == EDIT_COPY) TECopy(typing_te());
-            if (item == EDIT_PASTE) TEPaste(typing_te());
+            if (item == EDIT_CUT || item == EDIT_COPY) te_scrap(true);
+            if (item == EDIT_PASTE) { te_scrap(false); TEPaste(typing_te()); }
             if (item == EDIT_SELECT_ALL && !(br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_PASSWORD)) {
                 if (br->focus >= 0) {
                     RgnHandle save = clip_to(&br->focus_clip);
