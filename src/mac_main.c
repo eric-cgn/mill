@@ -5403,7 +5403,9 @@ static void refresh_menus(void)
         short i;
         if (br || da) EnableItem(file, FILE_CLOSE); else DisableItem(file, FILE_CLOSE);
         if (br && br->have_page) EnableItem(file, FILE_PRINT); else DisableItem(file, FILE_PRINT);
-        for (i = EDIT_CUT; i <= EDIT_PASTE; i++) if (br || da) EnableItem(edit, i); else DisableItem(edit, i);
+        /* Cut and Paste: not when the page has the keyboard */
+        for (i = EDIT_CUT; i <= EDIT_PASTE; i++)
+            if (da || (br && (i == EDIT_COPY || !(br->focus < -1 || (br == full && br->focus < 0))))) EnableItem(edit, i); else DisableItem(edit, i);
         /* Select All: the address or the field being typed in (a password's text has no selection) */
         if (br && !da && !(br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_PASSWORD)) EnableItem(edit, EDIT_SELECT_ALL); else DisableItem(edit, EDIT_SELECT_ALL);
         MenuHandle view = GetMenuHandle(MENU_VIEW);
