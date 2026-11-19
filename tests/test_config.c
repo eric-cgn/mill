@@ -51,7 +51,7 @@ static int field(const char *body, long len, const char *name, char *out, int si
     return 0;
 }
 
-static const ConfigIO io = { field, put, bookmark, 32, 3600, 10, "a.root-servers.net" };
+static const ConfigIO io = { field, put, bookmark, 32, 3600, 10, "mill.1in1e6.com" };
 
 /* Every built-in setting, with its checkboxes half ticked and half not */
 static void start(void)
@@ -74,7 +74,7 @@ static void start(void)
     put("decode_macbinary", "yes");
     put("upload_ext", "no");
     put("net_check", "no");
-    put("ping_host", "old.host");
+    put("check_host", "old.host");
     put("print_headers", "yes");
     put("print_backgrounds", "no");
     put("bm0", "http://a/ A");
@@ -83,7 +83,7 @@ static void start(void)
 
 static const char *const all[] = { "homepage", "image_memory", "history", "keep_alive", "font_prop", "font_fixed",
                                    "user_agent", "upload_as", "file_types", "welcome", "scale_text_only", "full_screen_bars", "load_images",
-                                   "cookies", "decode_macbinary", "upload_ext", "net_check", "ping_host",
+                                   "cookies", "decode_macbinary", "upload_ext", "net_check", "check_host",
                                    "print_headers", "print_backgrounds", "bm0", "bm1" };
 
 static char before[MAX][300];
@@ -154,14 +154,14 @@ int main(void)
     /* The connection check */
     start();
     keep();
-    assert(save("section=check&net_check=yes&ping_host=new.host", note) == 1 && !note[0]);
-    assert(!strcmp(get("net_check"), "yes") && !strcmp(get("ping_host"), "new.host"));
-    others_unchanged(" net_check ping_host ");
+    assert(save("section=check&net_check=yes&check_host=new.host", note) == 1 && !note[0]);
+    assert(!strcmp(get("net_check"), "yes") && !strcmp(get("check_host"), "new.host"));
+    others_unchanged(" net_check check_host ");
     start();
     keep();
-    assert(save("section=check&ping_host=", note) == 1);
-    assert(!strcmp(get("net_check"), "no") && !strcmp(get("ping_host"), "a.root-servers.net"));
-    others_unchanged(" net_check ping_host ");
+    assert(save("section=check&check_host=", note) == 1);
+    assert(!strcmp(get("net_check"), "no") && !strcmp(get("check_host"), "mill.1in1e6.com"));
+    others_unchanged(" net_check check_host ");
 
     /* Bookmarks */
     start();

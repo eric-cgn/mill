@@ -11,7 +11,7 @@ typedef struct {
     void (*put)(const char *name, const char *value);
     void (*bookmark)(int n, const char *url, const char *title);    /* url "" empties slot n */
     int history_max, keep_alive_max, bookmarks;
-    const char *default_ping;
+    const char *default_check;
 } ConfigIO;
 
 /* Mill's own sections, as each FORM's section field and its heading's anchor */

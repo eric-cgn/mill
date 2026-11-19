@@ -476,7 +476,6 @@ void sys_init(void)
 /* ------------------------------------------------------------ the connection check */
 
 #define CHECK_LOOKUP_TICKS (10 * 60L)   /* a name not found in 10 seconds isn't */
-#define CHECK_ECHO_SECS 5
 
 static long check_since;
 
@@ -484,12 +483,12 @@ static Boolean check_waited(void) { return TickCount() - check_since > CHECK_LOO
 
 Boolean net_check(void)
 {
-    const char *host = setting("ping_host", "");
+    const char *host = setting("check_host", "");
     Boolean (*idle)(void) = net_idle;
     void (*said)(const char *) = net_status;
     ip_addr addr;
     OSErr err;
-    if (!host[0]) host = MILL_DEFAULT_PING;
+    if (!host[0]) host = MILL_DEFAULT_CHECK;
     if (splash_say) splash_say("Connection check");
     /* the browser isn't up: no sails or status line while the name is looked up */
     check_since = TickCount();
@@ -498,5 +497,5 @@ Boolean net_check(void)
     err = net_resolve(host, &addr);
     net_idle = idle;
     net_status = said;
-    return err == noErr && net_ping(addr, CHECK_ECHO_SECS) == noErr;
+    return err == noErr;    /* a name found: MacTCP is set up, and the name server answers */
 }

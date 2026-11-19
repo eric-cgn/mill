@@ -147,60 +147,6 @@ typedef char echo_dest_at_28[offsetof(ICMPParamBlock, cs.echo.dest) == 28 ? 1 : 
 typedef char echo_notify_at_46[offsetof(ICMPParamBlock, cs.echo.icmpCompletion) == 46 ? 1 : -1];
 typedef char reply_at_50[offsetof(ICMPParamBlock, cs.reply.echoRequestOut) == 50 ? 1 : -1];
 
-/* The call, and how it ended. The call's own ioResult goes to 0 once the request is sent;
-   MacTCP says how it went only when it calls icmpCompletion, with a block of its own whose
-   ioResult is noErr or icmpEchoTimeoutErr, and which carries the call's userDataPtr back:
-   this record, so the routine needs nothing else at interrupt time. */
-typedef struct {
-    ICMPParamBlock pb;
-    volatile short ended;
-    volatile OSErr result;
-} EchoCall;
-
-/* Here, in a segment that stays: MacTCP may end a call given up on after the Start
-   segment has gone, so its record and completion routine stay too */
-static EchoCall echo = { { { 0 } }, 1, 0 };
-
-/* A C routine (MiscIPPB.h, kCStackBased), though MacTCP.p says Pascal: one that pops its
-   argument as Pascal does crashes MacTCP */
-static void echo_done(void *iopb)
-{
-    ICMPParamBlock *r = iopb;
-    EchoCall *c = (EchoCall *)r->cs.reply.userDataPtr;
-    if (c != &echo) return;
-    c->result = r->ioResult;
-    c->ended = 1;
-}
-
-OSErr net_ping(ip_addr addr, short secs)
-{
-    static char data[] = "Mill";
-    long start = TickCount();
-    OSErr err;
-    if (!echo.ended) return commandTimeout;     /* the last one is still out */
-    if ((err = net_open()) != noErr) return err;
-    memset(&echo, 0, sizeof echo);
-    echo.pb.ioCRefNum = net_ipp;
-    echo.pb.csCode = ipctlEchoICMP;
-    echo.pb.cs.echo.dest = addr;
-    echo.pb.cs.echo.data.length = sizeof data - 1;
-    echo.pb.cs.echo.data.ptr = data;
-    echo.pb.cs.echo.timeout = secs;
-    echo.pb.cs.echo.icmpCompletion = echo_done;
-    echo.pb.cs.echo.userDataPtr = (long)&echo;
-    if ((err = PBControlAsync((ParmBlkPtr)&echo.pb)) != noErr || echo.pb.ioResult < 0) {
-        echo.ended = 1;     /* refused: icmpCompletion won't be called */
-        return err != noErr ? err : echo.pb.ioResult;
-    }
-    /* MacTCP ends it after secs; a little longer, in case it doesn't */
-    while (!echo.ended) {
-        SystemTask();
-        if (TickCount() - start > (secs + 2) * 60L) break;
-    }
-    if (!echo.ended) return icmpEchoTimeoutErr;
-    return echo.result;
-}
-
 /* ------------------------------------------------------------ setup */
 
 /* MacTCP's driver isn't closed: other programs share it. The resolver, Mill's own

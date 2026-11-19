@@ -108,9 +108,9 @@ static void connection_check(const ConfigIO *io, const char *body, long len)
 {
     char host[256], *c;
     checkbox(io, body, len, "net_check");
-    if (io->field(body, len, "ping_host", host, sizeof host)) {
+    if (io->field(body, len, "check_host", host, sizeof host)) {
         for (c = host; *c; c++) if ((unsigned char)*c <= ' ') *c = 0;     /* one name, no spaces */
-        io->put("ping_host", host[0] ? host : io->default_ping);
+        io->put("check_host", host[0] ? host : io->default_check);
     }
 }
 
