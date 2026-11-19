@@ -4431,17 +4431,28 @@ static void go_map(const char *target)
     else go(target, true, br->page_url);
 }
 
-enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE, CM_VIEW_LINK };
+enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE, CM_VIEW_LINK, CM_COPY_IMAGE, CM_COPY_LINK };
 /* Held this long for the menu: the double-click time, at least half a second; moved this
    far first, it's a click (as Netscape 4's context menus did) */
 #define HOLD 30
 #define HYSTERESIS 6
 
+/* n bytes of text on the Clipboard, and in TextEdit's scrap too, for pasting here */
+static void put_scrap(const char *buf, long n)
+{
+    char *lm = (char *)0xAB0;
+    ZeroScrap();
+    PutScrap(n, 'TEXT', (Ptr)buf);
+    __asm__("" : "+a"(lm));         /* TEScrpLength and TEScrpHandle, hidden from GCC */
+    PtrToXHand(buf, *(Handle *)(lm + 4), n);
+    *(short *)lm = n;
+}
+
 /* The menu for what's under the mouse: an image, a link, or the page itself */
 static void context_menu(Point p, const Run *r)
 {
     MenuHandle m = NewMenu(MENU_CONTEXT, "\p");
-    short codes[6], n = 0;
+    short codes[8], n = 0;
     long choice;
     Point where = p;
     const char *page = !strncmp(br->page_url, VIEW_SOURCE, strlen(VIEW_SOURCE)) ? br->page_url + strlen(VIEW_SOURCE) : br->page_url;
@@ -4456,6 +4467,8 @@ static void context_menu(Point p, const Run *r)
         codes[n++] = CM_VIEW_IMAGE;
         AppendMenu(m, "\pSave Image As\311");
         codes[n++] = CM_SAVE_IMAGE;
+        AppendMenu(m, "\pCopy Image Location");
+        codes[n++] = CM_COPY_IMAGE;
     }
     if (r && r->link && r->kind != RUN_CONTROL) {
         AppendMenu(m, "\pOpen Link in New Window");
@@ -4464,6 +4477,8 @@ static void context_menu(Point p, const Run *r)
         codes[n++] = CM_SAVE_LINK;
         AppendMenu(m, "\pView Link as Text");
         codes[n++] = CM_VIEW_LINK;
+        AppendMenu(m, "\pCopy Link");
+        codes[n++] = CM_COPY_LINK;
     }
     if (!n) {
         AppendMenu(m, "\pView Source");
@@ -4495,8 +4510,12 @@ static void context_menu(Point p, const Run *r)
     case CM_SAVE_IMAGE:
         save_url(br->pics[pic].url, br->page_url, false);
         break;
-    case CM_NEW_WINDOW: case CM_SAVE_LINK: case CM_VIEW_LINK:
+    case CM_COPY_IMAGE:
+        put_scrap(br->pics[pic].url, strlen(br->pics[pic].url));
+        break;
+    case CM_NEW_WINDOW: case CM_SAVE_LINK: case CM_VIEW_LINK: case CM_COPY_LINK:
         if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill can\325t open this kind of address.");
+        else if (codes[LoWord(choice) - 1] == CM_COPY_LINK) put_scrap(target, strlen(target));
         else if (!may_follow(target)) set_status(FILE_MSG);
         else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target, br->page_url, false);
         else if (codes[LoWord(choice) - 1] == CM_VIEW_LINK) {
@@ -4586,7 +4605,7 @@ static void copy_sel(void)
 {
     long a = br->sel_a < br->sel_b ? br->sel_a : br->sel_b, b = br->sel_a + br->sel_b - a, k, n = 0, s, e;
     short px = 0;
-    char *buf = malloc(b - a + br->lay.nruns), *lm = (char *)0xAB0;
+    char *buf = malloc(b - a + br->lay.nruns);
     if (!buf) return;
     for (k = 0; k < br->lay.nruns; k++) {
         const Run *r = &br->lay.runs[k];
@@ -4598,11 +4617,7 @@ static void copy_sel(void)
         n += e - s;
         px = r->x + r->width;
     }
-    ZeroScrap();
-    PutScrap(n, 'TEXT', buf);
-    __asm__("" : "+a"(lm));         /* TEScrpLength and TEScrpHandle, hidden from GCC */
-    PtrToXHand(buf, *(Handle *)(lm + 4), n);     /* TextEdit's scrap too, for pasting here */
-    *(short *)lm = n;
+    put_scrap(buf, n);
     free(buf);
 }
 
