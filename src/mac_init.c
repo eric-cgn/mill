@@ -451,6 +451,7 @@ void settings_migrate(void)
 #define GESTALT_TRAP 0xA1AD
 #define FIND_FOLDER_PRESENT 1
 #define OUTLINE_FONTS 1        /* gestaltOutlineFonts */
+#define AE_PRESENT 1           /* gestaltAppleEventsPresent */
 
 static Boolean trap_available(unsigned short trap, TrapType type)
 {
@@ -469,6 +470,7 @@ void sys_init(void)
        (Inside Macintosh: Text, "Font Manager", Gestalt and SetOutlinePreferred) */
     sys_outlines = trap_available(_FontDispatch, kToolboxTrapType) &&
         Gestalt(gestaltFontMgrAttr, &r) == noErr && (r & OUTLINE_FONTS);
+    if (Gestalt(gestaltAppleEventsAttr, &r) == noErr && (r & AE_PRESENT)) ae_install();
 }
 
 /* ------------------------------------------------------------ the connection check */

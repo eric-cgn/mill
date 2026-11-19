@@ -5102,6 +5102,9 @@ static Boolean may_quit(void)
     return true;
 }
 
+void ae_go(const char *url) { if (need()) go(url, true, NULL); }
+Boolean ae_quit(void) { return quitting = may_quit(); }
+
 /* ------------------------------------------------------------ bookmarks */
 
 enum { BD_OK = 1, BD_CANCEL, BD_SLOT_LABEL, BD_SLOT, BD_TITLE_LABEL, BD_TITLE, BD_URL_LABEL, BD_URL, BD_RING, BD_LOGIN };
@@ -6008,6 +6011,7 @@ int mill_run(WindowPtr splash)
             TEIdle(br->url_te);
         }
         if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); refresh_due(); } mem_short(); net_keep_idle(); continue; }
+        if (ev.what == kHighLevelEvent) AEProcessAppleEvent(&ev);   /* System 7's: mac_events.c */
         switch (ev.what) {
         case mouseDown: do_mouse(&ev); break;
         case keyDown: case autoKey: do_key(&ev); break;
