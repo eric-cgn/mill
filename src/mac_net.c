@@ -251,7 +251,20 @@ struct NetConn {
     StreamPtr stream;
     Ptr rcv_buffer;
     TCPiopb *wait;          /* a listen's open, still going */
+    unsigned short why;     /* why it ended, from MacTCP's notice */
 };
+
+Boolean net_refused;
+
+/* MacTCP's notice, at interrupt time. A connection that ends is given one terminate
+   notice, with why: 2 is remote abort, a reset from the other end (MacTCP Programmer's
+   Guide, 1989, TCP asynchronous notification routine; Appendix, Reasons for TCP
+   termination). */
+static pascal void conn_notice(StreamPtr s, unsigned short event, Ptr c, unsigned short why, ICMPReport *icmp)
+{
+    (void)s; (void)icmp;
+    if (event == TCPTerminate) ((NetConn *)c)->why = why;
+}
 
 static void conn_free(NetConn *c)
 {
@@ -280,6 +293,8 @@ static OSErr conn_new(NetConn **out)
     memset(&pb, 0, sizeof pb);
     pb.csParam.create.rcvBuff = c->rcv_buffer;
     pb.csParam.create.rcvBuffLen = RCV_BUFFER_SIZE;
+    pb.csParam.create.notifyProc = conn_notice;
+    pb.csParam.create.userDataPtr = (Ptr)c;
     if ((err = tcp_call(&pb, TCPCreate)) != noErr) { conn_free(c); return err; }
     c->stream = pb.tcpStream;
     *out = c;
@@ -307,7 +322,12 @@ OSErr net_tcp_open(const char *host, unsigned short port, NetConn **out)
     pb.csParam.open.remotePort = port;
     net_stage = NET_CONNECT;
     status("Connecting\311");
-    if ((err = tcp_call(&pb, TCPActiveOpen)) != noErr) { conn_free(*out); *out = NULL; return err; }
+    if ((err = tcp_call(&pb, TCPActiveOpen)) != noErr) {
+        net_refused = (*out)->why == 2;     /* reset: nothing listens on that port */
+        conn_free(*out);
+        *out = NULL;
+        return err;
+    }
     net_stage = NET_TRANSFER;
     return noErr;
 }

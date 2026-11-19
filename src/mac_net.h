@@ -28,6 +28,8 @@ extern Boolean (*net_idle)(void);
 /* How far the last request got, for saying what went wrong */
 enum { NET_LOOKUP, NET_CONNECT, NET_TRANSFER };
 extern int net_stage;
+/* At NET_CONNECT: whether the server refused the connection (a reset), not just didn't answer */
+extern Boolean net_refused;
 
 /* Called with each chunk of a response as it arrives; return false to stop. */
 typedef Boolean (*net_sink)(const char *data, long len, void *ref);

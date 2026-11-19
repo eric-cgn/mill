@@ -3803,7 +3803,7 @@ static void no_reply(OSErr err, Boolean nothing, char *title, char *msg, int siz
         snprintf(msg, size, err == commandTimeout ? "Looking up %s took too long." : "There\325s no server named %s.", asked);
     } else if (net_stage == NET_CONNECT) {
         strcpy(title, "No connection");
-        snprintf(msg, size, "The server %s couldn\325t be contacted.", asked);
+        snprintf(msg, size, net_refused ? "The server %s refused the connection." : "The server %s couldn\325t be contacted.", asked);
     } else if (err == commandTimeout) {
         strcpy(title, "No reply");
         snprintf(msg, size, "%s didn\325t reply.", asked);
