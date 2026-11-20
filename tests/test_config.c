@@ -131,7 +131,8 @@ int main(void)
     assert(!strcmp(get("full_screen_bars"), "no"));
     assert(!strcmp(get("homepage"), "http://new/") && !strcmp(get("upload_as"), "BinHex") && !strcmp(get("file_types"), ""));
     others_unchanged(" homepage image_memory history keep_alive font_prop font_fixed user_agent upload_as file_types"
-                     " welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext ");
+                     " welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext"
+                     " net_check check_host ");
     assert(!strcmp(get("print_headers"), "yes") && !strcmp(get("print_backgrounds"), "no"));
     assert(!strcmp(get("net_check"), "no"));
 
@@ -142,7 +143,7 @@ int main(void)
     assert(!strcmp(get("full_screen_bars"), "yes"));
     assert(!strcmp(get("scale_text_only"), "yes") && !strcmp(get("cookies"), "yes") && !strcmp(get("upload_ext"), "yes"));
     assert(!strcmp(get("welcome"), "no"));
-    others_unchanged(" welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext ");
+    others_unchanged(" welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext net_check ");
 
     /* Printing: its own two boxes and nothing else, even if the body has others' fields */
     start();
@@ -151,17 +152,17 @@ int main(void)
     assert(!strcmp(get("print_headers"), "no") && !strcmp(get("print_backgrounds"), "yes"));
     others_unchanged(" print_headers print_backgrounds ");
 
-    /* The connection check */
+    /* The connection check, in General */
     start();
     keep();
-    assert(save("section=check&net_check=yes&check_host=new.host", note) == 1 && !note[0]);
+    assert(save("section=general&net_check=yes&check_host=new.host", note) == 1 && !note[0]);
     assert(!strcmp(get("net_check"), "yes") && !strcmp(get("check_host"), "new.host"));
-    others_unchanged(" net_check check_host ");
+    others_unchanged(" homepage image_memory history keep_alive font_prop font_fixed user_agent upload_as file_types welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext net_check check_host ");
     start();
     keep();
-    assert(save("section=check&check_host=", note) == 1);
+    assert(save("section=general&check_host=", note) == 1);
     assert(!strcmp(get("net_check"), "no") && !strcmp(get("check_host"), "mill.1in1e6.com"));
-    others_unchanged(" net_check check_host ");
+    others_unchanged(" homepage image_memory history keep_alive font_prop font_fixed user_agent upload_as file_types welcome scale_text_only full_screen_bars load_images cookies decode_macbinary upload_ext net_check check_host ");
 
     /* Bookmarks */
     start();

@@ -839,7 +839,7 @@ static void config(Out *o, const Url *u, const char *body, long len)
     out_s(o, "<TITLE>Mill Settings</TITLE><H2>Settings</H2>");
     if (note[0]) { out_s(o, "<P><B>"); out_text(o, note); out_s(o, "</B>"); }
     /* each section a table: the setting's name, then its control and what it does */
-    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#check\">Connection check</A> | <A HREF=\"#protocols\">Protocols</A> | <A HREF=\"#formats\">Formats</A> | <A HREF=\"#printing\">Printing</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
+    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#protocols\">Protocols</A> | <A HREF=\"#formats\">Formats</A> | <A HREF=\"#printing\">Printing</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
              "<P>After changing a section, click Save at the bottom of that section. "
              "Changes to more than one section at a time are lost."
              "<H3><A NAME=general>General</A></H3>");
@@ -848,9 +848,6 @@ static void config(Out *o, const Url *u, const char *body, long len)
              "<TR><TD VALIGN=TOP WIDTH=110><B>Home page</B><TD><INPUT NAME=homepage SIZE=36 VALUE=\"");
     out_text(o, setting("homepage", MILL_DEFAULT_HOME));
     out_s(o, "\"><BR>Opens at startup and with Home in the Go menu."
-             "<TR><TD VALIGN=TOP WIDTH=110><B>Show welcome page on next launch</B><TD><INPUT TYPE=checkbox NAME=welcome VALUE=yes");
-    if (!strcmp(setting("welcome", "yes"), "yes")) out_s(o, " CHECKED");
-    out_s(o, "> Opens " MILL_WELCOME_SHOWN " the next time Mill starts."
              "<TR><TD VALIGN=TOP WIDTH=110><B>Image memory</B><TD><INPUT NAME=image_memory SIZE=5 VALUE=\"");
     sprintf(k, "%ld", image_memory_k());
     out_s(o, k);
@@ -901,17 +898,15 @@ static void config(Out *o, const Url *u, const char *body, long len)
     out_s(o, "</SELECT>"
              "<TR><TD VALIGN=TOP WIDTH=110><B>Add upload file extension</B><TD><INPUT TYPE=checkbox NAME=upload_ext VALUE=yes");
     if (strcmp(setting("upload_ext", "yes"), "no")) out_s(o, " CHECKED");
-    out_s(o, "> Automatically appends .bin or .hqx if uploading a file as MacBinary or BinHex</TABLE>");
-    section_end(o);
-    out_s(o, "<H3><A NAME=check>Connection check</A></H3>");
-    section_start(o, CONFIG_CHECK, saved);
-    out_s(o, SETTINGS_TABLE
-             "<TR><TD VALIGN=TOP WIDTH=110><B>Check internet connectivity at launch</B><TD><INPUT TYPE=checkbox NAME=net_check VALUE=yes");
+    out_s(o, "> Automatically appends .bin or .hqx if uploading a file as MacBinary or BinHex"
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Connection check</B><TD><INPUT TYPE=checkbox NAME=net_check VALUE=yes");
     if (!strcmp(setting("net_check", "yes"), "yes")) out_s(o, " CHECKED");
-    out_s(o, "> Warns at launch if the name below can\325t be looked up."
-             "<TR><TD VALIGN=TOP WIDTH=110><B>Name to look up</B><TD><INPUT NAME=check_host SIZE=36 VALUE=\"");
+    out_s(o, "> Warns at launch if connection check hostname does not resolve."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Connection check hostname</B><TD><INPUT NAME=check_host SIZE=36 VALUE=\"");
     out_text(o, setting("check_host", MILL_DEFAULT_CHECK));
-    out_s(o, "\"></TABLE>");
+    out_s(o, "\"><TR><TD VALIGN=TOP WIDTH=110><B>Show welcome</B><TD><INPUT TYPE=checkbox NAME=welcome VALUE=yes");
+    if (!strcmp(setting("welcome", "yes"), "yes")) out_s(o, " CHECKED");
+    out_s(o, "> Opens the welcome url on the next launch.</TABLE>");
     section_end(o);
     out_s(o, "<H3><A NAME=protocols>Protocols</A></H3>");
     plugin_settings_form(o, saved);

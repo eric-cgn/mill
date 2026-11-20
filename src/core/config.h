@@ -16,7 +16,6 @@ typedef struct {
 
 /* Mill's own sections, as each FORM's section field and its heading's anchor */
 #define CONFIG_GENERAL "general"
-#define CONFIG_CHECK "check"
 #define CONFIG_PRINTING "printing"
 #define CONFIG_BOOKMARKS "bookmarks"
 
