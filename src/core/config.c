@@ -66,6 +66,8 @@ static void number(const ConfigIO *io, const char *body, long len, const char *n
     }
 }
 
+static void connection_check(const ConfigIO *io, const char *body, long len);
+
 static void general(const ConfigIO *io, const char *body, long len, char *note, int note_size, char *typed, char *rules,
                     int size)
 {
@@ -92,6 +94,7 @@ static void general(const ConfigIO *io, const char *body, long len, char *note, 
     if (io->field(body, len, "upload_as", v, 20) &&
         (!strcmp(v, "Automatic") || !strcmp(v, "Data fork only") || !strcmp(v, "MacBinary") || !strcmp(v, "BinHex")))
         io->put("upload_as", v);
+    connection_check(io, body, len);
     if (io->field(body, len, "file_types", typed, size)) {
         int bad;
         strcpy(rules, typed);
@@ -108,9 +111,9 @@ static void connection_check(const ConfigIO *io, const char *body, long len)
 {
     char host[256], *c;
     checkbox(io, body, len, "net_check");
-    if (io->field(body, len, "ping_host", host, sizeof host)) {
+    if (io->field(body, len, "check_host", host, sizeof host)) {
         for (c = host; *c; c++) if ((unsigned char)*c <= ' ') *c = 0;     /* one name, no spaces */
-        io->put("ping_host", host[0] ? host : io->default_ping);
+        io->put("check_host", host[0] ? host : io->default_check);
     }
 }
 
@@ -135,7 +138,6 @@ int config_save(const ConfigIO *io, const char *body, long len, const char *sec,
 {
     note[0] = typed[0] = 0;
     if (!strcmp(sec, CONFIG_GENERAL)) general(io, body, len, note, note_size, typed, rules, size);
-    else if (!strcmp(sec, CONFIG_CHECK)) connection_check(io, body, len);
     else if (!strcmp(sec, CONFIG_PRINTING)) {
         checkbox(io, body, len, "print_headers");
         checkbox(io, body, len, "print_backgrounds");

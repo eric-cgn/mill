@@ -25,8 +25,7 @@ extern long (*local_fetch)(const char *url, char *buf, long size, char *why, int
 
 #define MILL_DEFAULT_HOME "mill://about"
 #define MILL_WELCOME "http://welcome.1in1e6.com/"   /* opened once, while the welcome setting is on */
-#define MILL_WELCOME_SHOWN "http://welcome.1in1e6.com" /* as Settings says it */
-#define MILL_DEFAULT_PING "a.root-servers.net"      /* the connection check's server */
+#define MILL_DEFAULT_CHECK "mill.1in1e6.com"        /* the connection check's name to look up */
 #define MILL_DEFAULT_AGENT "Mozilla/1.22 (compatible; Mill/" MILL_VERSION "; Macintosh; 68K)"
 #define MILL_DEFAULT_IMAGE_K 128
 #define MILL_DEFAULT_HISTORY 10

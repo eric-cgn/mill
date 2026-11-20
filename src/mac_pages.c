@@ -20,11 +20,29 @@
 
 /* ------------------------------------------------------------ responses */
 
-typedef struct { net_sink sink; void *ref; int stopped; } Out;
+/* A page as it's made, handed on 512 bytes at a time: the sink draws the status line and
+   checks for Stop with each piece, and the pages are made of thousands of small ones */
+typedef struct { net_sink sink; void *ref; int stopped; short n; char buf[512]; } Out;
+
+static void out_start(Out *o, net_sink sink, void *ref) { o->sink = sink; o->ref = ref; o->stopped = 0; o->n = 0; }
+
+static void out_end(Out *o)
+{
+    if (!o->stopped && o->n > 0 && !o->sink(o->buf, o->n, o->ref)) o->stopped = 1;
+    o->n = 0;
+}
 
 static void out(Out *o, const char *s, long n)
 {
-    if (!o->stopped && n > 0 && !o->sink(s, n, o->ref)) o->stopped = 1;
+    while (n > 0 && !o->stopped) {
+        long k = (long)sizeof o->buf - o->n;
+        if (k > n) k = n;
+        memcpy(o->buf + o->n, s, k);
+        o->n += k;
+        s += k;
+        n -= k;
+        if (o->n == (short)sizeof o->buf) out_end(o);
+    }
 }
 
 static void out_s(Out *o, const char *s) { out(o, s, strlen(s)); }
@@ -733,10 +751,9 @@ Boolean font_file_request(const Url *u, net_sink sink, void *ref)
         if ((res = file_open_res(&p->spec, fsRdPerm)) == -1) return false;
         {
             Out o;
-            o.sink = sink;
-            o.ref = ref;
-            o.stopped = 0;
+            out_start(&o, sink, ref);
             text_about(&o, p->file, res);
+            out_end(&o);
         }
         CloseResFile(res);
         return true;
@@ -746,14 +763,13 @@ Boolean font_file_request(const Url *u, net_sink sink, void *ref)
         license_anchor(pack_files[k].file, anchor, sizeof anchor);
         if (!strcmp(u->host, anchor)) {
             Out o;
-            o.sink = sink;
-            o.ref = ref;
-            o.stopped = 0;
+            out_start(&o, sink, ref);
             if (about || !strcmp(u->path, "/") || !u->path[0]) text_about(&o, pack_files[k].file, pack_files[k].ref);
             else {
                 head(&o, 404, HTML_MAC);
                 out_s(&o, "<TITLE>Not Found</TITLE><H2>Not Found</H2><P>A font file has only an About page.");
             }
+            out_end(&o);
             return true;
         }
     }
@@ -800,7 +816,7 @@ static void config(Out *o, const Url *u, const char *body, long len)
     }
     if (body) {
         const ConfigIO io = { form_field, setting_put, bookmark_put, MILL_HISTORY_MAX, MILL_KEEP_ALIVE_MAX,
-                              BOOKMARKS, MILL_DEFAULT_PING };
+                              BOOKMARKS, MILL_DEFAULT_CHECK };
         char sec[32];
         if (config_section(&io, body, len, sec, sizeof sec)) {
             if (config_save(&io, body, len, sec, note, sizeof note, typed, rules, sizeof typed)) {
@@ -823,7 +839,7 @@ static void config(Out *o, const Url *u, const char *body, long len)
     out_s(o, "<TITLE>Mill Settings</TITLE><H2>Settings</H2>");
     if (note[0]) { out_s(o, "<P><B>"); out_text(o, note); out_s(o, "</B>"); }
     /* each section a table: the setting's name, then its control and what it does */
-    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#check\">Connection check</A> | <A HREF=\"#protocols\">Protocols</A> | <A HREF=\"#formats\">Formats</A> | <A HREF=\"#printing\">Printing</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
+    out_s(o, "<P><A HREF=\"#general\">General</A> | <A HREF=\"#protocols\">Protocols</A> | <A HREF=\"#formats\">Formats</A> | <A HREF=\"#printing\">Printing</A> | <A HREF=\"#bookmarks\">Bookmarks</A>"
              "<P>After changing a section, click Save at the bottom of that section. "
              "Changes to more than one section at a time are lost."
              "<H3><A NAME=general>General</A></H3>");
@@ -832,9 +848,6 @@ static void config(Out *o, const Url *u, const char *body, long len)
              "<TR><TD VALIGN=TOP WIDTH=110><B>Home page</B><TD><INPUT NAME=homepage SIZE=36 VALUE=\"");
     out_text(o, setting("homepage", MILL_DEFAULT_HOME));
     out_s(o, "\"><BR>Opens at startup and with Home in the Go menu."
-             "<TR><TD VALIGN=TOP WIDTH=110><B>Show welcome page on next launch</B><TD><INPUT TYPE=checkbox NAME=welcome VALUE=yes");
-    if (!strcmp(setting("welcome", "yes"), "yes")) out_s(o, " CHECKED");
-    out_s(o, "> Opens " MILL_WELCOME_SHOWN " the next time Mill starts."
              "<TR><TD VALIGN=TOP WIDTH=110><B>Image memory</B><TD><INPUT NAME=image_memory SIZE=5 VALUE=\"");
     sprintf(k, "%ld", image_memory_k());
     out_s(o, k);
@@ -885,17 +898,15 @@ static void config(Out *o, const Url *u, const char *body, long len)
     out_s(o, "</SELECT>"
              "<TR><TD VALIGN=TOP WIDTH=110><B>Add upload file extension</B><TD><INPUT TYPE=checkbox NAME=upload_ext VALUE=yes");
     if (strcmp(setting("upload_ext", "yes"), "no")) out_s(o, " CHECKED");
-    out_s(o, "> Automatically appends .bin or .hqx if uploading a file as MacBinary or BinHex</TABLE>");
-    section_end(o);
-    out_s(o, "<H3><A NAME=check>Connection check</A></H3>");
-    section_start(o, CONFIG_CHECK, saved);
-    out_s(o, SETTINGS_TABLE
-             "<TR><TD VALIGN=TOP WIDTH=110><B>Check internet connectivity at launch</B><TD><INPUT TYPE=checkbox NAME=net_check VALUE=yes");
+    out_s(o, "> Automatically appends .bin or .hqx if uploading a file as MacBinary or BinHex"
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Connection check</B><TD><INPUT TYPE=checkbox NAME=net_check VALUE=yes");
     if (!strcmp(setting("net_check", "yes"), "yes")) out_s(o, " CHECKED");
-    out_s(o, "> Warns at launch if the server below doesn\325t reply."
-             "<TR><TD VALIGN=TOP WIDTH=110><B>Server to ping</B><TD><INPUT NAME=ping_host SIZE=36 VALUE=\"");
-    out_text(o, setting("ping_host", MILL_DEFAULT_PING));
-    out_s(o, "\"><BR>A name or an address.</TABLE>");
+    out_s(o, "> Warns at launch if connection check hostname does not resolve."
+             "<TR><TD VALIGN=TOP WIDTH=110><B>Connection check hostname</B><TD><INPUT NAME=check_host SIZE=36 VALUE=\"");
+    out_text(o, setting("check_host", MILL_DEFAULT_CHECK));
+    out_s(o, "\"><TR><TD VALIGN=TOP WIDTH=110><B>Show welcome</B><TD><INPUT TYPE=checkbox NAME=welcome VALUE=yes");
+    if (!strcmp(setting("welcome", "yes"), "yes")) out_s(o, " CHECKED");
+    out_s(o, "> Opens the welcome url on the next launch.</TABLE>");
     section_end(o);
     out_s(o, "<H3><A NAME=protocols>Protocols</A></H3>");
     plugin_settings_form(o, saved);
@@ -957,9 +968,8 @@ static void mill_request(const Url *u, const char *body, long len, Out *o)
 OSErr local_request(const Url *u, const char *content_type, const char *body, long body_len, net_sink sink, void *ref)
 {
     Out o;
-    o.sink = sink;
-    o.ref = ref;
-    o.stopped = 0;
+    out_start(&o, sink, ref);
     mill_request(u, content_type ? body : NULL, body_len, &o);
+    out_end(&o);
     return noErr;
 }

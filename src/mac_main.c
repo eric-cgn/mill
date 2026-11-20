@@ -3803,7 +3803,7 @@ static void no_reply(OSErr err, Boolean nothing, char *title, char *msg, int siz
         snprintf(msg, size, err == commandTimeout ? "Looking up %s took too long." : "There\325s no server named %s.", asked);
     } else if (net_stage == NET_CONNECT) {
         strcpy(title, "No connection");
-        snprintf(msg, size, "The server %s couldn\325t be contacted.", asked);
+        snprintf(msg, size, net_refused ? "The server %s refused the connection." : "The server %s couldn\325t be contacted.", asked);
     } else if (err == commandTimeout) {
         strcpy(title, "No reply");
         snprintf(msg, size, "%s didn\325t reply.", asked);
@@ -4431,17 +4431,48 @@ static void go_map(const char *target)
     else go(target, true, br->page_url);
 }
 
-enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE, CM_VIEW_LINK };
+enum { CM_LOAD_IMAGE = 1, CM_VIEW_IMAGE, CM_SAVE_IMAGE, CM_NEW_WINDOW, CM_SAVE_LINK, CM_VIEW_SOURCE, CM_SAVE_SOURCE, CM_VIEW_LINK, CM_COPY_IMAGE, CM_COPY_LINK };
 /* Held this long for the menu: the double-click time, at least half a second; moved this
    far first, it's a click (as Netscape 4's context menus did) */
 #define HOLD 30
 #define HYSTERESIS 6
 
+/* n bytes of text on the Clipboard, and in TextEdit's scrap too, for pasting here */
+static void put_scrap(const char *buf, long n)
+{
+    char *lm = (char *)0xAB0;
+    ZeroScrap();
+    PutScrap(n, 'TEXT', (Ptr)buf);
+    __asm__("" : "+a"(lm));         /* TEScrpLength and TEScrpHandle, hidden from GCC */
+    PtrToXHand(buf, *(Handle *)(lm + 4), n);
+    *(short *)lm = n;
+}
+
+/* TextEdit's scrap to and from the Clipboard: TEToScrap and TEFromScrap, which were glue,
+   not traps. Only the Clipboard's text: no text, nothing to paste. */
+static void te_scrap(Boolean to)
+{
+    char *lm = (char *)0xAB0;       /* TEScrpLength, then TEScrpHandle */
+    Handle h;
+    long off, n;
+    __asm__("" : "+a"(lm));
+    h = *(Handle *)(lm + 4);
+    if (to) {
+        ZeroScrap();
+        HLock(h);
+        PutScrap(*(short *)lm, 'TEXT', *h);
+        HUnlock(h);
+    } else {
+        n = GetScrap(h, 'TEXT', &off);
+        *(short *)lm = n < 0 ? 0 : n > 32767 ? 32767 : n;
+    }
+}
+
 /* The menu for what's under the mouse: an image, a link, or the page itself */
 static void context_menu(Point p, const Run *r)
 {
     MenuHandle m = NewMenu(MENU_CONTEXT, "\p");
-    short codes[6], n = 0;
+    short codes[8], n = 0;
     long choice;
     Point where = p;
     const char *page = !strncmp(br->page_url, VIEW_SOURCE, strlen(VIEW_SOURCE)) ? br->page_url + strlen(VIEW_SOURCE) : br->page_url;
@@ -4456,6 +4487,8 @@ static void context_menu(Point p, const Run *r)
         codes[n++] = CM_VIEW_IMAGE;
         AppendMenu(m, "\pSave Image As\311");
         codes[n++] = CM_SAVE_IMAGE;
+        AppendMenu(m, "\pCopy Image Location");
+        codes[n++] = CM_COPY_IMAGE;
     }
     if (r && r->link && r->kind != RUN_CONTROL) {
         AppendMenu(m, "\pOpen Link in New Window");
@@ -4464,6 +4497,8 @@ static void context_menu(Point p, const Run *r)
         codes[n++] = CM_SAVE_LINK;
         AppendMenu(m, "\pView Link as Text");
         codes[n++] = CM_VIEW_LINK;
+        AppendMenu(m, "\pCopy Link");
+        codes[n++] = CM_COPY_LINK;
     }
     if (!n) {
         AppendMenu(m, "\pView Source");
@@ -4495,8 +4530,12 @@ static void context_menu(Point p, const Run *r)
     case CM_SAVE_IMAGE:
         save_url(br->pics[pic].url, br->page_url, false);
         break;
-    case CM_NEW_WINDOW: case CM_SAVE_LINK: case CM_VIEW_LINK:
+    case CM_COPY_IMAGE:
+        put_scrap(br->pics[pic].url, strlen(br->pics[pic].url));
+        break;
+    case CM_NEW_WINDOW: case CM_SAVE_LINK: case CM_VIEW_LINK: case CM_COPY_LINK:
         if (url_resolve(br->page_url, br->lay.links[r->link - 1], target, sizeof target)) set_status("Mill can\325t open this kind of address.");
+        else if (codes[LoWord(choice) - 1] == CM_COPY_LINK) put_scrap(target, strlen(target));
         else if (!may_follow(target)) set_status(FILE_MSG);
         else if (codes[LoWord(choice) - 1] == CM_SAVE_LINK) save_url(target, br->page_url, false);
         else if (codes[LoWord(choice) - 1] == CM_VIEW_LINK) {
@@ -4586,7 +4625,7 @@ static void copy_sel(void)
 {
     long a = br->sel_a < br->sel_b ? br->sel_a : br->sel_b, b = br->sel_a + br->sel_b - a, k, n = 0, s, e;
     short px = 0;
-    char *buf = malloc(b - a + br->lay.nruns), *lm = (char *)0xAB0;
+    char *buf = malloc(b - a + br->lay.nruns);
     if (!buf) return;
     for (k = 0; k < br->lay.nruns; k++) {
         const Run *r = &br->lay.runs[k];
@@ -4598,11 +4637,7 @@ static void copy_sel(void)
         n += e - s;
         px = r->x + r->width;
     }
-    ZeroScrap();
-    PutScrap(n, 'TEXT', buf);
-    __asm__("" : "+a"(lm));         /* TEScrpLength and TEScrpHandle, hidden from GCC */
-    PtrToXHand(buf, *(Handle *)(lm + 4), n);     /* TextEdit's scrap too, for pasting here */
-    *(short *)lm = n;
+    put_scrap(buf, n);
     free(buf);
 }
 
@@ -5087,6 +5122,9 @@ static Boolean may_quit(void)
     return true;
 }
 
+void ae_go(const char *url) { if (need()) go(url, true, NULL); }
+Boolean ae_quit(void) { return quitting = may_quit(); }
+
 /* ------------------------------------------------------------ bookmarks */
 
 enum { BD_OK = 1, BD_CANCEL, BD_SLOT_LABEL, BD_SLOT, BD_TITLE_LABEL, BD_TITLE, BD_URL_LABEL, BD_URL, BD_RING, BD_LOGIN };
@@ -5388,7 +5426,9 @@ static void refresh_menus(void)
         short i;
         if (br || da) EnableItem(file, FILE_CLOSE); else DisableItem(file, FILE_CLOSE);
         if (br && br->have_page) EnableItem(file, FILE_PRINT); else DisableItem(file, FILE_PRINT);
-        for (i = EDIT_CUT; i <= EDIT_PASTE; i++) if (br || da) EnableItem(edit, i); else DisableItem(edit, i);
+        /* Cut and Paste: not when the page has the keyboard */
+        for (i = EDIT_CUT; i <= EDIT_PASTE; i++)
+            if (da || (br && (i == EDIT_COPY || !(br->focus < -1 || (br == full && br->focus < 0))))) EnableItem(edit, i); else DisableItem(edit, i);
         /* Select All: the address or the field being typed in (a password's text has no selection) */
         if (br && !da && !(br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_PASSWORD)) EnableItem(edit, EDIT_SELECT_ALL); else DisableItem(edit, EDIT_SELECT_ALL);
         MenuHandle view = GetMenuHandle(MENU_VIEW);
@@ -5471,9 +5511,12 @@ static void do_menu(long choice)
             if (item == EDIT_SELECT_ALL && br->have_page) { page_focus(); br->sel_b = br->doc.text_len; draw_view(); }
         }
         else if (br && !(br == full && typing_te() == br->url_te)) {   /* not the hidden address */
+            /* through the Clipboard, so text goes to and comes from other applications
+               (TextEdit's own scrap holds only what was copied here) */
             if (item == EDIT_CUT) TECut(typing_te());
             if (item == EDIT_COPY) TECopy(typing_te());
-            if (item == EDIT_PASTE) TEPaste(typing_te());
+            if (item == EDIT_CUT || item == EDIT_COPY) te_scrap(true);
+            if (item == EDIT_PASTE) { te_scrap(false); TEPaste(typing_te()); }
             if (item == EDIT_SELECT_ALL && !(br->focus >= 0 && br->forms.fields[br->focus].type == FIELD_PASSWORD)) {
                 if (br->focus >= 0) {
                     RgnHandle save = clip_to(&br->focus_clip);
@@ -5991,6 +6034,7 @@ int mill_run(WindowPtr splash)
             TEIdle(br->url_te);
         }
         if (!sys_next_event(&ev, 10)) { if (br) { hover(); status_idle(); refresh_due(); } mem_short(); net_keep_idle(); continue; }
+        if (ev.what == kHighLevelEvent) AEProcessAppleEvent(&ev);   /* System 7's: mac_events.c */
         switch (ev.what) {
         case mouseDown: do_mouse(&ev); break;
         case keyDown: case autoKey: do_key(&ev); break;

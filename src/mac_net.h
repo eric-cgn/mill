@@ -13,10 +13,8 @@ extern short net_ipp;       /* the .IPP driver */
 extern Handle net_dnr;      /* the resolver's code */
 void net_shutdown(void);
 OSErr net_resolve(const char *host, ip_addr *addr);
-/* One ICMP echo to addr: noErr once the reply comes, or icmpEchoTimeoutErr after secs */
-OSErr net_ping(ip_addr addr, short secs);
-/* At startup, when Settings asks: whether the server to ping (a name or an address)
-   answers, saying "Connection check" on the splash (mac_init.c) */
+/* At startup, when Settings asks: whether the name to look up is found, saying
+   "Connection check" on the splash (mac_init.c) */
 Boolean net_check(void);
 
 /* Progress, for the status line ("Looking up host...", "Connecting..."); may be NULL */
@@ -28,6 +26,8 @@ extern Boolean (*net_idle)(void);
 /* How far the last request got, for saying what went wrong */
 enum { NET_LOOKUP, NET_CONNECT, NET_TRANSFER };
 extern int net_stage;
+/* At NET_CONNECT: whether the server refused the connection (a reset), not just didn't answer */
+extern Boolean net_refused;
 
 /* Called with each chunk of a response as it arrives; return false to stop. */
 typedef Boolean (*net_sink)(const char *data, long len, void *ref);
