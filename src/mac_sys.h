@@ -31,6 +31,10 @@ extern Boolean sys_new_sf;      /* StandardGetFile and StandardPutFile */
 extern Boolean sys_find_folder; /* FindFolder, and so a Preferences folder */
 extern Boolean sys_wne;         /* WaitNextEvent (System 7, or MultiFinder on System 6) */
 extern Boolean sys_outlines;    /* TrueType: the Font Manager's outline calls */
+/* Apple Events (mac_events.c): sys_init installs the handlers where System 7 has them */
+void ae_install(void);
+void ae_go(const char *url);    /* mac_main.c: open an address, as Open Location does */
+Boolean ae_quit(void);          /* mac_main.c: quit, as Quit does; false if a form stops it */
 
 /* Like FSMakeFSSpec: name is a file's name in folder dir, or a full path ("Disk:a:b")
    with vref and dir 0. fnfErr means only the file itself doesn't exist (spec is filled). */

@@ -26,5 +26,7 @@ SEGMENT Gzip
 SEGMENT Upload
 *mac_upload.c.obj
 *macenc.c.obj
+SEGMENT Events
+*mac_events.c.obj
 SEGMENT Mill
 *
