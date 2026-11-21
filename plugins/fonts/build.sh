@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the code of Web Fonts with Retro68 (the same pinned image as Mill): build/Web Fonts.flt,
-# a flat code resource. tools/extras/build.py --code puts it in the Web Fonts file as MPlg 128,
+# a flat code resource. tools/webfonts/build.py --code puts it in the Web Fonts file as MPlg 128,
 # with its MIfc (./build.sh disk does both).
 set -e
 cd "$(dirname "$0")"

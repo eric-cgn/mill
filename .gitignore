@@ -4,5 +4,5 @@ dist/
 site/
 build-memreport/
 __pycache__/
-tools/extras/cache/
+tools/webfonts/cache/
 tools/systemdisk/cache/

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-'''Mill Extras: builds "Web Fonts", Mill Serif and Mill Mono for Mill: a font suitcase of bitmaps
+'''Web Fonts: builds "Web Fonts", Mill Serif and Mill Mono for Mill: a font suitcase of bitmaps
 at 9, 10, 12, and 14 point, from Adobe's X11 bitmap fonts (BDF, hand-tuned at each size), their
 outlines for 18 point and up (outlines.py: Tinos, and Bitstream's Courier 10 Pitch), and the
 code that draws them (the Plug-In in plugins/fonts, given with --code). It reads the fonts'
@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import freetype
 import macresources
 
-UA = 'Mill-extras/1.0 (+https://github.com/eric-cgn/mill; font build script)'
+UA = 'Mill-webfonts/1.0 (+https://github.com/eric-cgn/mill; font build script)'
 MAC_EPOCH = 2082844800
 PERIOD = 882921600                            # 1997-12-25: the files' date unless SOURCE_DATE_EPOCH says
 

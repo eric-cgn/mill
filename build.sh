@@ -29,7 +29,7 @@ if [ "${1:-}" = disk ]; then
 	# fontTools makes the outlines, checked by their SHA-256: the image and the packages are pinned
 	docker run --rm -v "$PWD":/src -w /src "$PYIMAGE" sh -c '
 		pip install -q freetype-py==2.5.1 macresources==1.2 fonttools==4.68.0 &&
-		python3 tools/extras/build.py --styles --code "plugins/fonts/build/Web Fonts.flt" --cache build/fontcache --out build/fonts >/dev/null'
+		python3 tools/webfonts/build.py --styles --code "plugins/fonts/build/Web Fonts.flt" --cache build/fontcache --out build/fonts >/dev/null'
 	exec docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src "$IMAGE" python3 tools/disk.py
 fi
 if [ "${1:-}" = installer ]; then

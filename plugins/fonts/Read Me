@@ -2,7 +2,7 @@ Web Fonts code
 
 The Plug-In inside Web Fonts that draws Mill Serif and Mill Mono from 18
 point up, from the outlines Web Fonts carries ('Msfn' resources, listed in
-'Mfnt' 128). tools/extras/build.py puts it in the file as MPlg 128 with its
+'Mfnt' 128). tools/webfonts/build.py puts it in the file as MPlg 128 with its
 MIfc; Web Fonts is never a Plug-In file of its own.
 
 A letter is drawn the first time a page needs it at a size, and kept: up to

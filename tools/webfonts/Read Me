@@ -1,7 +1,7 @@
-Mill Extras
+Web Fonts
 
-Optional files for Mill that need nothing from it, and that it needs nothing from: Mill runs
-the same without them.
+An optional file for Mill that needs nothing from it, and that it needs nothing from: Mill runs
+the same without it.
 
 Web Fonts
   Mill's own fonts, Mill Serif and Mill Mono: a font suitcase (type FFIL, creator MiLL) of their
