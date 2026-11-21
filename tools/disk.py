@@ -6,7 +6,7 @@ folder with the Plug-Ins and Web Fonts that installer/mill.ini's Easy Install pu
 invisible Icon file that gives the disk its windmill icon, and the Desktop file System 6 needs
 on a locked disk (Mini vMac mounts the image locked). Nothing of Apple's. The Plug-In SDK is not
 on it: it is on its own disk (./build.sh kit) and in Install Mill's Custom Install.
-Needs what ./build.sh makes first: build/Mill.bin, build/fonts/ (tools/extras/build.py --styles
+Needs what ./build.sh makes first: build/Mill.bin, build/fonts/ (tools/webfonts/build.py --styles
 --out build/fonts), plugins/internet/build/Internet Services.bin, plugins/smb/build/SMB.bin,
 plugins/nfs/build/NFS.bin, plugins/news/build/News.bin, plugins/ldap/build/LDAP.bin,
 plugins/imap/build/IMAP.bin, plugins/images/build/Image Formats.bin, and
@@ -24,7 +24,7 @@ CAPACITY = 800 * 1024
 
 def part_number(v, disk='DM02'):
     """A Mill disk's part number, which follows Mill's version: #1E6-DM02-V21 for this disk with
-    2.1. disk: DM02, this one; DM03 the Mill Extras Disk; DM04 the Mill Distribution Disk"""
+    2.1. disk: DM02, this one (DM01 is the System Disk; the Millennium Pack's disks are mill-extras')"""
     return '#1E6-%s-V%s' % (disk, re.match(r'\d+(\.\d+)*', v).group(0).replace('.', ''))
 
 
@@ -323,7 +323,7 @@ def main():
         with_bundle_bit(mill, bundled)
         copies = [('Mill', bundled, (b'APPL', b'MiLL'), ':')]
         for name, (parts, ftype) in PLUGINS.items():
-            how = 'tools/extras/build.py --styles --out build/fonts' if name == 'Web Fonts' else '%s/build.sh' % '/'.join(parts[:2])
+            how = 'tools/webfonts/build.py --styles --out build/fonts' if name == 'Web Fonts' else '%s/build.sh' % '/'.join(parts[:2])
             copies.append(('Mill Plug-Ins:' + name, need(os.path.join(root, *parts), how), (ftype, b'MiLL'), ':Mill Plug-Ins:'))
         for name, path, want, where in copies:
             t, c, dlen, rlen = macbinary_fields(path)

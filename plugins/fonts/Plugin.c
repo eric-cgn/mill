@@ -364,7 +364,7 @@ static void fonts_close(MillPlugIn *self)
 
 /* ------------------------------------------------------------ opening */
 
-/* The families from 'Mfnt' 128 (tools/extras/build.py writes it): a count, then for each a
+/* The families from 'Mfnt' 128 (tools/webfonts/build.py writes it): a count, then for each a
    name (a Pascal string in 32 bytes), its smallest and largest size, whether it's fixed, and
    the 'Msfn' IDs of its plain, bold, italic, and bold italic (0: none) */
 static void read_index(Fonts *me, short resFile)
